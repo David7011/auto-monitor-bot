@@ -33,4 +33,5 @@ apps/mobile-android/app/build/
 apps/mobile-android/local.properties
 apps/mobile-android/.signing.env
 **/__pycache__/
+packages/db/src/generated/prisma/
 *.py[cod]

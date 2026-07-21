@@ -163,7 +163,7 @@ try {
   $delaySeconds = $delays[[Math]::Min($failureCount - 1, $delays.Count - 1)]
   $alertSent = $false
   if ($failureCount -ge 3 -and (!$lastAlertAt -or $lastAlertAt -lt (Get-Date).AddMinutes(-30))) {
-    $alertSent = Send-WatchdogAlert "Auto Monitor Bot: сбой #$failureCount ($($failures -join ',')). Выполняю восстановление."
+    $alertSent = Send-WatchdogAlert "Auto Monitor Bot: failure #$failureCount ($($failures -join ',')). Recovery is running."
     if ($alertSent) { $lastAlertAt = Get-Date }
   }
   Write-WatchdogState -FailureCount $failureCount -NextAttemptAt ((Get-Date).AddSeconds($delaySeconds)) -LastAlertAt $lastAlertAt
@@ -181,7 +181,7 @@ try {
     # -Wait would also wait forever for the long-lived Node descendants.
     $restart.WaitForExit()
     if ($restart.ExitCode -ne 0) { throw "autostart-run.ps1 exited with code $($restart.ExitCode)" }
-    if ($alertSent) { Send-WatchdogAlert "Auto Monitor Bot: работа восстановлена." | Out-Null }
+    if ($alertSent) { Send-WatchdogAlert "Auto Monitor Bot: service has recovered." | Out-Null }
     Write-WatchdogState -FailureCount 0 -NextAttemptAt $null -LastAlertAt $null
     Write-WatchdogLog "restart completed"
   } catch {

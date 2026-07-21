@@ -143,6 +143,10 @@ export async function loadSourceSearchState(context: SourceSearchContext): Promi
     newestFirstVerifiedAt: record.newestFirstVerifiedAt ?? undefined,
     lastSuccessfulScanAt: record.lastSuccessfulScanAt ?? undefined,
     nextCheckAt: record.nextCheckAt ?? undefined,
+    lastRegionalCoverageAt: record.lastRegionalCoverageAt ?? undefined,
+    lastHtmlCoverageAt: record.lastHtmlCoverageAt ?? undefined,
+    htmlCoveragePausedUntil: record.htmlCoveragePausedUntil ?? undefined,
+    lastPrivateCoverageAt: record.lastPrivateCoverageAt ?? undefined,
     knownExternalIds: new Set(record.knownExternalIds),
   };
 }
@@ -232,6 +236,12 @@ export async function markSourceSearchSuccess(
     lane?: "REALTIME" | "BACKFILL" | "MANUAL";
     pageCount?: number;
     scannedExternalIds?: string[];
+    coverageStateUpdate?: {
+      lastRegionalCoverageAt?: Date;
+      lastHtmlCoverageAt?: Date;
+      htmlCoveragePausedUntil?: Date | null;
+      lastPrivateCoverageAt?: Date;
+    };
   },
 ): Promise<void> {
   const now = new Date();
@@ -290,6 +300,7 @@ export async function markSourceSearchSuccess(
               realtimeCursor: cursorJson("realtime", now, latestPublishedAt, latestExternalId),
             }),
         newestFirstVerifiedAt,
+        ...options.coverageStateUpdate,
         lastSuccessfulScanAt: now,
         initialSyncCompletedAt: options.initialSyncCompleted
           ? current.initialSyncCompletedAt ?? now

@@ -300,6 +300,18 @@ function Get-PnpmCommand([string[]]$Arguments) {
 }
 
 function Test-PrismaClientGenerated {
+  $prismaSevenClient = Join-Path $ProjectRoot "packages\db\src\generated\prisma\client.ts"
+  if (Test-Path -LiteralPath $prismaSevenClient) {
+    $generatedAt = (Get-Item -LiteralPath $prismaSevenClient).LastWriteTimeUtc
+    $inputs = @(
+      (Join-Path $ProjectRoot "packages\db\prisma\schema.prisma"),
+      (Join-Path $ProjectRoot "packages\db\prisma.config.ts"),
+      (Join-Path $ProjectRoot "pnpm-lock.yaml")
+    )
+    $stale = $inputs | Where-Object { (Test-Path -LiteralPath $_) -and (Get-Item -LiteralPath $_).LastWriteTimeUtc -gt $generatedAt }
+    if (!$stale) { return $true }
+  }
+
   $pnpmRoot = Join-Path $ProjectRoot "node_modules\.pnpm"
   if (!(Test-Path -LiteralPath $pnpmRoot)) { return $false }
 
@@ -372,7 +384,25 @@ function Get-DotEnvValue([string]$Name) {
   return ($line -replace "^\s*$Name\s*=\s*", "").Trim().Trim('"').Trim("'")
 }
 
+function Import-ProjectDotEnv {
+  $envPath = Join-Path $ProjectRoot ".env"
+  if (!(Test-Path -LiteralPath $envPath)) { return }
+  foreach ($line in (Get-Content -LiteralPath $envPath -Encoding UTF8)) {
+    if ($line -notmatch "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$") { continue }
+    $name = $Matches[1]
+    $value = $Matches[2].Trim()
+    if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+        ($value.StartsWith("'") -and $value.EndsWith("'")))) {
+      $value = $value.Substring(1, $value.Length - 2)
+    } else {
+      $value = ($value -replace "\s+#.*$", "").Trim()
+    }
+    [Environment]::SetEnvironmentVariable($name, $value, "Process")
+  }
+}
+
 & $script:NodeExe (Join-Path $PSScriptRoot "ensure-local-secrets.mjs") | Out-Null
+Import-ProjectDotEnv
 $configuredRedisUrl = Get-DotEnvValue "REDIS_URL"
 if ($configuredRedisUrl) {
   try {
@@ -405,6 +435,5 @@ if ($Dev) {
   Start-NodeApp "Dashboard" (Join-Path $ProjectRoot "apps\dashboard") @((Join-Path $ProjectRoot "apps\dashboard\node_modules\next\dist\bin\next"), "start", "-H", "127.0.0.1", "-p", "3001") (Join-Path $LogDir "dashboard.out.log") (Join-Path $LogDir "dashboard.err.log")
 }
 
-Start-Sleep -Seconds 8
-& (Join-Path $PSScriptRoot "status.ps1")
-if ($LASTEXITCODE -ne 0) { throw "Services started but health verification failed" }
+& (Join-Path $PSScriptRoot "wait-core-readiness.ps1") -TimeoutSeconds 90 -StableChecks 2
+if ($LASTEXITCODE -ne 0) { throw "Services started but core readiness verification failed" }

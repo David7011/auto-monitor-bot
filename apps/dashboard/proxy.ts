@@ -4,7 +4,7 @@ import { AUTH_COOKIE_NAME, verifyDashboardSession } from "@/lib/dashboard-auth";
 
 const PUBLIC_PATHS = new Set(["/login", "/api/auth/login", "/api/auth/logout"]);
 
-export async function middleware(request: NextRequest): Promise<NextResponse> {
+export async function proxy(request: NextRequest): Promise<NextResponse> {
   const pathname = request.nextUrl.pathname;
   if (isPublicPath(pathname)) {
     if (pathname === "/login") {

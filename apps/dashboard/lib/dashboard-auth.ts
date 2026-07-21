@@ -55,7 +55,7 @@ export async function verifyDashboardSession(
 }
 
 function dashboardAuthSecret(): string {
-  return (process.env.DASHBOARD_AUTH_SECRET || process.env.LOCAL_API_TOKEN || "").trim();
+  return (process.env.DASHBOARD_AUTH_SECRET || "").trim();
 }
 
 async function hmacSha256(value: string, secret: string): Promise<string> {

@@ -320,13 +320,20 @@ try {
 }
 $signerOutput = (& $apkSigner verify --print-certs $OutputApk 2>&1 | Out-String)
 $signerDigest = [regex]::Match($signerOutput, "Signer #1 certificate SHA-256 digest:\s*([a-fA-F0-9]+)").Groups[1].Value.ToLowerInvariant()
+$aapt = Join-Path $SdkRoot "build-tools\36.0.0\aapt.exe"
+$badgingOutput = (& $aapt dump badging $OutputApk 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "APK manifest inspection failed" }
+$packageMatch = [regex]::Match($badgingOutput, "package:\s+name='[^']+'\s+versionCode='([^']+)'\s+versionName='([^']+)'")
+if (-not $packageMatch.Success) { throw "APK version metadata could not be read from the built manifest" }
+$versionCode = [int]$packageMatch.Groups[1].Value
+$versionName = $packageMatch.Groups[2].Value
 [ordered]@{
   artifact = Split-Path $OutputApk -Leaf
   sha256 = $hash.Hash.ToLowerInvariant()
   sourceFingerprintSha256 = $sourceFingerprint
   signerCertificateSha256 = $signerDigest
-  versionName = "1.2.0"
-  versionCode = 3
+  versionName = $versionName
+  versionCode = $versionCode
   defaultServerUrl = $resolvedServerUrl
   builtAt = (Get-Date).ToUniversalTime().ToString("o")
 } | ConvertTo-Json | Set-Content -LiteralPath $OutputManifest -Encoding UTF8

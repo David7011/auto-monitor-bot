@@ -23,6 +23,19 @@ import {
 import { getMarks, getModels, type TaxonomyOption } from "./vehicle-taxonomy.js";
 import { enqueue } from "../lib/queues.js";
 import { extractGeo, parseQuickFilter } from "./telegram-filter-parser.js";
+import {
+  errorMessage,
+  escapeRegex,
+  formatGeo,
+  formatList,
+  formatRange,
+  freshnessLabel,
+  monitoringModeLabel,
+  monitoringStatusLabel,
+  shorten,
+  sourceLabel,
+  translateApiError,
+} from "./telegram-control-format.js";
 
 type ControlCommand = "panel" | "status" | "live" | "start" | "standard" | "stop" | "scan" | "sources_on" | "sources_off";
 
@@ -1218,103 +1231,6 @@ function isAllowedChat(chatId: number | string): boolean {
 
 function trimTelegramMessage(text: string): string {
   return text.length <= 3900 ? text : `${text.slice(0, 3890)}\n...`;
-}
-
-function formatList(values: readonly string[]): string {
-  return values.length > 0 ? values.join(", ") : "-";
-}
-
-function formatRange(from: number | null, to: number | null, prefix = ""): string {
-  if (from == null && to == null) return "любой";
-  if (from != null && to != null && from === to) return `${prefix}${from}`;
-  if (from != null && to != null) return `${prefix}${from}-${prefix}${to}`;
-  if (from != null) return `от ${prefix}${from}`;
-  return `до ${prefix}${to}`;
-}
-
-function formatGeo(filter: Pick<Filter, "regions" | "cities">): string {
-  const cityNames = filter.cities.map((id) => getCityById(id)?.nameRu ?? id);
-  const regionNames = filter.regions.map((id) => getRegionById(id)?.nameRu ?? id);
-  const values = [...cityNames, ...regionNames];
-  return values.length > 0 ? values.join(", ") : "вся Украина";
-}
-
-function sourceLabel(source: string): string {
-  switch (source) {
-    case "AUTO_RIA":
-      return "AUTO.RIA";
-    case "OLX":
-      return "OLX";
-    case "RST":
-      return "RST";
-    case "CARS_UA":
-      return "Cars.ua";
-    case "AUTOMOTO":
-      return "AutoMoto.ua";
-    case "MOCK":
-      return "Тестовый";
-    default:
-      return source;
-  }
-}
-
-function monitoringStatusLabel(status: string): string {
-  switch (status) {
-    case "RUNNING":
-      return "работает";
-    case "STOPPED":
-      return "остановлен";
-    case "STARTING":
-      return "запускается";
-    case "PAUSED":
-      return "пауза";
-    case "ERROR":
-      return "ошибка";
-    case "RATE_LIMITED":
-      return "лимит";
-    case "CAPTCHA_DETECTED":
-      return "капча";
-    default:
-      return status.toLowerCase();
-  }
-}
-
-function monitoringModeLabel(mode: string): string {
-  return mode === "LIVE" ? "боевой" : "обычный";
-}
-
-function freshnessLabel(value: string): string {
-  switch (value) {
-    case "LAST_HOUR":
-      return "последний час";
-    case "TODAY":
-      return "сегодня";
-    case "LAST_24_HOURS":
-      return "24 часа";
-    case "ALL_TIME":
-      return "все время";
-    default:
-      return value.toLowerCase();
-  }
-}
-
-function translateApiError(value: string): string {
-  if (value === "Manual source check is disabled while monitoring is stopped") {
-    return "Ручной скан запрещен, пока мониторинг остановлен.";
-  }
-  return value;
-}
-
-function shorten(value: string, limit: number): string {
-  return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 function sleep(ms: number): Promise<void> {

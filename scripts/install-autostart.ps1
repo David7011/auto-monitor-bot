@@ -9,11 +9,15 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $StartScript = Join-Path $ProjectRoot "scripts\start.ps1"
 $AutostartScript = Join-Path $ProjectRoot "scripts\autostart-run.ps1"
 $AutostartLauncher = Join-Path $ProjectRoot "scripts\autostart-run.cmd"
+$SupervisorScript = Join-Path $ProjectRoot "scripts\supervisor.ps1"
+$SupervisorLauncher = Join-Path $ProjectRoot "scripts\supervisor.cmd"
 $WatchdogScript = Join-Path $ProjectRoot "scripts\watchdog.ps1"
 $WatchdogLauncher = Join-Path $ProjectRoot "scripts\watchdog.cmd"
 $WatchdogTaskName = "$TaskName Watchdog"
 $BackupLauncher = Join-Path $ProjectRoot "scripts\backup-database.cmd"
 $BackupTaskName = "$TaskName Database Backup"
+$RestoreDrillLauncher = Join-Path $ProjectRoot "scripts\test-database-restore.cmd"
+$RestoreDrillTaskName = "$TaskName Database Restore Drill"
 $LogDir = Join-Path $ProjectRoot ".runtime\logs"
 
 if (!(Test-Path $StartScript)) {
@@ -25,6 +29,12 @@ if (!(Test-Path $AutostartScript)) {
 if (!(Test-Path $AutostartLauncher)) {
   throw "Autostart launcher not found: $AutostartLauncher"
 }
+if (!(Test-Path $SupervisorScript)) {
+  throw "Supervisor script not found: $SupervisorScript"
+}
+if (!(Test-Path $SupervisorLauncher)) {
+  throw "Supervisor launcher not found: $SupervisorLauncher"
+}
 if (!(Test-Path $WatchdogScript)) {
   throw "Watchdog script not found: $WatchdogScript"
 }
@@ -33,6 +43,9 @@ if (!(Test-Path $WatchdogLauncher)) {
 }
 if (!(Test-Path $BackupLauncher)) {
   throw "Database backup launcher not found: $BackupLauncher"
+}
+if (!(Test-Path $RestoreDrillLauncher)) {
+  throw "Database restore-drill launcher not found: $RestoreDrillLauncher"
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -62,7 +75,7 @@ function Assert-SecureProjectAcl {
 Assert-SecureProjectAcl
 $action = New-ScheduledTaskAction `
   -Execute "$env:SystemRoot\System32\cmd.exe" `
-  -Argument "/d /s /c `"`"$AutostartLauncher`"`"" `
+  -Argument "/d /s /c `"`"$SupervisorLauncher`"`"" `
   -WorkingDirectory $ProjectRoot
 
 $triggers = @()
@@ -96,7 +109,21 @@ try {
     -Trigger $triggers `
     -Principal $principal `
     -Settings $settings `
-    -Description "Starts Auto Monitor Bot from $ProjectRoot at Windows startup before user logon." `
+    -Description "Keeps Auto Monitor Bot running from Windows startup until shutdown and recovers failed processes." `
+    -Force | Out-Null
+
+  $restoreDrillAction = New-ScheduledTaskAction `
+    -Execute "$env:SystemRoot\System32\cmd.exe" `
+    -Argument "/d /s /c `"`"$RestoreDrillLauncher`"`"" `
+    -WorkingDirectory $ProjectRoot
+  $restoreDrillTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "04:00"
+  Register-ScheduledTask `
+    -TaskName $RestoreDrillTaskName `
+    -Action $restoreDrillAction `
+    -Trigger $restoreDrillTrigger `
+    -Principal $principal `
+    -Settings $settings `
+    -Description "Restores the newest encrypted backup into an isolated temporary database and validates it weekly." `
     -Force | Out-Null
 
   $backupAction = New-ScheduledTaskAction `
@@ -138,6 +165,7 @@ try {
 Write-Host "Installed scheduled task: $TaskName"
 Write-Host "Installed scheduled task: $WatchdogTaskName"
 Write-Host "Installed scheduled task: $BackupTaskName"
+Write-Host "Installed scheduled task: $RestoreDrillTaskName"
 $triggerMode = if ($LogonOnly) {
   "any-user logon trigger"
 } elseif ($StartupOnly) {

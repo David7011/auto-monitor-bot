@@ -1,6 +1,6 @@
 {
   "name": "auto-monitor-bot",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "packageManager": "pnpm@10.0.0",
   "workspaces": [
@@ -10,7 +10,8 @@
   "pnpm": {
     "overrides": {
       "postcss": "8.5.21",
-      "shell-quote": "1.9.0"
+      "shell-quote": "1.9.0",
+      "sharp": "0.35.0"
     }
   },
   "scripts": {
@@ -40,7 +41,7 @@
     "clean:dashboard": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$paths=@('apps/dashboard/.next','apps/dashboard/tsconfig.tsbuildinfo'); foreach($p in $paths){ if(Test-Path $p){ Remove-Item -LiteralPath $p -Recurse -Force } }\"",
     "rebuild": "pnpm clean && pnpm build",
     "build": "pnpm -r --if-present build",
-    "check": "pnpm db:validate && pnpm typecheck && pnpm lint && pnpm test:powershell && pnpm test && pnpm build",
+    "check": "pnpm db:validate && pnpm db:generate && pnpm typecheck && pnpm lint && pnpm test:powershell && pnpm test && pnpm build",
     "check:full": "pnpm check && pnpm android:check",
     "browser:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/playwright.ps1 -Install",
     "test:e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/playwright.ps1",
@@ -53,20 +54,25 @@
     "db:studio": "pnpm --filter @amb/db db:studio",
     "db:validate": "pnpm --filter @amb/db db:validate",
     "db:backup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-database.ps1 -Force",
+    "db:restore:test": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-database-restore.ps1",
+    "maintenance:retention": "pnpm --filter @amb/worker maintenance:retention",
+    "maintenance:cleanup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cleanup-generated-files.ps1",
+    "test:olx-parity": "pnpm --filter @amb/worker test:olx-parity",
     "audit:prod": "pnpm audit --prod --audit-level high",
     "lint": "eslint .",
     "test": "vitest run",
     "test:powershell": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-powershell.ps1",
+    "test:recovery": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-supervisor-recovery.ps1",
     "typecheck": "pnpm -r --no-bail --if-present typecheck"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@next/eslint-plugin-next": "^16.2.10",
+    "@next/eslint-plugin-next": "^16.2.11",
     "@playwright/test": "1.61.1",
-    "concurrently": "^9.1.2",
+    "concurrently": "^9.2.4",
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
-    "next": "^15.1.6",
+    "next": "^16.2.11",
     "typescript": "5.7.3",
     "typescript-eslint": "^8.65.0",
     "vitest": "3.2.6"

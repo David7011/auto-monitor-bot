@@ -64,6 +64,7 @@ try {
 
   $databaseUrl = Get-DotEnvValue "DATABASE_URL"
   $password = Get-DotEnvValue "BACKUP_ENCRYPTION_PASSWORD"
+  $mirrorRoot = Get-DotEnvValue "BACKUP_MIRROR_PATH"
   if (!$databaseUrl) { throw "DATABASE_URL is missing" }
   if ($password.Length -lt 32) { throw "BACKUP_ENCRYPTION_PASSWORD must contain at least 32 characters" }
   if (!(Test-Path -LiteralPath $SevenZip)) { throw "7-Zip is required for encrypted backups: $SevenZip" }
@@ -114,6 +115,30 @@ try {
       encryption = "7z AES-256 with encrypted headers"
       validation = "pg_restore --list and 7z test passed"
     } | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
+
+    if ($mirrorRoot) {
+      $mirrorFullPath = [System.IO.Path]::GetFullPath($mirrorRoot)
+      $backupVolume = [System.IO.Path]::GetPathRoot($BackupRoot)
+      $mirrorVolume = [System.IO.Path]::GetPathRoot($mirrorFullPath)
+      if ($backupVolume -and $mirrorVolume -and $backupVolume.Equals($mirrorVolume, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "BACKUP_MIRROR_PATH must be on a different volume or UNC destination"
+      }
+      New-Item -ItemType Directory -Force -Path $mirrorFullPath | Out-Null
+      foreach ($item in @($archivePath, $hashPath, $metadataPath)) {
+        Copy-Item -LiteralPath $item -Destination (Join-Path $mirrorFullPath ([IO.Path]::GetFileName($item))) -Force
+      }
+      $mirrorCutoff = (Get-Date).AddDays(-[Math]::Max(1, $RetentionDays))
+      Get-ChildItem -LiteralPath $mirrorFullPath -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^database-\d{8}-\d{6}\.7z(?:\.sha256|\.json)?$' -and $_.LastWriteTime -lt $mirrorCutoff } |
+        ForEach-Object {
+          $resolvedMirrorItem = [System.IO.Path]::GetFullPath($_.FullName)
+          $mirrorPrefix = $mirrorFullPath.TrimEnd('\') + '\'
+          if (!$resolvedMirrorItem.StartsWith($mirrorPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove a path outside the mirror directory: $resolvedMirrorItem"
+          }
+          Remove-Item -LiteralPath $resolvedMirrorItem -Force
+        }
+    }
   } finally {
     $env:PGPASSWORD = $previousPassword
     Remove-BackupItem $dumpPath

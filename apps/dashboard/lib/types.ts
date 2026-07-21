@@ -26,6 +26,10 @@ export type SourceRow = {
   supportsNewestFirst: boolean
   newestFirstVerified: boolean
   newestFirstVerifiedAt: string | null
+  lastRegionalCoverageAt: string | null
+  lastHtmlCoverageAt: string | null
+  htmlCoveragePausedUntil: string | null
+  lastPrivateCoverageAt: string | null
   initialSyncCompletedAt: string | null
   intervalSeconds: number
   lastCheckedAt: string | null
@@ -278,6 +282,9 @@ export type ErrorLogRow = {
   scope: string
   message: string
   details: string | null
+  occurrences: number
+  firstSeenAt: string
+  lastSeenAt: string
   createdAt: string
 }
 
@@ -442,5 +449,6 @@ export type SearchPlanRow = {
     durationMs: number | null
     errorMessage: string | null
     finishedAt: string | null
+    coverageMetrics: unknown
   } | null
 }

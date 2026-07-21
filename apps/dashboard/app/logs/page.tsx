@@ -25,7 +25,7 @@ export default function LogsPage() {
 
   const counts = useMemo(() => {
     const c = { INFO: 0, WARN: 0, ERROR: 0 }
-    for (const log of logs) c[log.level] = (c[log.level] ?? 0) + 1
+    for (const log of logs) c[log.level] = (c[log.level] ?? 0) + log.occurrences
     return c
   }, [logs])
 
@@ -63,8 +63,9 @@ export default function LogsPage() {
             <div key={log.id} className={cn("rounded-lg border border-l-2 border-line bg-surface-1/50 p-3", LEVEL_ACCENT[log.level] ?? "border-l-line")}>
               <div className="flex flex-wrap items-center gap-2">
                 <StatusBadge status={log.level} />
-                <span className="num font-mono text-xs text-muted">{formatDateTime(log.createdAt)}</span>
+                <span className="num font-mono text-xs text-muted">{formatDateTime(log.lastSeenAt)}</span>
                 <span className="font-mono text-xs text-accent-soft">{log.scope}</span>
+                {log.occurrences > 1 ? <span className="rounded border border-line px-1.5 py-0.5 font-mono text-[10px] text-warning">×{log.occurrences}</span> : null}
               </div>
               <div className="mt-2 text-sm text-foreground">{log.message}</div>
               {log.details ? (

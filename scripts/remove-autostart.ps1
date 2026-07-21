@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$taskNames = @($TaskName, "$TaskName Watchdog", "$TaskName Database Backup")
+$taskNames = @($TaskName, "$TaskName Watchdog", "$TaskName Database Backup", "$TaskName Database Restore Drill")
 foreach ($name in $taskNames) {
   $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
   if (!$task) {

@@ -18,8 +18,8 @@ android {
         applicationId = "com.dneprdavid.automonitor"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
         buildConfigField "String", "DEFAULT_SERVER_URL", "\"${defaultServerUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\""
         buildConfigField "String", "LAN_SERVER_URL", "\"${lanServerUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\""
     }

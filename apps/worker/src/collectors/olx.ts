@@ -41,6 +41,7 @@ import {
   type OlxLocationScope,
 } from "./olx-geo.js";
 import { currentUsdExchangeRate } from "../modules/exchange-rate.js";
+import { olxCoverageSchedule } from "./olx-coverage.js";
 
 type OlxParam = {
   key: string;
@@ -119,9 +120,6 @@ type OlxFeedResult =
 
 const OLX_CATEGORY_ID = 108;
 const OLX_FEED_REFERER = "https://www.olx.ua/uk/transport/legkovye-avtomobili/";
-let lastCoverageScanAt = 0;
-let lastHtmlCoverageScanAt = 0;
-let htmlCoveragePausedUntil = 0;
 
 export class OlxCollector implements SourceCollector {
   readonly source = "OLX" as const;
@@ -141,10 +139,28 @@ export class OlxCollector implements SourceCollector {
     const resolvedLocations = await resolveOlxLocationScopes(context);
     semanticWarnings.push(...resolvedLocations.warnings);
     const isBackfill = scan.lane === "BACKFILL";
-    const coverageDue = !isBackfill && context.regions.length > 0 &&
-      Date.now() - lastCoverageScanAt >= Math.max(15, env.OLX_COVERAGE_INTERVAL_SECONDS) * 1000;
-    const htmlCoverageDue = !isBackfill && Date.now() >= htmlCoveragePausedUntil &&
-      Date.now() - lastHtmlCoverageScanAt >= Math.max(30, env.OLX_HTML_COVERAGE_INTERVAL_SECONDS) * 1000;
+    const coverageSchedule = olxCoverageSchedule({
+      now,
+      state,
+      isBackfill,
+      hasRegionalFilters: context.regions.length > 0,
+      regionalIntervalSeconds: env.OLX_COVERAGE_INTERVAL_SECONDS,
+      htmlIntervalSeconds: env.OLX_HTML_COVERAGE_INTERVAL_SECONDS,
+      privateIntervalSeconds: env.OLX_PRIVATE_COVERAGE_INTERVAL_SECONDS,
+    });
+    const coverageDue = coverageSchedule.regionalDue;
+    const htmlCoverageDue = coverageSchedule.htmlDue;
+    const privateCoverageDue = coverageSchedule.privateDue && !env.OLX_PRIVATE_FEED_ENABLED;
+    let lastRegionalCoverageAt: Date | undefined;
+    let lastHtmlCoverageAt: Date | undefined;
+    let htmlCoveragePausedUntil: Date | null | undefined;
+    let lastPrivateCoverageAt: Date | undefined;
+    const fastObservedIds = new Set<string>();
+    const htmlObservedIds = new Set<string>();
+    const privateObservedIds = new Set<string>();
+    let fastFeedRequests = 0;
+    let htmlFeedRequests = 0;
+    let privateFeedRequests = 0;
     const activeScopes = isBackfill || coverageDue
       ? uniqueLocationScopes([...resolvedLocations.scopes, ...regionalCoverageScopes(context)])
       : resolvedLocations.scopes;
@@ -180,6 +196,10 @@ export class OlxCollector implements SourceCollector {
       const feedResults: OlxFeedResult[] = await Promise.all(
         feedTargets.map((target, index) => fetchOlxFeed(target.apiUrl, target.htmlUrl, index === 0)),
       );
+      fastFeedRequests += feedTargets.length;
+      for (const result of feedResults) {
+        if (isAdsResult(result)) for (const ad of result.ads) fastObservedIds.add(String(ad.id));
+      }
       requestCount += feedResults.reduce((total, result) => total + result.requestCount, 0);
       const primaryBlocked = feedResults.find(isPrimaryBlockedResult);
       if (primaryBlocked) {
@@ -199,21 +219,27 @@ export class OlxCollector implements SourceCollector {
       // merge the exact-city HTML feeds. This closes that blind spot without
       // adding browser automation or increasing the high-frequency request rate.
       if (page === 1 && htmlCoverageDue) {
-        lastHtmlCoverageScanAt = Date.now();
+        lastHtmlCoverageAt = now;
         const htmlTargets = olxFeedTargets(context, 1, resolvedLocations.scopes);
         const htmlResults = await Promise.all(
           htmlTargets.map((target) => fetchOlxHtmlFeed(target.htmlUrl, false)),
         );
         requestCount += htmlResults.reduce((total, result) => total + result.requestCount, 0);
+        htmlFeedRequests += htmlTargets.length;
+        for (const result of htmlResults) {
+          if (isAdsResult(result)) for (const ad of result.ads) htmlObservedIds.add(String(ad.id));
+        }
         const htmlBlocked = htmlResults.find(isBlockedResult);
         if (htmlBlocked) {
           const pauseSeconds = htmlBlocked.blocked.captchaDetected
             ? Math.max(60, env.CAPTCHA_PAUSE_SECONDS)
             : Math.max(30, env.RATE_LIMIT_PAUSE_BASE_SECONDS);
-          htmlCoveragePausedUntil = Date.now() + pauseSeconds * 1000;
+          htmlCoveragePausedUntil = new Date(now.getTime() + pauseSeconds * 1000);
           semanticWarnings.push(
             `OLX HTML-сверка приостановлена на ${pauseSeconds} с; основной быстрый API-канал продолжает работу`,
           );
+        } else {
+          htmlCoveragePausedUntil = null;
         }
         const hydration = await hydrateHtmlCardOnlyAds(htmlResults, state, scan.deadlineAt);
         requestCount += hydration.requestCount;
@@ -223,6 +249,26 @@ export class OlxCollector implements SourceCollector {
           );
         }
         feedResults.push(...htmlResults.filter((result) => !isBlockedResult(result)));
+      }
+
+      // The owner-filtered feed is a low-frequency shadow lane. It is not part
+      // of the four-second hot path, but catches temporary index differences
+      // without doubling every realtime scan or provoking protection pages.
+      if (page === 1 && privateCoverageDue) {
+        lastPrivateCoverageAt = now;
+        const privateTargets = buildOlxFeedTargets(context, 1, resolvedLocations.scopes, {
+          pageSize: olxApiPageSize(),
+          includePrivateFeed: true,
+        }).filter((target) => target.privateOnly);
+        const privateResults = await Promise.all(
+          privateTargets.map((target) => fetchOlxApiFeed(target.apiUrl, false)),
+        );
+        privateFeedRequests += privateTargets.length;
+        requestCount += privateResults.reduce((total, result) => total + result.requestCount, 0);
+        for (const result of privateResults) {
+          if (isAdsResult(result)) for (const ad of result.ads) privateObservedIds.add(String(ad.id));
+        }
+        feedResults.push(...privateResults);
       }
 
       const successfulFeeds = feedResults.filter(isAdsResult);
@@ -246,7 +292,7 @@ export class OlxCollector implements SourceCollector {
           .join("; ");
         throw new Error(errors ? `OLX search failed: ${errors}` : "OLX search failed: no feeds returned listings");
       }
-      if (coverageDue && page === 1) lastCoverageScanAt = Date.now();
+      if (coverageDue && page === 1) lastRegionalCoverageAt = now;
 
       const secondaryBlockedFeeds = feedResults.filter((result) => !result.primary && isBlockedResult(result));
       if (secondaryBlockedFeeds.length > 0) {
@@ -341,6 +387,26 @@ export class OlxCollector implements SourceCollector {
       limited: Boolean(degradedReason),
       limitedReason: degradedReason,
       coverageGap: !isBackfill && !anchored && state.knownExternalIds.size > 0 && observedCount > 0,
+      coverageStateUpdate: {
+        lastRegionalCoverageAt,
+        lastHtmlCoverageAt,
+        htmlCoveragePausedUntil,
+        lastPrivateCoverageAt,
+      },
+      coverageMetrics: {
+        fingerprint: context.fingerprint,
+        regionalDue: coverageSchedule.regionalDue,
+        htmlDue: coverageSchedule.htmlDue,
+        privateDue: privateCoverageDue,
+        fastFeedRequests,
+        htmlFeedRequests,
+        privateFeedRequests,
+        fastObserved: fastObservedIds.size,
+        htmlObserved: htmlObservedIds.size,
+        htmlOnlyObserved: [...htmlObservedIds].filter((id) => !fastObservedIds.has(id)).length,
+        privateObserved: privateObservedIds.size,
+        privateOnlyObserved: [...privateObservedIds].filter((id) => !fastObservedIds.has(id)).length,
+      },
     };
   }
 }

@@ -64,8 +64,13 @@ try {
     Get-ScheduledTask -TaskName "Auto Monitor Bot" -ErrorAction Stop
     Get-ScheduledTask -TaskName "Auto Monitor Bot Watchdog" -ErrorAction Stop
     Get-ScheduledTask -TaskName "Auto Monitor Bot Database Backup" -ErrorAction Stop
+    Get-ScheduledTask -TaskName "Auto Monitor Bot Database Restore Drill" -ErrorAction Stop
   )
   $tasks | Select-Object TaskName, State | Format-Table -AutoSize
+  $supervisorProcess = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like "*scripts\supervisor.ps1*" } |
+    Select-Object -First 1
+  Write-Host "Supervisor active: $([bool]$supervisorProcess)"
 } catch {
   Write-Host "Not installed"
 }

@@ -1,28 +1,39 @@
 # План апгрейда Auto Monitor Bot
 
-Статус на 21.07.2026: основной этап 0.3.0 выполнен.
+Статус на 22.07.2026: этап 0.4.0 выполнен и переведён в live.
 
 ## Выполнено
 
-1. Исправлена полнота OLX: promoted/old карточка больше не создаёт ложный cutoff, overlap требует достоверного известного хвоста, ошибки фида и переполнение кандидатов не фиксируют ложное завершение.
-2. Сохранён быстрый OLX-контур 4 ± 1 секунды; безопасно классифицированные ID теперь сокращают обычный проход с 5 страниц/10 запросов до 1 страницы/2 запросов, а adaptive pagination и глубокий backfill остаются страховкой всплесков.
-3. Добавлены per-source health и latency, корректная cursor pagination и строгая query validation.
-4. Вход Dashboard переведён на Redis rate limit; BFF передаёт хешированный client fingerprint.
-5. Расширена SSRF-защита IPv4/IPv6.
-6. Исправлены Telegram retry/backoff и подавление повторяющегося outage-log.
-7. Node, Android command-line tools, Microsoft OpenJDK и Gradle закреплены по версиям и SHA-256.
-8. Добавлены проверяемые зашифрованные бэкапы PostgreSQL и ежедневная задача Windows.
-9. ACL проекта закрыт для посторонней записи; установщик автозапуска проверяет права до регистрации `SYSTEM`-задачи.
-10. Автозапуск оставлен только при загрузке Windows; повторный restart при входе пользователя удалён. Watchdog отличает падение worker от внешнего сбоя источника.
-11. CI actions закреплены по SHA, добавлены Windows quality, migration smoke, Dashboard E2E, CodeQL и Dependabot.
-12. E2E больше не пропускается без ручных credentials: используется временный пользователь с обязательным cleanup, а код возврата Playwright сохраняется.
-13. Удалены приватные проектные ZIP-архивы; упаковка с секретами запрещена.
-14. Выполнена консервативная очистка системного диска без удаления пользовательских документов и профилей приложений.
+1. Windows lifecycle переведён на долгоживущий `SYSTEM`-supervisor с boot+logon triggers, стабильной readiness-проверкой, коалесингом запусков, отдельными журналами попыток и минутным watchdog.
+2. Fast Startup/гибернация отключены. Включение ноутбука гарантированно даёт полный boot, сон S3 сохранён, C: получил около 6,1 ГБ свободного места.
+3. OLX hot path сохранён на 4 ± 1 секунде. HTML, regional и private shadow coverage вынесены в низкочастотные независимые lanes с per-fingerprint состоянием в PostgreSQL.
+4. Добавлены структурированные OLX coverage metrics и прямой parity test. Финальная контрольная сверка: 213 из 213 доступных ID уже присутствовали в search state/journal; private lane обнаружил 47 дополнительных к fast-feed ID, HTML lane — ещё 3.
+5. Observation replay, coverage-gap backfill, candidate overflow guard и безопасные cutoff/anchor правила сохранены; CAPTCHA обход не добавлялся.
+6. База получила почасовые агрегаты старых collector runs, дедупликацию error log со счётчиками и транзакционную очистку legacy/orphan данных.
+7. Backup получил optional mirror на другой том/UNC, реальный restore drill и еженедельную задачу. Проверено восстановление 2 фильтров и 942 объявлений во временную БД.
+8. Dashboard session отделён от API token. Журнал показывает occurrence count и сортируется по последнему повтору.
+9. Next.js обновлён 15 → 16.2.11 без build warnings; Prisma 6 → 7.9.0 с PostgreSQL driver adapter. Safe patch-зависимости обновлены.
+10. OLX coverage scheduler и Telegram formatting выделены из крупных модулей. Добавлены тесты fingerprint scheduling, auth-secret isolation и error-log fingerprint.
+11. Установлены и проверены четыре Windows-задачи: supervisor, watchdog, daily backup, weekly restore drill.
+12. Добавлены fault-injection recovery, OLX parity, database restore и safe cleanup commands.
+13. Финальный fault-injection подтвердил автоматическое восстановление принудительно завершённого API за 44 секунды.
 
-## Следующий отдельный этап
+## Внешние ограничения
 
-- Одноразово включить Tailscale HTTPS и после этого запретить cleartext на уровне Android manifest.
-- Выполнить контролируемые major-миграции Prisma 6 → 7 и Next.js 15 → актуальную поддерживаемую ветку с отдельным regression window.
-- При необходимости заменить HTML-сбор RST на официальный/договорной API: CAPTCHA нельзя надёжно устранить локальным кодом.
-- Добавить внешний независимый inventory oracle для количественного сравнения покрытия OLX. Без второго доверенного источника абсолютная гарантия отсутствия пропусков математически непроверяема.
-- Разделить наиболее крупные API/worker/UI-модули на меньшие доменные компоненты без изменения поведения.
+- OLX не предоставляет проекту договорной event stream, поэтому код не может доказать наличие объявления, которое сама доступная выдача ещё не показывает. Максимально возможная проверка выполняется через API, exact-city HTML, regional и private lanes.
+- Tailscale HTTPS проверен, но аккаунт возвращает `your Tailscale account does not support getting TLS certs`. До изменения внешней настройки остаётся tailnet-only TCP, защищённый WireGuard.
+- RST периодически показывает CAPTCHA. Проект корректно ставит cooldown и не усиливает блокировку агрессивными повторами.
+- Локальный single-host остаётся недоступен при выключенном/физически неисправном ноутбуке. Для защиты от поломки всего диска нужно указать внешний `BACKUP_MIRROR_PATH`.
+- GitHub remote не подключён, поэтому подготовленные CI workflows нельзя подтвердить запуском GitHub-hosted runner из этого компьютера.
+
+## Команды приёмки
+
+```powershell
+.\amb.cmd check:full
+.\amb.cmd test:e2e
+.\amb.cmd audit:prod
+.\amb.cmd db:restore:test
+.\amb.cmd test:recovery
+.\amb.cmd test:olx-parity
+.\amb.cmd local:status
+```

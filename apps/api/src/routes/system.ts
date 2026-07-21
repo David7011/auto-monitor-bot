@@ -148,7 +148,7 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
     const level = req.query.level;
     const rows = await prisma.errorLog.findMany({
       where: level && ["INFO", "WARN", "ERROR"].includes(level) ? { level: level as "INFO" | "WARN" | "ERROR" } : undefined,
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      orderBy: [{ lastSeenAt: "desc" }, { id: "desc" }],
       take: limit + 1,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     });

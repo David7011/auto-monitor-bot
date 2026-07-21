@@ -97,6 +97,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
   let duplicateCount = 0;
   let dispatchedCount = 0;
   const semanticWarnings = new Set<string>();
+  const coverageMetrics: Array<Record<string, string | number | boolean | null>> = [];
 
   try {
     const contexts = await buildSourceSearchPlan(source);
@@ -139,6 +140,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       requestCount += result.requestCount ?? 0;
       observedCount += result.observedCount ?? collectedListings.length;
       for (const warning of result.semanticWarnings ?? []) semanticWarnings.add(warning);
+      if (result.coverageMetrics) coverageMetrics.push(result.coverageMetrics);
 
       const staleAfterCollect = await scheduledJobState(job);
       if (staleAfterCollect.stale) {
@@ -261,6 +263,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         lane,
         pageCount: result.pageCount,
         scannedExternalIds: result.scannedExternalIds,
+        coverageStateUpdate: result.coverageStateUpdate,
       });
       if (lane === "REALTIME" && result.coverageGap) {
         await enqueue(
@@ -319,6 +322,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       duplicateCount,
       dispatchedCount,
       semanticWarnings,
+      coverageMetrics,
       errorMessage: limited ? limitedReason : null,
     });
 
@@ -622,6 +626,7 @@ async function finishRun(
     duplicateCount?: number;
     dispatchedCount?: number;
     semanticWarnings: Set<string>;
+    coverageMetrics?: Array<Record<string, string | number | boolean | null>>;
     errorMessage?: string | null;
   },
 ): Promise<void> {
@@ -641,6 +646,7 @@ async function finishRun(
       duplicateCount: input.duplicateCount ?? 0,
       dispatchedCount: input.dispatchedCount ?? 0,
       semanticWarnings: [...input.semanticWarnings].slice(0, 20),
+      coverageMetrics: input.coverageMetrics?.slice(0, 20) ?? undefined,
       errorMessage: input.errorMessage ?? null,
     },
   });

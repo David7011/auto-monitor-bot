@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-07-22 v0.4.0 — автономный supervisor, доказуемое покрытие OLX и platform upgrade
+
+- Одноразовый boot launcher заменён долгоживущим `SYSTEM`-супервизором: он проверяет критическую готовность, устраняет ложный провал фиксированных «8 секунд» и автоматически восстанавливает процессы. Задачи запускаются при boot и logon, а файловые lock-и безопасно объединяют дубли.
+- Fast Startup/гибернация отключены: следующий запуск ноутбука является настоящей загрузкой Windows, а на C: освобождено около 6,1 ГБ. Сон S3 сохранён.
+- OLX HTML, regional и owner/private coverage получили независимые per-fingerprint интервалы и паузы в PostgreSQL. Private shadow не удваивает четырёхсекундный hot path; каждый `CollectorRun` хранит структурированные метрики каналов.
+- Добавлен прямой parity-тест OLX. Финальный контрольный прогон подтвердил 213/213 ID; owner/private lane дал 47 ID, а HTML lane ещё 3 ID, отсутствовавших в текущей fast-выдаче, но уже известных системе.
+- Ошибки дедуплицируются по fingerprint со счётчиками и первым/последним временем. 19 352 исторических события сведены в 1 252 записи без потери количества повторов.
+- Collector runs старше 7 дней сначала агрегируются почасово. При первом maintenance 18 827 запусков сведены в 174 агрегата; legacy observations без snapshot и orphan search state очищаются транзакционно.
+- Бэкап получил optional mirror на другой том/UNC. Добавлен реальный restore drill во временную БД и еженедельная `SYSTEM`-задача; тест восстановил 2 фильтра и 942 объявления.
+- Next.js обновлён до 16.2.11: `middleware` мигрирован на `proxy`, Turbopack production build проходит без предупреждений. Prisma обновлён до 7.9.0 с `prisma-client`, `prisma.config.ts` и PostgreSQL driver adapter.
+- Dashboard session больше не использует `LOCAL_API_TOKEN` как fallback; журналы показывают дедуплицированные occurrence count.
+- Безопасные patch-релизы зависимостей обновлены; production audit, TypeScript, lint, unit/integration, E2E, Android и runtime recovery проверяются полным набором команд.
+- Fault injection подтвердил восстановление принудительно завершённого API новым supervisor за 44 секунды.
+- Android release metadata теперь читается из фактически собранного APK, поэтому JSON-манифест не может остаться на старой версии при обновлении `build.gradle`.
+- Tailscale HTTPS был проверен, но аккаунт отвечает `account does not support getting TLS certs`; сохранён приватный TCP внутри WireGuard tailnet без публичного firewall-порта.
+
 ## 2026-07-21 v0.3.0 — полнота OLX, hardening и автономная эксплуатация
 
 - OLX pagination больше не останавливается на одиночной старой/promoted карточке; cutoff и overlap фиксируются только при доказанной границе, а ошибки фида и candidate overflow не создают ложный успех. Безопасно классифицированные ID сохраняются в cursor-state: штатный цикл сокращён с 5 страниц/10 запросов/~2,6 с до 1 страницы/2 запросов/~0,5 с.

@@ -114,6 +114,7 @@ function buildPlanRow({
     startedAt: Date;
     errorMessage: string | null;
     finishedAt: Date | null;
+    coverageMetrics: unknown;
   } | null;
 }) {
   const issues = planIssues(filter, source, sourceRecord, state);
@@ -143,6 +144,10 @@ function buildPlanRow({
     lastCompletedCutoff: state?.lastCompletedCutoff?.toISOString() ?? null,
     lastPage: state?.lastPage ?? null,
     newestFirstVerifiedAt: state?.newestFirstVerifiedAt?.toISOString() ?? sourceRecord?.newestFirstVerifiedAt?.toISOString() ?? null,
+    lastRegionalCoverageAt: state?.lastRegionalCoverageAt?.toISOString() ?? null,
+    lastHtmlCoverageAt: state?.lastHtmlCoverageAt?.toISOString() ?? null,
+    htmlCoveragePausedUntil: state?.htmlCoveragePausedUntil?.toISOString() ?? null,
+    lastPrivateCoverageAt: state?.lastPrivateCoverageAt?.toISOString() ?? null,
     lastExternalId: state?.lastExternalId ?? null,
     knownExternalIds: state?.knownExternalIds.length ?? 0,
     fingerprint: state ? `${state.fingerprint.slice(0, 10)}...` : null,
@@ -160,6 +165,7 @@ function buildPlanRow({
           durationMs: recentRun.finishedAt ? recentRun.finishedAt.getTime() - recentRun.startedAt.getTime() : null,
           errorMessage: recentRun.errorMessage,
           finishedAt: recentRun.finishedAt?.toISOString() ?? null,
+          coverageMetrics: recentRun.coverageMetrics,
         }
       : null,
   };
@@ -206,6 +212,20 @@ function planIssues(filter: Filter, source: ListingSource, sourceRecord: Source 
     }
     if (autoRiaNeedsGeoPostFilter(filter)) {
       issues.push({ level: "warning", message: "Для части городов нет ID AUTO.RIA: область фильтруется в API, город проверяется после загрузки" });
+    }
+  }
+
+  if (source === "OLX" && state) {
+    const htmlStaleAt = Date.now() - Math.max(30, env.OLX_HTML_COVERAGE_INTERVAL_SECONDS) * 2_000;
+    const privateStaleAt = Date.now() - Math.max(30, env.OLX_PRIVATE_COVERAGE_INTERVAL_SECONDS) * 2_000;
+    if (!state.lastHtmlCoverageAt || state.lastHtmlCoverageAt.getTime() < htmlStaleAt) {
+      issues.push({ level: "warning", message: "HTML-сверка OLX давно не подтверждалась; быстрый API-канал продолжает работать" });
+    }
+    if (!state.lastPrivateCoverageAt || state.lastPrivateCoverageAt.getTime() < privateStaleAt) {
+      issues.push({ level: "warning", message: "Private-сверка OLX давно не подтверждалась" });
+    }
+    if (state.htmlCoveragePausedUntil && state.htmlCoveragePausedUntil.getTime() > Date.now()) {
+      issues.push({ level: "warning", message: `HTML-сверка OLX безопасно приостановлена до ${state.htmlCoveragePausedUntil.toISOString()}` });
     }
   }
 

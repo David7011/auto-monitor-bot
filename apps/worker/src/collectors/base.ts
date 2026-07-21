@@ -75,7 +75,18 @@ export type SourceSearchState = {
   newestFirstVerifiedAt?: Date;
   lastSuccessfulScanAt?: Date;
   nextCheckAt?: Date;
+  lastRegionalCoverageAt?: Date;
+  lastHtmlCoverageAt?: Date;
+  htmlCoveragePausedUntil?: Date;
+  lastPrivateCoverageAt?: Date;
   knownExternalIds: Set<string>;
+};
+
+export type CollectorCoverageStateUpdate = {
+  lastRegionalCoverageAt?: Date;
+  lastHtmlCoverageAt?: Date;
+  htmlCoveragePausedUntil?: Date | null;
+  lastPrivateCoverageAt?: Date;
 };
 
 export type CollectorResult = {
@@ -100,6 +111,10 @@ export type CollectorResult = {
   affectedUrl?: string;
   /** Realtime pagination did not overlap the previous cursor; recover immediately. */
   coverageGap?: boolean;
+  /** Per-search-fingerprint low-frequency coverage timestamps to persist atomically with scan success. */
+  coverageStateUpdate?: CollectorCoverageStateUpdate;
+  /** Bounded structured diagnostics used to prove which discovery lanes ran. */
+  coverageMetrics?: Record<string, string | number | boolean | null>;
 };
 
 /**

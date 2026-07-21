@@ -1,10 +1,10 @@
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 enum ListingSource {
@@ -359,6 +359,10 @@ model SourceSearchState {
   newestFirstVerifiedAt  DateTime?
   lastSuccessfulScanAt   DateTime?
   nextCheckAt            DateTime?
+  lastRegionalCoverageAt DateTime?
+  lastHtmlCoverageAt     DateTime?
+  htmlCoveragePausedUntil DateTime?
+  lastPrivateCoverageAt  DateTime?
   knownExternalIds       String[]      @default([])
   query                  Json?
   createdAt              DateTime      @default(now())
@@ -486,6 +490,7 @@ model CollectorRun {
   duplicateCount Int              @default(0)
   dispatchedCount Int             @default(0)
   semanticWarnings String[]       @default([])
+  coverageMetrics Json?
   errorMessage String?
   createdAt    DateTime           @default(now())
 
@@ -493,6 +498,31 @@ model CollectorRun {
   @@index([lane, startedAt])
   @@index([startedAt])
   @@map("collector_runs")
+}
+
+model CollectorRunHourly {
+  id                 String             @id @default(cuid())
+  bucketAt           DateTime
+  source             ListingSource
+  lane               CollectorLane
+  status             CollectorRunStatus
+  runCount           Int                @default(0)
+  foundCount         BigInt             @default(0)
+  newCount           BigInt             @default(0)
+  recoveredCount     BigInt             @default(0)
+  requestCount       BigInt             @default(0)
+  observedCount      BigInt             @default(0)
+  matchedCount       BigInt             @default(0)
+  rejectedCount      BigInt             @default(0)
+  duplicateCount     BigInt             @default(0)
+  dispatchedCount    BigInt             @default(0)
+  totalDurationMs    BigInt             @default(0)
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@unique([bucketAt, source, lane, status])
+  @@index([source, bucketAt])
+  @@map("collector_run_hourly")
 }
 
 model CompletenessAudit {
@@ -524,9 +554,14 @@ model ErrorLog {
   scope     String
   message   String
   details   String?
+  fingerprint String?       @unique
+  occurrences Int           @default(1)
+  firstSeenAt DateTime      @default(now())
+  lastSeenAt  DateTime      @default(now())
   createdAt DateTime      @default(now())
 
   @@index([createdAt])
+  @@index([lastSeenAt])
   @@map("errors")
 }
 

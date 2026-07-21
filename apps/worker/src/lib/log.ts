@@ -1,12 +1,10 @@
-import { prisma } from "@amb/db";
+import { writeDeduplicatedLog } from "@amb/db";
 
 type Level = "INFO" | "WARN" | "ERROR";
 
 async function writeLog(level: Level, scope: string, message: string, details?: string): Promise<void> {
   try {
-    await prisma.errorLog.create({
-      data: { level, scope, message, details: details ?? null },
-    });
+    await writeDeduplicatedLog(level, scope, message, details);
   } catch (err) {
     console.error("[worker] failed to write log:", err);
   }
