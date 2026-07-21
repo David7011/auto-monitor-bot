@@ -1,0 +1,37 @@
+{
+  "name": "@amb/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "production": "./dist/index.js",
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "db:generate": "node scripts/prisma-with-root-env.mjs generate",
+    "db:migrate": "node scripts/prisma-with-root-env.mjs migrate dev",
+    "db:migrate:dev": "node scripts/prisma-with-root-env.mjs migrate dev",
+    "db:migrate:deploy": "node scripts/prisma-with-root-env.mjs migrate deploy",
+    "db:push": "node scripts/prisma-with-root-env.mjs db push",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:studio": "node scripts/prisma-with-root-env.mjs studio",
+    "db:validate": "node scripts/prisma-with-root-env.mjs validate",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@amb/shared": "workspace:*",
+    "@prisma/client": "^6.5.0",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "prisma": "^6.5.0",
+    "typescript": "5.7.3"
+  }
+}

@@ -1,0 +1,46 @@
+import type { ListingSource } from "./listing.js";
+
+export type UserFilter = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  sources: ListingSource[];
+  autoRiaCategoryId: number | null;
+  autoRiaMarkId: number | null;
+  autoRiaModelId: number | null;
+  brand: string | null;
+  model: string | null;
+  modelNames: string[];
+  generation: string | null;
+  bodyTypes: string[];
+  fuelTypes: string[];
+  gearboxes: string[];
+  driveTypes: string[];
+  colors: string[];
+  engineVolumeFrom: number | null;
+  engineVolumeTo: number | null;
+  enginePowerFrom: number | null;
+  enginePowerTo: number | null;
+  doorsFrom: number | null;
+  doorsTo: number | null;
+  seatsFrom: number | null;
+  seatsTo: number | null;
+  conditions: string[];
+  customsCleared: boolean | null;
+  bargainPossible: boolean | null;
+  freshnessMode: "LAST_HOUR" | "TODAY" | "LAST_24_HOURS" | "LAST_3_DAYS" | "LAST_7_DAYS" | "ALL_TIME";
+  yearFrom: number | null;
+  yearTo: number | null;
+  priceFrom: number | null;
+  priceTo: number | null;
+  mileageFrom: number | null;
+  mileageTo: number | null;
+  regions: string[];
+  cities: string[];
+  keywords: string[];
+  excludeKeywords: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type UserFilterInput = Omit<UserFilter, "id" | "createdAt" | "updatedAt">;

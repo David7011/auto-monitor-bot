@@ -1,0 +1,312 @@
+@import "tailwindcss";
+
+/*
+ * Auto Monitor — Design System
+ * Graphite / warm-amber premium control-center theme.
+ * Raw palette lives on :root (available at runtime for canvas + gradients);
+ * @theme inline maps it to Tailwind utilities. Legacy token names are kept so
+ * pages that have not been redesigned yet keep working.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces — warm-tinted graphite, layered by elevation */
+  --c-bg: #090a0d;
+  --c-bg-deep: #060709;
+  --c-surface-1: #101218;
+  --c-surface-2: #161922;
+  --c-surface-3: #1d212c;
+  --c-surface-4: #262b37;
+
+  /* Hairlines */
+  --c-line-soft: rgba(255, 255, 255, 0.05);
+  --c-line: rgba(255, 255, 255, 0.09);
+  --c-line-strong: rgba(255, 255, 255, 0.15);
+
+  /* Accent — warm orange into amber */
+  --c-accent: #f26a1f;
+  --c-accent-bright: #ff8a3d;
+  --c-accent-deep: #c1470b;
+  --c-amber: #f5a623;
+  --c-amber-soft: #fbc46b;
+
+  /* Text */
+  --c-fg: #edf0f6;
+  --c-fg-dim: #c3c9d6;
+  --c-muted: #868fa1;
+  --c-faint: #566070;
+
+  /* Semantic (warm, never acid) */
+  --c-success: #34ce7f;
+  --c-warning: #f5a623;
+  --c-danger: #f2594a;
+
+  /* RGB channels for alpha composition in JS/canvas */
+  --rgb-accent: 242 106 31;
+  --rgb-amber: 245 166 35;
+  --rgb-success: 52 206 127;
+  --rgb-danger: 242 89 74;
+
+  /* Elevation shadows */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 10px 30px -12px rgba(0, 0, 0, 0.6);
+  --shadow-3: 0 30px 70px -24px rgba(0, 0, 0, 0.75);
+  --glow-accent: 0 0 0 1px rgba(242, 106, 31, 0.14), 0 0 34px -6px rgba(242, 106, 31, 0.34);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+}
+
+@theme inline {
+  --font-sans: var(--font-geist), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  /* Backward-compatible names */
+  --color-background: var(--c-bg);
+  --color-panel: var(--c-surface-1);
+  --color-panel-alt: var(--c-surface-2);
+  --color-border: var(--c-line);
+  --color-accent: var(--c-accent);
+  --color-accent-soft: var(--c-accent-bright);
+  --color-foreground: var(--c-fg);
+  --color-muted: var(--c-muted);
+  --color-success: var(--c-success);
+  --color-warning: var(--c-warning);
+  --color-danger: var(--c-danger);
+
+  /* New system names */
+  --color-bg-deep: var(--c-bg-deep);
+  --color-surface: var(--c-surface-1);
+  --color-surface-1: var(--c-surface-1);
+  --color-surface-2: var(--c-surface-2);
+  --color-surface-3: var(--c-surface-3);
+  --color-surface-4: var(--c-surface-4);
+  --color-line: var(--c-line);
+  --color-line-soft: var(--c-line-soft);
+  --color-line-strong: var(--c-line-strong);
+  --color-accent-deep: var(--c-accent-deep);
+  --color-amber: var(--c-amber);
+  --color-amber-soft: var(--c-amber-soft);
+  --color-fg-dim: var(--c-fg-dim);
+  --color-faint: var(--c-faint);
+
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.375rem;
+}
+
+* {
+  border-color: var(--c-line);
+}
+
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  min-width: 0;
+  overflow-x: hidden;
+  color: var(--c-fg);
+  background-color: var(--c-bg);
+  /* Layered ambient light — warm glows sunk into deep graphite */
+  background-image:
+    radial-gradient(1100px 700px at 82% -8%, rgba(242, 106, 31, 0.1), transparent 60%),
+    radial-gradient(900px 620px at 6% 4%, rgba(245, 166, 35, 0.05), transparent 55%),
+    radial-gradient(1200px 900px at 50% 118%, rgba(242, 106, 31, 0.06), transparent 60%);
+  background-attachment: fixed;
+  font-feature-settings: "cv11", "ss01";
+}
+
+button,
+input,
+select,
+textarea {
+  max-width: 100%;
+}
+
+::selection {
+  background-color: rgba(242, 106, 31, 0.32);
+  color: #fff;
+}
+
+/* Thin premium scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--c-surface-4) transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--c-surface-4);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #333a49;
+  background-clip: content-box;
+}
+
+/* ---------- Surfaces ---------- */
+
+/* Matte glass — the primary panel material */
+.glass {
+  background: linear-gradient(180deg, rgba(24, 27, 35, 0.72), rgba(15, 17, 23, 0.66));
+  backdrop-filter: blur(18px) saturate(1.25);
+  -webkit-backdrop-filter: blur(18px) saturate(1.25);
+  border: 1px solid var(--c-line);
+  box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.glass-2 {
+  background: linear-gradient(180deg, rgba(30, 34, 44, 0.8), rgba(19, 22, 29, 0.74));
+  backdrop-filter: blur(22px) saturate(1.3);
+  -webkit-backdrop-filter: blur(22px) saturate(1.3);
+  border: 1px solid var(--c-line-strong);
+  box-shadow: var(--shadow-3), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* Solid raised card (cheaper than glass for dense grids) */
+.surface-card {
+  background: linear-gradient(180deg, var(--c-surface-2), var(--c-surface-1));
+  border: 1px solid var(--c-line);
+  box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.hairline-top {
+  border-top: 1px solid var(--c-line);
+}
+
+/* Accent halo used on active/live elements */
+.hud-glow {
+  box-shadow: var(--glow-accent);
+}
+.hud-glow-soft {
+  box-shadow: 0 0 0 1px rgba(242, 106, 31, 0.1), 0 0 22px -8px rgba(242, 106, 31, 0.22);
+}
+
+/* A crisp top light line, like brushed metal edges */
+.edge-light {
+  position: relative;
+}
+.edge-light::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.14) 20%, rgba(255, 255, 255, 0.14) 80%, transparent);
+  pointer-events: none;
+}
+
+/* ---------- Text ---------- */
+
+.text-gradient {
+  background: linear-gradient(94deg, #fff 0%, var(--c-amber-soft) 55%, var(--c-accent-bright) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+.kicker {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--c-accent-bright);
+}
+
+/* ---------- Decorative ---------- */
+
+.grid-overlay {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+  background-size: 46px 46px;
+  mask-image: radial-gradient(circle at 50% 40%, black, transparent 78%);
+}
+
+/* ---------- Keyframes ---------- */
+
+@keyframes radar-sweep {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -160% 0; }
+  100% { background-position: 260% 0; }
+}
+
+@keyframes float-soft {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes ping-ring {
+  0% { transform: scale(0.9); opacity: 0.55; }
+  70%, 100% { transform: scale(2.1); opacity: 0; }
+}
+
+@keyframes ticker {
+  from { background-position: 0 0; }
+  to { background-position: 40px 0; }
+}
+
+.animate-radar-sweep { animation: radar-sweep 3.2s linear infinite; }
+.animate-pulse-glow { animation: pulse-glow 2s ease-in-out infinite; }
+.animate-float { animation: float-soft 6s var(--ease-in-out) infinite; }
+.animate-rise { animation: rise-in 0.5s var(--ease-out) both; }
+
+/* Route enter — pure CSS so page content can never get stuck hidden. */
+.route-enter { animation: rise-in 0.45s var(--ease-out); }
+
+/* Shimmer skeleton */
+.shimmer {
+  position: relative;
+  overflow: hidden;
+  background: var(--c-surface-2);
+}
+.shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.06) 40%,
+    rgba(255, 255, 255, 0.1) 50%,
+    rgba(255, 255, 255, 0.06) 60%,
+    transparent 80%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

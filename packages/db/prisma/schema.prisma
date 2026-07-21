@@ -1,0 +1,574 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ListingSource {
+  AUTO_RIA
+  OLX
+  RST
+  CARS_UA
+  AUTOMOTO
+  MOCK
+}
+
+enum ListingStatus {
+  NEW
+  MATCHED
+  SENT
+  ENRICHED
+  IGNORED
+  DUPLICATE
+}
+
+enum MonitoringStatus {
+  STOPPED
+  STARTING
+  RUNNING
+  PAUSED
+  ERROR
+  RATE_LIMITED
+  CAPTCHA_DETECTED
+}
+
+enum SourceStatus {
+  ACTIVE
+  PAUSED
+  LIMITED
+  ERROR
+  RATE_LIMITED
+  CAPTCHA_DETECTED
+  DISABLED
+}
+
+enum VehicleCheckStatus {
+  NOT_STARTED
+  PENDING
+  NO_PLATE_OR_VIN_FOUND
+  PLATE_FOUND
+  VIN_FOUND
+  CHECK_DONE
+  CHECK_PARTIAL
+  CHECK_FAILED
+}
+
+enum MarketPriceStatus {
+  READY
+  INSUFFICIENT_DATA
+  FAILED
+}
+
+enum MarketPriceVerdict {
+  UNKNOWN
+  HIGH_RISK_BARGAIN
+  BELOW_MARKET
+  FAIR
+  ABOVE_MARKET
+}
+
+enum CollectorRunStatus {
+  RUNNING
+  SUCCESS
+  LIMITED
+  SKIPPED
+  CANCELLED_BY_USER
+  FAILED
+  RATE_LIMITED
+  CAPTCHA_DETECTED
+}
+
+enum CollectorLane {
+  REALTIME
+  BACKFILL
+  MANUAL
+}
+
+enum TelegramNotificationStatus {
+  PENDING
+  PROCESSING
+  RETRY_PENDING
+  SENT
+  UPDATED
+  FAILED
+}
+
+enum ErrorLogLevel {
+  INFO
+  WARN
+  ERROR
+}
+
+enum ChallengeIncidentStatus {
+  DETECTED
+  COOLDOWN
+  MANUAL_VERIFICATION_REQUIRED
+  PROBE_PENDING
+  RECOVERING
+  RESOLVED
+  REPEATED
+}
+
+enum TimestampConfidence {
+  HIGH
+  MEDIUM
+  LOW
+  UNKNOWN
+}
+
+enum ObservationDecision {
+  PENDING
+  REJECTED
+  MATCHED
+  DUPLICATE
+  DISPATCHED
+  NOTIFIED
+  FAILED
+}
+
+model Filter {
+  id              String   @id @default(cuid())
+  name            String
+  enabled         Boolean  @default(true)
+  sources         ListingSource[]
+  autoRiaCategoryId Int?
+  autoRiaMarkId   Int?
+  autoRiaModelId  Int?
+  brand           String?
+  model           String?
+  modelNames      String[] @default([])
+  generation      String?
+  bodyTypes       String[] @default([])
+  fuelTypes       String[] @default([])
+  gearboxes       String[] @default([])
+  driveTypes      String[] @default([])
+  colors          String[] @default([])
+  engineVolumeFrom Float?
+  engineVolumeTo   Float?
+  enginePowerFrom Int?
+  enginePowerTo   Int?
+  doorsFrom       Int?
+  doorsTo         Int?
+  seatsFrom       Int?
+  seatsTo         Int?
+  conditions      String[] @default([])
+  customsCleared  Boolean?
+  bargainPossible Boolean?
+  freshnessMode   String   @default("TODAY")
+  yearFrom        Int?
+  yearTo          Int?
+  priceFrom       Int?
+  priceTo         Int?
+  mileageFrom     Int?
+  mileageTo       Int?
+  regions         String[] @default([])
+  cities          String[] @default([])
+  keywords        String[] @default([])
+  excludeKeywords String[] @default([])
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  matches ListingMatch[]
+
+  @@map("filters")
+}
+
+model Source {
+  id                String        @id @default(cuid())
+  source            ListingSource @unique
+  name              String
+  status            SourceStatus  @default(ACTIVE)
+  enabled           Boolean       @default(true)
+  supportsNewestFirst Boolean     @default(true)
+  newestFirstVerified Boolean     @default(false)
+  newestFirstVerifiedAt DateTime?
+  initialSyncCompletedAt DateTime?
+  intervalSeconds   Int           @default(120)
+  lastCheckedAt     DateTime?
+  nextCheckAt       DateTime?
+  lastError         String?
+  consecutiveErrors Int           @default(0)
+  consecutiveEmptyResults Int     @default(0)
+  pausedUntil       DateTime?
+  jitterSeconds     Int           @default(20)
+  lastSuccessfulAt  DateTime?
+  lastNonEmptyAt    DateTime?
+  lastDurationMs    Int?
+  healthScore       Int           @default(100)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  challengeIncidents ChallengeIncident[]
+
+  @@map("sources")
+}
+
+model ChallengeIncident {
+  id               String                  @id @default(cuid())
+  sourceId         String
+  source           Source                  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  detector         String
+  responseStatus   Int?
+  affectedUrlHash  String?
+  detectedAt       DateTime                @default(now())
+  cooldownUntil    DateTime?
+  status           ChallengeIncidentStatus @default(DETECTED)
+  probeAttempts    Int                     @default(0)
+  lastProbeAt      DateTime?
+  recoveredAt      DateTime?
+  resolution       String?
+  metadataRedacted Json?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  @@index([sourceId, status])
+  @@index([detectedAt])
+  @@map("challenge_incidents")
+}
+
+model Listing {
+  id               String        @id @default(cuid())
+  source           ListingSource
+  externalId       String
+  url              String
+  canonicalUrl     String        @unique
+  title            String?
+  brand            String?
+  model            String?
+  bodyType         String?
+  fuelType         String?
+  gearbox          String?
+  driveType        String?
+  color            String?
+  engineVolume     Float?
+  enginePower      Int?
+  doors            Int?
+  seats            Int?
+  condition        String?
+  customsCleared   Boolean?
+  bargainPossible  Boolean?
+  year             Int?
+  priceOriginal    Int?
+  currencyOriginal String?
+  priceNormalized  Int?
+  mileage          Int?
+  city             String?
+  region           String?
+  description      String?
+  photoUrls        String[]      @default([])
+  publishedAt      DateTime?
+  refreshedAt      DateTime?
+  timestampConfidence TimestampConfidence @default(UNKNOWN)
+  skipReason       String?
+  possibleDuplicateOfId String?
+  duplicateConfidence Float?
+  duplicateReasons String[]      @default([])
+  sellerPhone      String?
+  vin              String?
+  plateNormalized  String?
+  exchangeRateUsed Float?
+  exchangeRateDate DateTime?
+  firstSeenAt      DateTime      @default(now())
+  lastSeenAt       DateTime      @default(now())
+  discoveryLane    CollectorLane @default(REALTIME)
+  rawData          Json?
+  status           ListingStatus @default(NEW)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  matches               ListingMatch[]
+  telegramNotifications TelegramNotification[]
+  vehicleChecks         VehicleCheck[]
+  marketPriceEstimate   MarketPriceEstimate?
+
+  @@unique([source, externalId])
+  @@index([firstSeenAt])
+  @@index([publishedAt])
+  @@index([source])
+  @@index([status])
+  @@index([sellerPhone])
+  @@index([vin])
+  @@index([plateNormalized])
+  @@map("listings")
+}
+
+model SourceSeenListing {
+  id                  String              @id @default(cuid())
+  source              ListingSource
+  externalId          String
+  url                 String
+  canonicalUrl        String?
+  title               String?
+  brand               String?
+  model               String?
+  year                Int?
+  priceNormalized     Int?
+  engineVolume        Float?
+  mileage             Int?
+  city                String?
+  region              String?
+  publishedAt         DateTime?
+  refreshedAt         DateTime?
+  timestampConfidence TimestampConfidence @default(UNKNOWN)
+  skipReason           String?
+  normalizedData       Json?
+  decision             ObservationDecision @default(PENDING)
+  matchedFilterIds     String[]            @default([])
+  rejectionReasons    String[]            @default([])
+  filterRevision       String?
+  normalizerVersion    Int                 @default(1)
+  lastEvaluatedAt      DateTime?
+  dispatchAttemptedAt  DateTime?
+  notifiedAt           DateTime?
+  listingId            String?
+  evaluationCount      Int                 @default(0)
+  firstSeenAt          DateTime             @default(now())
+  lastSeenAt           DateTime             @default(now())
+  discoveryLane        CollectorLane        @default(REALTIME)
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  @@unique([source, externalId])
+  @@index([source, firstSeenAt])
+  @@index([source, publishedAt])
+  @@index([decision, lastEvaluatedAt])
+  @@index([listingId])
+  @@index([brand, model, year])
+  @@map("source_seen_listings")
+}
+
+model SourceSearchState {
+  id                     String        @id @default(cuid())
+  source                 ListingSource
+  fingerprint            String
+  filterIds              String[]      @default([])
+  initialSyncCompletedAt DateTime?
+  lastCursor             String?
+  lastExternalId         String?
+  lastPublishedAt        DateTime?
+  latestSeenPublishedAt  DateTime?
+  latestSeenExternalId   String?
+  oldestScannedPublishedAt DateTime?
+  lastCompletedCutoff    DateTime?
+  lastPage               Int?
+  realtimeCursor         Json?
+  backfillCursor         Json?
+  newestFirstVerifiedAt  DateTime?
+  lastSuccessfulScanAt   DateTime?
+  nextCheckAt            DateTime?
+  knownExternalIds       String[]      @default([])
+  query                  Json?
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+
+  @@unique([source, fingerprint])
+  @@index([source, nextCheckAt])
+  @@index([source, latestSeenPublishedAt])
+  @@map("source_search_states")
+}
+
+model ListingMatch {
+  id        String   @id @default(cuid())
+  listingId String
+  filterId  String
+  createdAt DateTime @default(now())
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  filter  Filter  @relation(fields: [filterId], references: [id], onDelete: Cascade)
+
+  @@unique([listingId, filterId])
+  @@map("listing_matches")
+}
+
+model TelegramNotification {
+  id        String                     @id @default(cuid())
+  listingId String
+  chatId    String
+  messageId String?
+  status    TelegramNotificationStatus @default(PENDING)
+  lastText  String?
+  attemptCount Int                      @default(0)
+  processingStartedAt DateTime?
+  lastAttemptAt DateTime?
+  leaseExpiresAt DateTime?
+  lastErrorCode String?
+  lastErrorMessage String?
+  sentAt    DateTime?
+  updatedAt DateTime                   @updatedAt
+  createdAt DateTime                   @default(now())
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@unique([listingId])
+  @@index([messageId])
+  @@index([status, leaseExpiresAt])
+  @@map("telegram_notifications")
+}
+
+model VehicleCheck {
+  id              String             @id @default(cuid())
+  listingId       String
+  plateRaw        String?
+  plateNormalized String?
+  vin             String?
+  checkStatus     VehicleCheckStatus @default(NOT_STARTED)
+  make            String?
+  model           String?
+  year            Int?
+  engineVolume    Float?
+  fuelType        String?
+  bodyType        String?
+  driveType       String?
+  color           String?
+  mileage         Int?
+  accidents       String?
+  restrictions    String?
+  provider        String?
+  discrepancies   String[]           @default([])
+  rawResponse     Json?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([plateNormalized])
+  @@index([vin])
+  @@index([listingId])
+  @@map("vehicle_checks")
+}
+
+model MarketPriceEstimate {
+  id            String             @id @default(cuid())
+  listingId     String             @unique
+  status        MarketPriceStatus  @default(INSUFFICIENT_DATA)
+  verdict       MarketPriceVerdict @default(UNKNOWN)
+  targetPrice   Int?
+  sampleSize    Int                @default(0)
+  averagePrice  Int?
+  medianPrice   Int?
+  q1Price       Int?
+  q3Price       Int?
+  minPrice      Int?
+  maxPrice      Int?
+  fairLowPrice  Int?
+  fairHighPrice Int?
+  currency      String             @default("USD")
+  sources       ListingSource[]    @default([])
+  params        Json?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([verdict])
+  @@map("market_price_estimates")
+}
+
+model CollectorRun {
+  id           String             @id @default(cuid())
+  source       ListingSource
+  status       CollectorRunStatus @default(RUNNING)
+  lane         CollectorLane      @default(REALTIME)
+  startedAt    DateTime           @default(now())
+  finishedAt   DateTime?
+  foundCount   Int                @default(0)
+  newCount     Int                @default(0)
+  recoveredCount Int              @default(0)
+  pageCount    Int                @default(0)
+  requestCount Int                @default(0)
+  observedCount Int               @default(0)
+  matchedCount  Int               @default(0)
+  rejectedCount Int               @default(0)
+  duplicateCount Int              @default(0)
+  dispatchedCount Int             @default(0)
+  semanticWarnings String[]       @default([])
+  errorMessage String?
+  createdAt    DateTime           @default(now())
+
+  @@index([source])
+  @@index([lane, startedAt])
+  @@index([startedAt])
+  @@map("collector_runs")
+}
+
+model CompletenessAudit {
+  id                    String   @id @default(cuid())
+  trigger               String
+  filterRevision        String?
+  lookbackHours         Int      @default(24)
+  observedCount         Int      @default(0)
+  evaluatedCount        Int      @default(0)
+  matchedCount          Int      @default(0)
+  rejectedCount         Int      @default(0)
+  dispatchedCount       Int      @default(0)
+  alreadyHandledCount   Int      @default(0)
+  failedCount           Int      @default(0)
+  pendingCount          Int      @default(0)
+  details               Json?
+  startedAt             DateTime @default(now())
+  finishedAt            DateTime?
+  createdAt             DateTime @default(now())
+
+  @@index([startedAt])
+  @@index([finishedAt])
+  @@map("completeness_audits")
+}
+
+model ErrorLog {
+  id        String        @id @default(cuid())
+  level     ErrorLogLevel @default(ERROR)
+  scope     String
+  message   String
+  details   String?
+  createdAt DateTime      @default(now())
+
+  @@index([createdAt])
+  @@map("errors")
+}
+
+model DashboardUser {
+  id           String    @id @default(cuid())
+  username     String    @unique
+  passwordHash String
+  authVersion  Int       @default(1)
+  enabled      Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([enabled])
+  @@map("dashboard_users")
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model MonitoringState {
+  id              String           @id @default("singleton")
+  status          MonitoringStatus @default(STOPPED)
+  generation      Int              @default(0)
+  startedAt       DateTime?
+  stoppedAt       DateTime?
+  lastTickAt      DateTime?
+  nextTickAt      DateTime?
+  lastBackfillTickAt DateTime?
+  nextBackfillTickAt DateTime?
+  backfillIntervalSeconds Int      @default(600)
+  intervalSeconds Int              @default(120)
+  jitterSeconds   Int              @default(20)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@map("monitoring_state")
+}

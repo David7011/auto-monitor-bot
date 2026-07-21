@@ -1,0 +1,26 @@
+{
+  "name": "@amb/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node --conditions=production dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@amb/db": "workspace:*",
+    "@amb/shared": "workspace:*",
+    "bullmq": "^5.80.9",
+    "dotenv": "^16.4.7",
+    "grammy": "^1.45.1",
+    "ioredis": "^5.4.2",
+    "tesseract.js": "^7.0.0",
+    "undici": "^6.21.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.1",
+    "typescript": "5.7.3"
+  }
+}

@@ -1,0 +1,76 @@
+plugins {
+    id "com.android.application"
+}
+
+def defaultServerUrl = providers.gradleProperty("defaultServerUrl").orElse("http://192.168.0.106:3001").get()
+def lanServerUrl = providers.gradleProperty("lanServerUrl").orElse("http://192.168.0.106:3001").get()
+def releaseKeystore = providers.environmentVariable("AMB_ANDROID_KEYSTORE").orNull
+def releaseStorePassword = providers.environmentVariable("AMB_ANDROID_STORE_PASSWORD").orNull
+def releaseKeyAlias = providers.environmentVariable("AMB_ANDROID_KEY_ALIAS").orNull
+def releaseKeyPassword = providers.environmentVariable("AMB_ANDROID_KEY_PASSWORD").orNull
+def releaseSigningReady = [releaseKeystore, releaseStorePassword, releaseKeyAlias, releaseKeyPassword].every { it != null && !it.isBlank() }
+
+android {
+    namespace = "com.dneprdavid.automonitor"
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "com.dneprdavid.automonitor"
+        minSdk = 26
+        targetSdk = 36
+        versionCode = 3
+        versionName = "1.2.0"
+        buildConfigField "String", "DEFAULT_SERVER_URL", "\"${defaultServerUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+        buildConfigField "String", "LAN_SERVER_URL", "\"${lanServerUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+    }
+
+    signingConfigs {
+        if (releaseSigningReady) {
+            release {
+                storeFile = file(releaseKeystore)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
+        release {
+            minifyEnabled = true
+            shrinkResources = true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            if (releaseSigningReady) {
+                signingConfig = signingConfigs.release
+            }
+        }
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError = true
+        checkReleaseBuilds = true
+        warningsAsErrors = true
+        disable += ["AndroidGradlePluginVersion", "ObsoleteSdkInt", "SetTextI18n"]
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+}
+
+dependencies {
+    testImplementation "junit:junit:4.13.2"
+}

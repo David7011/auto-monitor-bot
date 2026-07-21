@@ -1,0 +1,2 @@
+ALTER TABLE "dashboard_users"
+ADD COLUMN IF NOT EXISTS "authVersion" INTEGER NOT NULL DEFAULT 1;
