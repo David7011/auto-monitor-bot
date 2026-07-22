@@ -1,5 +1,8 @@
 node_modules/
 .next/
+.next-e2e/
+.next-validation/
+.dist-validation/
 dist/
 coverage/
 test-results/

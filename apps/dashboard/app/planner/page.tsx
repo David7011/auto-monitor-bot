@@ -53,6 +53,25 @@ function runStatusLabel(value: string) {
   return labels[value] ?? value
 }
 
+function olxChannelLabel(value: string) {
+  const labels: Record<string, string> = {
+    OLX_PUBLIC_API: "Быстрый публичный API",
+    OLX_REGIONAL_API: "Региональная API-сверка",
+    OLX_PRIVATE_API: "Private API-сверка",
+    OLX_HTML_COVERAGE: "HTML-сверка",
+    OLX_HTML_FALLBACK: "Резервный HTML-канал",
+    LEGACY_UNATTRIBUTED: "До включения измерений",
+  }
+  return labels[value] ?? value
+}
+
+function formatDurationSeconds(value: number | null) {
+  if (value == null) return "—"
+  if (value < 60) return `${value} с`
+  if (value < 3600) return `${Math.round(value / 60)} мин`
+  return `${(value / 3600).toFixed(1)} ч`
+}
+
 export default function PlannerPage() {
   const { data, isLoading } = useSWR<SearchPlanResponse>("/search-plan", fetcher, { refreshInterval: 4000 })
   const plans = data?.plans ?? []
@@ -178,6 +197,23 @@ export default function PlannerPage() {
           </div>
         </HudPanel>
       </section>
+
+      <HudPanel kicker="OLX" title="Фактические каналы обнаружения за 24 часа" action={<Gauge className="size-4 text-accent-soft" />}>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {(data?.olxDiscovery.channels ?? []).map((channel) => (
+            <div key={channel.channel} className="surface-card rounded-xl p-3">
+              <div className="text-xs font-semibold text-foreground">{olxChannelLabel(channel.channel)}</div>
+              <div className="mt-2 grid grid-cols-3 gap-2 text-xs text-muted">
+                <div><span className="block font-mono text-foreground">{channel.sampleCount}</span>найдено</div>
+                <div><span className="block font-mono text-foreground">{formatDurationSeconds(channel.p50Seconds)}</span>p50</div>
+                <div><span className="block font-mono text-foreground">{formatDurationSeconds(channel.p95Seconds)}</span>p95</div>
+              </div>
+              <div className="mt-2 text-[11px] text-muted">Задержка рассчитана для {channel.latencySampleCount} объявлений с точным временем публикации.</div>
+            </div>
+          ))}
+          {!data?.olxDiscovery.channels.length ? <div className="text-sm text-muted">Новые OLX-наблюдения ещё не накоплены.</div> : null}
+        </div>
+      </HudPanel>
 
       <HudPanel kicker="Контексты" title="Контексты поиска" action={<DatabaseZap className="size-4 text-accent-soft" />} noPadding>
         <div className="p-4 sm:p-5">

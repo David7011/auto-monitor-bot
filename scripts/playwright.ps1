@@ -12,6 +12,7 @@ New-Item -ItemType Directory -Force -Path $BrowserRoot, $TempRoot | Out-Null
 $env:PLAYWRIGHT_BROWSERS_PATH = $BrowserRoot
 $env:TEMP = $TempRoot
 $env:TMP = $TempRoot
+if (!$env:E2E_BASE_URL) { $env:E2E_BASE_URL = "http://127.0.0.1:3101" }
 
 Set-Location $ProjectRoot
 if ($Install) {

@@ -189,6 +189,8 @@ export function deserializeNormalizedListing(value: Prisma.JsonValue): Normalize
     freshnessFallback: stringValue(data.freshnessFallback) === "FIRST_SEEN" ? "FIRST_SEEN" : undefined,
     skipReason: stringValue(data.skipReason) as NormalizedListing["skipReason"],
     firstSeenAt: dateValue(data.firstSeenAt) ?? new Date(),
+    observationChannel: stringValue(data.observationChannel) as NormalizedListing["observationChannel"],
+    observationTarget: stringValue(data.observationTarget),
     raw: { replayedFromObservation: true },
   };
 }
@@ -225,6 +227,10 @@ function observationData(listing: NormalizedListing, lane: ListingDiscoveryLane)
     firstSeenAt: new Date(listing.firstSeenAt),
     lastSeenAt: new Date(),
     discoveryLane: lane,
+    firstObservedChannel: listing.observationChannel ?? null,
+    lastObservedChannel: listing.observationChannel ?? null,
+    firstObservedTarget: listing.observationTarget ?? null,
+    lastObservedTarget: listing.observationTarget ?? null,
   } satisfies Prisma.SourceSeenListingUncheckedCreateInput;
 }
 
@@ -248,6 +254,8 @@ function observationUpdateData(listing: NormalizedListing) {
     normalizedData: serializeNormalizedListing(listing),
     normalizerVersion: NORMALIZER_VERSION,
     lastSeenAt: new Date(),
+    ...(listing.observationChannel ? { lastObservedChannel: listing.observationChannel } : {}),
+    ...(listing.observationTarget ? { lastObservedTarget: listing.observationTarget } : {}),
   } satisfies Prisma.SourceSeenListingUncheckedUpdateInput;
 }
 

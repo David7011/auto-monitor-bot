@@ -10,6 +10,10 @@ $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $RuntimeRoot = Join-Path $ProjectRoot ".runtime"
 $Tailscale = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
 $FirewallRuleName = "Auto Monitor Bot Dashboard (Tailscale)"
+$LegacyFirewallRuleNames = @(
+  "Auto Monitor Bot Dashboard (Local and VPN)",
+  "Auto Monitor Bot Dashboard"
+)
 
 function Get-ServeDashboard([object]$ServeConfig, [string]$DnsName, [string]$TailnetIpv4, [int]$Port) {
   if (-not $ServeConfig -or -not $ServeConfig.TCP) { return $null }
@@ -85,6 +89,10 @@ if ($LASTEXITCODE -ne 0) {
 
 $rule = Get-NetFirewallRule -DisplayName $FirewallRuleName -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($rule) { Disable-NetFirewallRule -InputObject $rule | Out-Null }
+foreach ($legacyRuleName in $LegacyFirewallRuleNames) {
+  Get-NetFirewallRule -DisplayName $legacyRuleName -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+}
 $result.FirewallRule = "disabled; access is restricted to the tailnet"
 
 New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null

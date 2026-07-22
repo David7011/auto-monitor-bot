@@ -190,6 +190,8 @@ describe("OLX mixed promoted feed", () => {
       now,
       knownExternalIds: new Set(["known-1"]),
       maxCandidates: 10,
+      observationChannel: "OLX_HTML_COVERAGE",
+      observationTarget: "region:21;city:121;page:1;owner:all",
     });
 
     expect(result.knownEncountered).toBe(true);
@@ -197,6 +199,10 @@ describe("OLX mixed promoted feed", () => {
     expect(result.allKnown).toBe(false);
     expect(result.observedCount).toBe(2);
     expect(result.listings.map((listing) => listing.externalId)).toEqual(["new-1"]);
+    expect(result.listings[0]).toMatchObject({
+      observationChannel: "OLX_HTML_COVERAGE",
+      observationTarget: "region:21;city:121;page:1;owner:all",
+    });
   });
 
   it("does not report overlap when every advert is new (window overflow)", () => {

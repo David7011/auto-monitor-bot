@@ -88,6 +88,7 @@ jobs:
       DASHBOARD_SEED_PASSWORD: e2e-password-with-adequate-length
       E2E_DASHBOARD_USERNAME: e2e-user
       E2E_DASHBOARD_PASSWORD: e2e-password-with-adequate-length
+      E2E_BASE_URL: http://127.0.0.1:3001
       TELEGRAM_CONTROL_BOT_ENABLED: "false"
       MOCK_SOURCE_ENABLED: "true"
       API_REQUIRE_LOCAL_TOKEN_FOR_ALL: "true"
@@ -102,7 +103,7 @@ jobs:
           node-version: 24.18.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - run: pnpm build:deploy
       - run: pnpm db:migrate:deploy
       - run: pnpm db:seed
       - run: pnpm auth:seed
@@ -140,5 +141,5 @@ jobs:
           node-version: 24.18.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - run: pnpm build:deploy
       - uses: github/codeql-action/analyze@ddf5ce7296213f5548c91e2dd19df2d77d2b2d66 # v3

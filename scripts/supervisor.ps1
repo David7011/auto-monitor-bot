@@ -15,6 +15,8 @@ $LogPath = Join-Path $LogDir "supervisor.log"
 $LockPath = Join-Path $RuntimeRoot "supervisor.lock"
 $StartScript = Join-Path $PSScriptRoot "start.ps1"
 $ReadinessScript = Join-Path $PSScriptRoot "wait-core-readiness.ps1"
+$ValidationLockPath = Join-Path $RuntimeRoot "validation.lock"
+$StartLockPath = Join-Path $RuntimeRoot "start.lock"
 
 New-Item -ItemType Directory -Force -Path $RuntimeRoot, $LogDir | Out-Null
 
@@ -31,6 +33,19 @@ function Write-SupervisorLog([string]$Message) {
   [IO.File]::AppendAllText($LogPath, $line, [Text.UTF8Encoding]::new($false))
 }
 
+function Test-LockHeld([string]$Path) {
+  if (!(Test-Path -LiteralPath $Path)) { return $false }
+  $probe = $null
+  try {
+    $probe = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    return $false
+  } catch {
+    return $true
+  } finally {
+    if ($probe) { $probe.Dispose() }
+  }
+}
+
 $lock = $null
 try {
   $lock = [IO.File]::Open($LockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
@@ -42,16 +57,26 @@ try {
 try {
   Write-SupervisorLog "supervisor started"
   $failures = 0
+  $recoveryAttempt = 0
+  $nextRecoveryAt = [datetime]::MinValue
   while ($true) {
+    if ((Test-LockHeld $ValidationLockPath) -or (Test-LockHeld $StartLockPath)) {
+      $failures = 0
+      Start-Sleep -Seconds ([Math]::Max(5, $CheckIntervalSeconds))
+      continue
+    }
     & $ReadinessScript -TimeoutSeconds 4 -StableChecks 1 -Quiet
     if ($LASTEXITCODE -eq 0) {
       $failures = 0
+      $recoveryAttempt = 0
+      $nextRecoveryAt = [datetime]::MinValue
     } else {
       $failures += 1
       Write-SupervisorLog "readiness failure $failures/$ConsecutiveFailuresBeforeRestart"
-      if ($failures -ge [Math]::Max(1, $ConsecutiveFailuresBeforeRestart)) {
+      if ($failures -ge [Math]::Max(1, $ConsecutiveFailuresBeforeRestart) -and (Get-Date) -ge $nextRecoveryAt) {
         try {
-          Write-SupervisorLog "recovery started"
+          $recoveryAttempt += 1
+          Write-SupervisorLog "recovery attempt $recoveryAttempt started"
           $powershell = Join-Path $PSHOME "powershell.exe"
           $recovery = Start-Process -FilePath $powershell -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $LogDir "supervisor-recovery.out.log") `
@@ -63,12 +88,19 @@ try {
               "-File", $StartScript
             )
           $recovery.WaitForExit()
-          & $ReadinessScript -TimeoutSeconds 20 -StableChecks 1 -Quiet
-          if ($LASTEXITCODE -ne 0) { throw "start.ps1 exited without restoring core readiness (code $($recovery.ExitCode))" }
+          $recovery.Refresh()
+          $recoveryExitCode = $recovery.ExitCode
+          & $ReadinessScript -TimeoutSeconds 75 -StableChecks 2 -Quiet
+          if ($LASTEXITCODE -ne 0) { throw "start.ps1 exited without restoring core readiness (code $recoveryExitCode)" }
           Write-SupervisorLog "recovery completed"
           $failures = 0
+          $recoveryAttempt = 0
+          $nextRecoveryAt = [datetime]::MinValue
         } catch {
           Write-SupervisorLog "recovery failed: $($_.Exception.Message)"
+          $backoffSeconds = @(15, 30, 60, 120, 300)[[Math]::Min([Math]::Max(0, $recoveryAttempt - 1), 4)]
+          $nextRecoveryAt = (Get-Date).AddSeconds($backoffSeconds)
+          Write-SupervisorLog "next recovery is allowed after $($nextRecoveryAt.ToString('o'))"
         }
       }
     }

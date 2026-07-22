@@ -2,6 +2,12 @@ export type ListingSource = "AUTO_RIA" | "OLX" | "RST" | "CARS_UA" | "AUTOMOTO" 
 
 export type TimestampConfidence = "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
 export type ListingDiscoveryLane = "REALTIME" | "BACKFILL" | "MANUAL";
+export type ListingObservationChannel =
+  | "OLX_PUBLIC_API"
+  | "OLX_REGIONAL_API"
+  | "OLX_PRIVATE_API"
+  | "OLX_HTML_COVERAGE"
+  | "OLX_HTML_FALLBACK";
 
 export type ListingSkipReason =
   | "UNKNOWN_PUBLICATION_DATE"
@@ -55,6 +61,8 @@ export type NormalizedListing = {
   freshnessFallback?: "FIRST_SEEN";
   skipReason?: ListingSkipReason;
   firstSeenAt: Date;
+  observationChannel?: ListingObservationChannel;
+  observationTarget?: string;
 
   raw: unknown;
 };

@@ -43,12 +43,13 @@ const FIELD_LABELS: Record<(typeof AUTO_RIA_SEARCH_FIELDS)[number], string> = {
 export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
   app.get("/search-plan", async () => {
     const now = new Date();
-    const [filters, sources, states, recentRuns, quota] = await Promise.all([
+    const [filters, sources, states, recentRuns, quota, olxDiscovery] = await Promise.all([
       prisma.filter.findMany({ where: { enabled: true }, orderBy: { updatedAt: "desc" } }),
       prisma.source.findMany(),
       prisma.sourceSearchState.findMany({ orderBy: { updatedAt: "desc" } }),
       prisma.collectorRun.findMany({ orderBy: { startedAt: "desc" }, take: 40 }),
       autoRiaQuota(now),
+      olxDiscoveryDiagnostics(now),
     ]);
 
     const sourceMap = new Map(sources.map((source) => [source.source, source]));
@@ -81,6 +82,7 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       generatedAt: now.toISOString(),
       totals,
       autoRia: quota,
+      olxDiscovery,
       backfill: {
         intervalSeconds: env.BACKFILL_INTERVAL_SECONDS,
         initialDelaySeconds: env.BACKFILL_INITIAL_DELAY_SECONDS,
@@ -92,6 +94,55 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       plans,
     };
   });
+}
+
+type OlxDiscoveryRow = {
+  channel: string;
+  sampleCount: bigint;
+  latencySampleCount: bigint;
+  p50Seconds: number | null;
+  p95Seconds: number | null;
+  maxSeconds: number | null;
+};
+
+async function olxDiscoveryDiagnostics(now: Date) {
+  const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const rows = await prisma.$queryRaw<OlxDiscoveryRow[]>`
+    SELECT
+      COALESCE("firstObservedChannel", 'LEGACY_UNATTRIBUTED') AS "channel",
+      COUNT(*)::bigint AS "sampleCount",
+      COUNT(*) FILTER (
+        WHERE "publishedAt" IS NOT NULL AND "firstSeenAt" >= "publishedAt"
+      )::bigint AS "latencySampleCount",
+      percentile_cont(0.50) WITHIN GROUP (
+        ORDER BY EXTRACT(EPOCH FROM ("firstSeenAt" - "publishedAt"))
+      ) FILTER (
+        WHERE "publishedAt" IS NOT NULL AND "firstSeenAt" >= "publishedAt"
+      ) AS "p50Seconds",
+      percentile_cont(0.95) WITHIN GROUP (
+        ORDER BY EXTRACT(EPOCH FROM ("firstSeenAt" - "publishedAt"))
+      ) FILTER (
+        WHERE "publishedAt" IS NOT NULL AND "firstSeenAt" >= "publishedAt"
+      ) AS "p95Seconds",
+      MAX(EXTRACT(EPOCH FROM ("firstSeenAt" - "publishedAt"))) FILTER (
+        WHERE "publishedAt" IS NOT NULL AND "firstSeenAt" >= "publishedAt"
+      ) AS "maxSeconds"
+    FROM "source_seen_listings"
+    WHERE "source" = 'OLX'::"ListingSource" AND "firstSeenAt" >= ${cutoff}
+    GROUP BY COALESCE("firstObservedChannel", 'LEGACY_UNATTRIBUTED')
+    ORDER BY COUNT(*) DESC
+  `;
+  return {
+    windowHours: 24,
+    channels: rows.map((row) => ({
+      channel: row.channel,
+      sampleCount: Number(row.sampleCount),
+      latencySampleCount: Number(row.latencySampleCount),
+      p50Seconds: row.p50Seconds == null ? null : Math.round(Number(row.p50Seconds)),
+      p95Seconds: row.p95Seconds == null ? null : Math.round(Number(row.p95Seconds)),
+      maxSeconds: row.maxSeconds == null ? null : Math.round(Number(row.maxSeconds)),
+    })),
+  };
 }
 
 function buildPlanRow({

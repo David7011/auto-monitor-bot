@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [int]$TempMinimumAgeDays = 14
+  [int]$TempMinimumAgeDays = 14,
+  [switch]$SkipSystemTemp
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,15 +38,31 @@ foreach ($root in $downloadRoots) {
   }
 }
 
-$tempRoot = [IO.Path]::GetFullPath($env:TEMP)
-$cutoff = (Get-Date).AddDays(-[Math]::Max(7, $TempMinimumAgeDays))
-foreach ($item in (Get-ChildItem -LiteralPath $tempRoot -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff })) {
-  try {
-    Remove-VerifiedItem -Path $item.FullName -AllowedRoot $tempRoot
-  } catch [System.IO.IOException] {
-    # Active application temp files can remain locked; skipping them is safer.
-  } catch [System.UnauthorizedAccessException] {
-    # Keep temp files owned by another active security context.
+$generatedProjectPaths = @(
+  (Join-Path $ProjectRoot "apps\dashboard\.next-e2e"),
+  (Join-Path $ProjectRoot "apps\dashboard\.next-validation"),
+  (Join-Path $ProjectRoot "test-results"),
+  (Join-Path $ProjectRoot "playwright-report"),
+  (Join-Path $ProjectRoot "packages\shared\.dist-validation"),
+  (Join-Path $ProjectRoot "packages\db\.dist-validation"),
+  (Join-Path $ProjectRoot "apps\api\.dist-validation"),
+  (Join-Path $ProjectRoot "apps\worker\.dist-validation")
+)
+foreach ($path in $generatedProjectPaths) {
+  Remove-VerifiedItem -Path $path -AllowedRoot $ProjectRoot
+}
+
+if (!$SkipSystemTemp) {
+  $tempRoot = [IO.Path]::GetFullPath($env:TEMP)
+  $cutoff = (Get-Date).AddDays(-[Math]::Max(7, $TempMinimumAgeDays))
+  foreach ($item in (Get-ChildItem -LiteralPath $tempRoot -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff })) {
+    try {
+      Remove-VerifiedItem -Path $item.FullName -AllowedRoot $tempRoot
+    } catch [System.IO.IOException] {
+      # Active application temp files can remain locked; skipping them is safer.
+    } catch [System.UnauthorizedAccessException] {
+      # Keep temp files owned by another active security context.
+    }
   }
 }
 

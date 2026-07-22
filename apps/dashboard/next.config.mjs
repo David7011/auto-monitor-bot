@@ -5,10 +5,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  distDir: process.env.NEXT_DIST_DIR?.trim() || ".next",
   outputFileTracingRoot: path.join(__dirname, "../.."),
   transpilePackages: ["@amb/shared"],
   allowedDevOrigins: ["127.0.0.1", "localhost"],
-  typescript: { ignoreBuildErrors: false },
+  typescript: {
+    ignoreBuildErrors: false,
+    tsconfigPath: process.env.NEXT_TSCONFIG_PATH?.trim() || "tsconfig.json",
+  },
   async headers() {
     return [{
       source: "/(.*)",

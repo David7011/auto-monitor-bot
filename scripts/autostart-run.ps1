@@ -8,12 +8,22 @@ $AttemptLogPath = Join-Path $LogDir ("autostart-{0}.log" -f (Get-Date).ToString(
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 try {
-  & $StartScript 2>&1 | Tee-Object -FilePath $AttemptLogPath | Out-File -LiteralPath $LogPath -Encoding utf8
-  if ($LASTEXITCODE -ne 0) { throw "start.ps1 exited with code $LASTEXITCODE" }
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $records = @(& $StartScript 2>&1)
+  $startExitCode = $LASTEXITCODE
+  $ErrorActionPreference = $previousErrorActionPreference
+  $content = ($records | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+  if ($content) { $content += [Environment]::NewLine }
+  $utf8 = [Text.UTF8Encoding]::new($false)
+  [IO.File]::WriteAllText($AttemptLogPath, $content, $utf8)
+  [IO.File]::WriteAllText($LogPath, $content, $utf8)
+  if ($startExitCode -ne 0) { throw "start.ps1 exited with code $startExitCode" }
   exit 0
 } catch {
   $message = "{0} Autostart failed: {1}" -f (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssK"), $_.Exception.Message
-  $message | Out-File -LiteralPath $LogPath -Encoding utf8 -Append
-  $message | Out-File -LiteralPath $AttemptLogPath -Encoding utf8 -Append
+  $line = $message + [Environment]::NewLine
+  [IO.File]::AppendAllText($LogPath, $line, [Text.UTF8Encoding]::new($false))
+  [IO.File]::AppendAllText($AttemptLogPath, $line, [Text.UTF8Encoding]::new($false))
   exit 1
 }

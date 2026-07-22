@@ -399,6 +399,17 @@ export type SearchPlanResponse = {
     maxInitialWindowNotifications: number
     knownListingStopThreshold: number
   }
+  olxDiscovery: {
+    windowHours: number
+    channels: Array<{
+      channel: string
+      sampleCount: number
+      latencySampleCount: number
+      p50Seconds: number | null
+      p95Seconds: number | null
+      maxSeconds: number | null
+    }>
+  }
   backfill: {
     intervalSeconds: number
     initialDelaySeconds: number

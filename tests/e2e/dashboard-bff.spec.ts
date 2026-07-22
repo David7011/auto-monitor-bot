@@ -65,28 +65,27 @@ test("mobile dashboard exposes full navigation and touch actions", async ({ page
   await expect(page.getByRole("heading", { name: /Найденные авто/i })).toBeVisible();
 });
 
-test("all authenticated screens render on narrow Android and iPhone viewports", async ({ page }) => {
-  await loginDashboard(page);
+const authenticatedScreens: Array<{ path: string; heading: RegExp }> = [
+  { path: "/", heading: /^Центр мониторинга$/i },
+  { path: "/filters", heading: /^Фильтры поиска$/i },
+  { path: "/sources", heading: /^Источники$/i },
+  { path: "/listings", heading: /^Найденные авто$/i },
+  { path: "/logs", heading: /^Журнал системы$/i },
+  { path: "/settings", heading: /^Настройки$/i },
+  { path: "/planner", heading: /^Планировщик$/i },
+];
 
-  const screens: Array<{ path: string; heading: RegExp }> = [
-    { path: "/", heading: /^Центр мониторинга$/i },
-    { path: "/filters", heading: /^Фильтры поиска$/i },
-    { path: "/sources", heading: /^Источники$/i },
-    { path: "/listings", heading: /^Найденные авто$/i },
-    { path: "/logs", heading: /^Журнал системы$/i },
-    { path: "/settings", heading: /^Настройки$/i },
-    { path: "/planner", heading: /^Планировщик$/i },
-  ];
+const authenticatedViewports = [
+  { width: 360, height: 800, name: "android-360" },
+  { width: 430, height: 932, name: "iphone-430" },
+];
 
-  const viewports = [
-    { width: 360, height: 800, name: "android-360" },
-    { width: 430, height: 932, name: "iphone-430" },
-  ];
-
-  for (const viewport of viewports) {
+for (const viewport of authenticatedViewports) {
+  test(`all authenticated screens render on ${viewport.name}`, async ({ page }) => {
+    await loginDashboard(page);
     await page.setViewportSize(viewport);
-    for (const screen of screens) {
-      await page.goto(screen.path);
+    for (const screen of authenticatedScreens) {
+      await page.goto(screen.path, { waitUntil: "domcontentloaded" });
       await expect(page.getByRole("heading", { name: screen.heading })).toBeVisible();
       await expect(page.getByRole("button", { name: /Открыть остальные разделы/i })).toBeVisible();
       await expectNoHorizontalOverflow(page);
@@ -98,10 +97,9 @@ test("all authenticated screens render on narrow Android and iPhone viewports", 
         await page.screenshot({ path: `test-results/${viewport.name}-${filename}.png` });
       }
     }
-  }
-
-  await expect(page.getByText(/Глубокая проверка:/i)).toBeVisible();
-});
+    await expect(page.getByText(/Глубокая проверка:/i)).toBeVisible();
+  });
+}
 
 test("dashboard BFF can stop and start monitoring with JSON-safe POST", async ({ page }) => {
   test.skip(

@@ -10,6 +10,7 @@ import {
   inferVehicleAttributes,
   normalizeVehicleText,
   sortListingsNewestFirst,
+  type ListingObservationChannel,
   type NormalizedListing,
 } from "@amb/shared";
 import { env } from "../env.js";
@@ -113,10 +114,19 @@ type OlxPrerenderedState = {
   };
 };
 
-type OlxFeedResult =
-  | { ads: OlxAd[]; primary: boolean; url: string; requestCount: number }
-  | { blocked: BlockedHtmlResult; primary: boolean; url: string; requestCount: number }
-  | { error: Error; primary: boolean; url: string; requestCount: number };
+type OlxFeedMetadata = {
+  primary: boolean;
+  url: string;
+  requestCount: number;
+  channel: ListingObservationChannel;
+  observationTarget: string;
+};
+
+type OlxFeedResult = (
+  | { ads: OlxAd[] }
+  | { blocked: BlockedHtmlResult }
+  | { error: Error }
+) & OlxFeedMetadata;
 
 const OLX_CATEGORY_ID = 108;
 const OLX_FEED_REFERER = "https://www.olx.ua/uk/transport/legkovye-avtomobili/";
@@ -193,8 +203,19 @@ export class OlxCollector implements SourceCollector {
       }
 
       const feedTargets = olxFeedTargets(context, page, activeScopes);
+      const directTargetKeys = new Set(
+        olxFeedTargets(context, page, resolvedLocations.scopes).map((target) => target.observationTarget),
+      );
       const feedResults: OlxFeedResult[] = await Promise.all(
-        feedTargets.map((target, index) => fetchOlxFeed(target.apiUrl, target.htmlUrl, index === 0)),
+        feedTargets.map((target, index) => fetchOlxFeed(
+          target.apiUrl,
+          target.htmlUrl,
+          index === 0,
+          target.privateOnly
+            ? "OLX_PRIVATE_API"
+            : directTargetKeys.has(target.observationTarget) ? "OLX_PUBLIC_API" : "OLX_REGIONAL_API",
+          target.observationTarget,
+        )),
       );
       fastFeedRequests += feedTargets.length;
       for (const result of feedResults) {
@@ -222,7 +243,12 @@ export class OlxCollector implements SourceCollector {
         lastHtmlCoverageAt = now;
         const htmlTargets = olxFeedTargets(context, 1, resolvedLocations.scopes);
         const htmlResults = await Promise.all(
-          htmlTargets.map((target) => fetchOlxHtmlFeed(target.htmlUrl, false)),
+          htmlTargets.map((target) => fetchOlxHtmlFeed(
+            target.htmlUrl,
+            false,
+            "OLX_HTML_COVERAGE",
+            target.observationTarget,
+          )),
         );
         requestCount += htmlResults.reduce((total, result) => total + result.requestCount, 0);
         htmlFeedRequests += htmlTargets.length;
@@ -261,7 +287,13 @@ export class OlxCollector implements SourceCollector {
           includePrivateFeed: true,
         }).filter((target) => target.privateOnly);
         const privateResults = await Promise.all(
-          privateTargets.map((target) => fetchOlxApiFeed(target.apiUrl, false)),
+          privateTargets.map((target) => fetchOlxApiFeed(
+            target.apiUrl,
+            false,
+            env.OLX_REQUEST_TIMEOUT_MS,
+            "OLX_PRIVATE_API",
+            target.observationTarget,
+          )),
         );
         privateFeedRequests += privateTargets.length;
         requestCount += privateResults.reduce((total, result) => total + result.requestCount, 0);
@@ -316,6 +348,8 @@ export class OlxCollector implements SourceCollector {
           knownExternalIds: state.knownExternalIds,
           seenExternalIds,
           maxCandidates: Math.max(0, maxCandidates - listings.length),
+          observationChannel: feed.channel,
+          observationTarget: feed.observationTarget,
         });
         listings.push(...selection.listings);
         for (const externalId of selection.scannedExternalIds) scannedExternalIds.add(externalId);
@@ -511,23 +545,38 @@ async function fetchOlxDetailAd(url: string): Promise<OlxAd | undefined> {
   return normalizeOlxApiAd({ ...detail, url: detail.url ?? url });
 }
 
-async function fetchOlxFeed(apiUrl: string, htmlUrl: string, primary: boolean): Promise<OlxFeedResult> {
-  const apiResult = await fetchOlxApiFeed(apiUrl, primary);
+async function fetchOlxFeed(
+  apiUrl: string,
+  htmlUrl: string,
+  primary: boolean,
+  channel: ListingObservationChannel,
+  observationTarget: string,
+): Promise<OlxFeedResult> {
+  const apiResult = await fetchOlxApiFeed(apiUrl, primary, env.OLX_REQUEST_TIMEOUT_MS, channel, observationTarget);
   if ("ads" in apiResult || "blocked" in apiResult) return apiResult;
 
-  const htmlResult = await fetchOlxHtmlFeed(htmlUrl, primary);
+  const htmlResult = await fetchOlxHtmlFeed(htmlUrl, primary, "OLX_HTML_FALLBACK", observationTarget);
   if ("error" in htmlResult) {
     return {
       error: new Error(`${apiResult.error.message}; HTML fallback: ${htmlResult.error.message}`),
       primary,
       url: apiUrl,
       requestCount: apiResult.requestCount + htmlResult.requestCount,
+      channel: "OLX_HTML_FALLBACK",
+      observationTarget,
     };
   }
   return { ...htmlResult, requestCount: apiResult.requestCount + htmlResult.requestCount };
 }
 
-async function fetchOlxApiFeed(url: string, primary: boolean, timeoutMs = env.OLX_REQUEST_TIMEOUT_MS): Promise<OlxFeedResult> {
+async function fetchOlxApiFeed(
+  url: string,
+  primary: boolean,
+  timeoutMs = env.OLX_REQUEST_TIMEOUT_MS,
+  channel: ListingObservationChannel = "OLX_PUBLIC_API",
+  observationTarget = olxObservationTargetFromUrl(url),
+): Promise<OlxFeedResult> {
+  const metadata: OlxFeedMetadata = { primary, url, requestCount: 1, channel, observationTarget };
   const response = await sourceHttpClient.json<OlxApiResponse>(url, {
     source: "OLX",
     timeoutMs,
@@ -542,9 +591,7 @@ async function fetchOlxApiFeed(url: string, primary: boolean, timeoutMs = env.OL
         limitedReason: "OLX временно ограничил частоту запросов к поисковой ленте",
         retryAfterSeconds: response.retryAfterSeconds,
       },
-      primary,
-      url,
-      requestCount: 1,
+      ...metadata,
     };
   }
   if (response.classification === "CHALLENGE") {
@@ -554,9 +601,7 @@ async function fetchOlxApiFeed(url: string, primary: boolean, timeoutMs = env.OL
         detector: response.detector ?? "olx-api-access-denied",
         limitedReason: "OLX включил защитную страницу для публичной поисковой ленты",
       },
-      primary,
-      url,
-      requestCount: 1,
+      ...metadata,
     };
   }
   if (response.classification === "ACCESS_DENIED") {
@@ -566,29 +611,29 @@ async function fetchOlxApiFeed(url: string, primary: boolean, timeoutMs = env.OL
         detector: response.detector ?? "olx-api-access-denied",
         limitedReason: "OLX временно отклонил запрос без CAPTCHA; используется короткая безопасная пауза",
       },
-      primary,
-      url,
-      requestCount: 1,
+      ...metadata,
     };
   }
   if (response.classification !== "SUCCESS" || !response.data) {
     return {
       error: new Error(response.errorMessage ?? `OLX API returned ${response.classification} (HTTP ${response.status})`),
-      primary,
-      url,
-      requestCount: 1,
+      ...metadata,
     };
   }
 
   return {
     ads: (response.data.data ?? []).map(normalizeOlxApiAd),
-    primary,
-    url,
-    requestCount: 1,
+    ...metadata,
   };
 }
 
-async function fetchOlxHtmlFeed(url: string, primary: boolean): Promise<OlxFeedResult> {
+async function fetchOlxHtmlFeed(
+  url: string,
+  primary: boolean,
+  channel: ListingObservationChannel = "OLX_HTML_COVERAGE",
+  observationTarget = olxObservationTargetFromUrl(url),
+): Promise<OlxFeedResult> {
+  const metadata: OlxFeedMetadata = { primary, url, requestCount: 1, channel, observationTarget };
   try {
     const response = await fetchHtml(url, {
       source: "OLX",
@@ -596,9 +641,9 @@ async function fetchOlxHtmlFeed(url: string, primary: boolean): Promise<OlxFeedR
       headers: { referer: OLX_FEED_REFERER },
     });
     const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds);
-    if (blocked.rateLimited || blocked.captchaDetected) return { blocked, primary, url, requestCount: 1 };
+    if (blocked.rateLimited || blocked.captchaDetected) return { blocked, ...metadata };
     if (response.status < 200 || response.status >= 300) {
-      return { error: new Error(`HTTP ${response.status}`), primary, url, requestCount: 1 };
+      return { error: new Error(`HTTP ${response.status}`), ...metadata };
     }
 
     const prerenderedState = extractPrerenderedState(response.body);
@@ -607,9 +652,9 @@ async function fetchOlxHtmlFeed(url: string, primary: boolean): Promise<OlxFeedR
     for (const card of extractRenderedOlxCards(response.body)) {
       if (!ads.has(String(card.id))) ads.set(String(card.id), card);
     }
-    return { ads: [...ads.values()], primary, url, requestCount: 1 };
+    return { ads: [...ads.values()], ...metadata };
   } catch (error) {
-    return { error: error instanceof Error ? error : new Error(String(error)), primary, url, requestCount: 1 };
+    return { error: error instanceof Error ? error : new Error(String(error)), ...metadata };
   }
 }
 
@@ -707,7 +752,7 @@ function olxFeedTargets(
   context: SourceSearchContext,
   page: number,
   scopes: OlxLocationScope[] = olxLocationScopes(context),
-): Array<{ apiUrl: string; htmlUrl: string }> {
+): Array<{ apiUrl: string; htmlUrl: string; privateOnly: boolean; observationTarget: string }> {
   return buildOlxFeedTargets(context, page, scopes, {
     pageSize: olxApiPageSize(),
     includePrivateFeed: env.OLX_PRIVATE_FEED_ENABLED,
@@ -719,7 +764,7 @@ export function buildOlxFeedTargets(
   page: number,
   scopes: OlxLocationScope[],
   options: OlxFeedTargetOptions,
-): Array<{ apiUrl: string; htmlUrl: string; privateOnly: boolean }> {
+): Array<{ apiUrl: string; htmlUrl: string; privateOnly: boolean; observationTarget: string }> {
   const query = olxSearchQuery(context);
   const pageSize = Math.max(1, Math.min(50, Math.trunc(options.pageSize) || 50));
   const variants = options.includePrivateFeed ? [false, true] : [false];
@@ -741,9 +786,39 @@ export function buildOlxFeedTargets(
       if (privateOnly) html.searchParams.set("search[private_business]", "private");
       if (query) html.searchParams.set("search[q]", query);
       const htmlUrl = withPageNumber(html.toString(), page);
-      return { apiUrl: api.toString(), htmlUrl, privateOnly };
+      return {
+        apiUrl: api.toString(),
+        htmlUrl,
+        privateOnly,
+        observationTarget: olxObservationTarget(scope, page, privateOnly),
+      };
     }),
   );
+}
+
+function olxObservationTarget(scope: OlxLocationScope, page: number, privateOnly: boolean): string {
+  return [
+    `region:${scope.regionId ?? "all"}`,
+    `city:${scope.cityId ?? "all"}`,
+    `page:${Math.max(1, page)}`,
+    `owner:${privateOnly ? "private" : "all"}`,
+  ].join(";");
+}
+
+function olxObservationTargetFromUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    const limit = Math.max(1, Number(url.searchParams.get("limit")) || olxApiPageSize());
+    const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+    return [
+      `region:${url.searchParams.get("region_id") ?? "all"}`,
+      `city:${url.searchParams.get("city_id") ?? "all"}`,
+      `page:${Math.floor(offset / limit) + 1}`,
+      `owner:${url.searchParams.has("owner_type") || url.searchParams.has("search[private_business]") ? "private" : "all"}`,
+    ].join(";");
+  } catch {
+    return "region:unknown;city:unknown;page:unknown;owner:unknown";
+  }
 }
 
 function olxSearchQuery(context: SourceSearchContext): string | undefined {
@@ -814,6 +889,8 @@ export function selectOlxCandidates(
     knownExternalIds: ReadonlySet<string>;
     seenExternalIds?: Set<string>;
     maxCandidates: number;
+    observationChannel?: ListingObservationChannel;
+    observationTarget?: string;
   },
 ): {
   listings: NormalizedListing[];
@@ -869,6 +946,8 @@ export function selectOlxCandidates(
 
     const listing = normalizeOlxAd(ad, options.now);
     if (!listing) continue;
+    listing.observationChannel = options.observationChannel;
+    listing.observationTarget = options.observationTarget;
     if (beforeCutoff) {
       scannedExternalIds.push(externalId);
       continue;

@@ -7,7 +7,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export async function runRetentionMaintenance(now = new Date()): Promise<void> {
   const collectorCutoff = new Date(now.getTime() - env.RETENTION_COLLECTOR_RUN_DAYS * DAY_MS);
   const legacyObservationCutoff = new Date(now.getTime() - 7 * DAY_MS);
+  const supersededStateCutoff = new Date(now.getTime() - 7 * DAY_MS);
   const result = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('auto-monitor-bot:retention'))`;
     const aggregated = await tx.$executeRaw`
       INSERT INTO "collector_run_hourly" (
         "id", "bucketAt", "source", "lane", "status", "runCount",
@@ -60,6 +62,19 @@ export async function runRetentionMaintenance(now = new Date()): Promise<void> {
       DELETE FROM "source_seen_listings"
       WHERE "normalizedData" IS NULL AND "createdAt" < ${legacyObservationCutoff}
     `;
+    const supersededStates = await tx.$executeRaw`
+      DELETE FROM "source_search_states" AS old_state
+      WHERE old_state."updatedAt" < ${supersededStateCutoff}
+        AND EXISTS (
+          SELECT 1
+          FROM "source_search_states" AS new_state
+          WHERE new_state."source" = old_state."source"
+            AND new_state."fingerprint" <> old_state."fingerprint"
+            AND new_state."updatedAt" > old_state."updatedAt"
+            AND new_state."filterIds" @> old_state."filterIds"
+            AND old_state."filterIds" @> new_state."filterIds"
+        )
+    `;
     const orphanStates = await tx.$executeRaw`
       DELETE FROM "source_search_states" AS state
       WHERE NOT EXISTS (
@@ -67,15 +82,15 @@ export async function runRetentionMaintenance(now = new Date()): Promise<void> {
         WHERE filter."enabled" = true AND filter."id" = ANY(state."filterIds")
       )
     `;
-    return { aggregated, collectorRuns, errors, audits, observations, legacyObservations, orphanStates };
-  });
+    return { aggregated, collectorRuns, errors, audits, observations, legacyObservations, supersededStates, orphanStates };
+  }, { maxWait: 10_000, timeout: 120_000 });
 
   const deleted = result.collectorRuns.count + result.errors.count + result.audits.count + result.observations.count +
-    result.legacyObservations + result.orphanStates;
+    result.legacyObservations + result.supersededStates + result.orphanStates;
   if (deleted > 0) {
     await log.info(
       "retention",
-      `Compacted ${result.collectorRuns.count} collector runs into ${result.aggregated} hourly buckets; deleted ${result.errors.count} errors, ${result.audits.count} audits, ${result.observations.count} expired observations, ${result.legacyObservations} legacy observations and ${result.orphanStates} orphan search states`,
+      `Compacted ${result.collectorRuns.count} collector runs into ${result.aggregated} hourly buckets; deleted ${result.errors.count} errors, ${result.audits.count} audits, ${result.observations.count} expired observations, ${result.legacyObservations} legacy observations, ${result.supersededStates} superseded search states and ${result.orphanStates} orphan search states`,
     );
   }
 }

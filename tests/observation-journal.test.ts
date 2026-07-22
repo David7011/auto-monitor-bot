@@ -26,6 +26,8 @@ describe("observation journal serialization", () => {
       publishedAt,
       timestampConfidence: "HIGH",
       firstSeenAt: new Date("2026-07-14T08:00:05.000Z"),
+      observationChannel: "OLX_HTML_COVERAGE",
+      observationTarget: "region:21;city:121;page:1;owner:all",
       raw: { huge: "source payload" },
     };
 
@@ -42,6 +44,8 @@ describe("observation journal serialization", () => {
       year: 2015,
       priceNormalized: 9_400,
       city: "Самар",
+      observationChannel: "OLX_HTML_COVERAGE",
+      observationTarget: "region:21;city:121;page:1;owner:all",
     });
     expect(restored?.publishedAt?.toISOString()).toBe(publishedAt.toISOString());
   });

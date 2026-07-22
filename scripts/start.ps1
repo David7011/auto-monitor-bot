@@ -367,13 +367,38 @@ function Test-ProductionBuilds {
   foreach ($path in $expected) {
     if (!(Test-Path -LiteralPath $path)) { return $false }
   }
+
+  $buildInputs = @(
+    (Join-Path $ProjectRoot "package.json"),
+    (Join-Path $ProjectRoot "pnpm-lock.yaml"),
+    (Join-Path $ProjectRoot "tsconfig.base.json"),
+    (Join-Path $ProjectRoot "packages\shared\src"),
+    (Join-Path $ProjectRoot "packages\db\src"),
+    (Join-Path $ProjectRoot "packages\db\prisma"),
+    (Join-Path $ProjectRoot "apps\api\src"),
+    (Join-Path $ProjectRoot "apps\worker\src"),
+    (Join-Path $ProjectRoot "apps\dashboard\app"),
+    (Join-Path $ProjectRoot "apps\dashboard\components"),
+    (Join-Path $ProjectRoot "apps\dashboard\lib"),
+    (Join-Path $ProjectRoot "apps\dashboard\next.config.mjs")
+  )
+  $newestInput = $buildInputs | ForEach-Object {
+    if (Test-Path -LiteralPath $_ -PathType Leaf) { Get-Item -LiteralPath $_ }
+    elseif (Test-Path -LiteralPath $_ -PathType Container) { Get-ChildItem -LiteralPath $_ -File -Recurse -ErrorAction SilentlyContinue }
+  } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+  $oldestArtifact = $expected | ForEach-Object { Get-Item -LiteralPath $_ } |
+    Sort-Object LastWriteTimeUtc | Select-Object -First 1
+  if ($newestInput -and $oldestArtifact -and $newestInput.LastWriteTimeUtc -gt $oldestArtifact.LastWriteTimeUtc) {
+    Write-Host "Production build is stale: $($newestInput.FullName) is newer than deployed artifacts"
+    return $false
+  }
   return $true
 }
 
 function Ensure-ProductionBuilds {
   if (Test-ProductionBuilds) { return }
-  Write-Host "Production builds are missing; running pnpm build"
-  Invoke-Pnpm @("build")
+  Write-Host "Production builds are missing or stale; running pnpm build:deploy"
+  Invoke-Pnpm @("build:deploy")
 }
 
 function Get-DotEnvValue([string]$Name) {

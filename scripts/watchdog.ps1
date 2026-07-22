@@ -10,7 +10,10 @@ $LogDir = Join-Path $RuntimeRoot "logs"
 $LogPath = Join-Path $LogDir "watchdog.log"
 $LockPath = Join-Path $RuntimeRoot "watchdog.lock"
 $StatePath = Join-Path $RuntimeRoot "watchdog-state.json"
-$AutostartScript = Join-Path $ProjectRoot "scripts\autostart-run.ps1"
+$SupervisorScript = Join-Path $ProjectRoot "scripts\supervisor.ps1"
+$SupervisorLockPath = Join-Path $RuntimeRoot "supervisor.lock"
+$ValidationLockPath = Join-Path $RuntimeRoot "validation.lock"
+$StartLockPath = Join-Path $RuntimeRoot "start.lock"
 $ProcessManagementScript = Join-Path $PSScriptRoot "process-management.ps1"
 
 . $ProcessManagementScript
@@ -28,6 +31,19 @@ function Write-WatchdogLog([string]$Message) {
   }
   $line = "{0} {1}{2}" -f (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssK"), $Message, [Environment]::NewLine
   [IO.File]::AppendAllText($LogPath, $line, [Text.UTF8Encoding]::new($false))
+}
+
+function Test-LockHeld([string]$Path) {
+  if (!(Test-Path -LiteralPath $Path)) { return $false }
+  $probe = $null
+  try {
+    $probe = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    return $false
+  } catch {
+    return $true
+  } finally {
+    if ($probe) { $probe.Dispose() }
+  }
 }
 
 function Read-WatchdogState {
@@ -149,6 +165,11 @@ try {
     exit 0
   }
 
+  if ((Test-LockHeld $ValidationLockPath) -or (Test-LockHeld $StartLockPath)) {
+    Write-WatchdogLog "health check deferred while validation or startup is in progress"
+    exit 0
+  }
+
   $state = Read-WatchdogState
   $nextAttemptAt = if ($state.nextAttemptAt) { [datetime]$state.nextAttemptAt } else { $null }
   if ($nextAttemptAt -and $nextAttemptAt -gt (Get-Date)) { exit 0 }
@@ -168,25 +189,17 @@ try {
   }
   Write-WatchdogState -FailureCount $failureCount -NextAttemptAt ((Get-Date).AddSeconds($delaySeconds)) -LastAlertAt $lastAlertAt
 
-  Write-WatchdogLog "restart requested: $($failures -join ',')"
-  try {
+  if (Test-LockHeld $SupervisorLockPath) {
+    Write-WatchdogLog "health failure delegated to active supervisor: $($failures -join ',')"
+  } else {
+    Write-WatchdogLog "supervisor was not active; starting it for: $($failures -join ',')"
     $powershell = Join-Path $PSHOME "powershell.exe"
-    $restart = Start-Process -FilePath $powershell -WindowStyle Hidden -PassThru -ArgumentList @(
+    Start-Process -FilePath $powershell -WindowStyle Hidden -ArgumentList @(
       "-NoProfile",
       "-NonInteractive",
       "-ExecutionPolicy", "Bypass",
-      "-File", $AutostartScript
-    )
-    # Process.WaitForExit waits only for the bootstrap process. Start-Process
-    # -Wait would also wait forever for the long-lived Node descendants.
-    $restart.WaitForExit()
-    if ($restart.ExitCode -ne 0) { throw "autostart-run.ps1 exited with code $($restart.ExitCode)" }
-    if ($alertSent) { Send-WatchdogAlert "Auto Monitor Bot: service has recovered." | Out-Null }
-    Write-WatchdogState -FailureCount 0 -NextAttemptAt $null -LastAlertAt $null
-    Write-WatchdogLog "restart completed"
-  } catch {
-    Write-WatchdogLog "restart failed: $($_.Exception.Message)"
-    throw
+      "-File", $SupervisorScript
+    ) | Out-Null
   }
 } finally {
   if ($lock) { $lock.Dispose() }
