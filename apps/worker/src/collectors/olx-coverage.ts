@@ -11,6 +11,22 @@ export type OlxCoverageSchedule = {
   privateDue: boolean;
 };
 
+export function olxCoverageExecutionSchedule(input: {
+  coverageOnly: boolean;
+  suppressBackground: boolean;
+  now: Date;
+  state: OlxCoverageState;
+  hasRegionalFilters: boolean;
+  regionalIntervalSeconds: number;
+  htmlIntervalSeconds: number;
+  privateIntervalSeconds: number;
+}): OlxCoverageSchedule {
+  if (!input.coverageOnly || input.suppressBackground) {
+    return { regionalDue: false, htmlDue: false, privateDue: false };
+  }
+  return olxCoverageSchedule({ ...input, isBackfill: false });
+}
+
 export function olxCoverageSchedule(input: {
   now: Date;
   state: OlxCoverageState;

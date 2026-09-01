@@ -40,6 +40,54 @@ function Test-AmbOwnedProcess {
   return $false
 }
 
+function Test-AmbOwnedServiceProcess {
+  param(
+    $Process,
+    [Parameter(Mandatory = $true)][string]$ProjectRoot,
+    [Parameter(Mandatory = $true)][string]$ServiceName
+  )
+
+  if (!(Test-AmbOwnedProcess -Process $Process -ProjectRoot $ProjectRoot)) { return $false }
+  $line = if ($null -eq $Process.CommandLine) { "" } else { [string]$Process.CommandLine }
+  $normalizedLine = $line.Replace("/", "\").ToLowerInvariant()
+  switch ($ServiceName.ToLowerInvariant()) {
+    "worker-hot-a" {
+      return ($normalizedLine.Contains("--role=hot") -and $normalizedLine.Contains("--instance=a")) -or
+        $normalizedLine.Contains("dev:hot:a")
+    }
+    "worker-hot-b" {
+      return ($normalizedLine.Contains("--role=hot") -and $normalizedLine.Contains("--instance=b")) -or
+        $normalizedLine.Contains("dev:hot:b")
+    }
+    "worker-background" {
+      return $normalizedLine.Contains("--role=background") -or $normalizedLine.Contains("dev:background")
+    }
+    default { return $true }
+  }
+}
+
+function Test-AmbParentChildLink {
+  param(
+    $Parent,
+    $Child
+  )
+
+  if (!$Parent -or !$Child) { return $false }
+  if ([int]$Child.ParentProcessId -ne [int]$Parent.ProcessId) { return $false }
+  if ($null -ne $Parent.SessionId -and $null -ne $Child.SessionId -and
+      [int]$Parent.SessionId -ne [int]$Child.SessionId) { return $false }
+
+  # Windows can reuse a PID while an older process still carries that number
+  # in ParentProcessId. Such a process is not a child of the current owner and
+  # must never be terminated with the application tree.
+  if ($Parent.CreationDate -and $Child.CreationDate) {
+    $parentCreated = [datetime]$Parent.CreationDate
+    $childCreated = [datetime]$Child.CreationDate
+    if ($childCreated -lt $parentCreated) { return $false }
+  }
+  return $true
+}
+
 function Stop-AmbAppProcesses {
   param(
     [Parameter(Mandatory = $true)][string]$ProjectRoot,
@@ -80,17 +128,20 @@ function Stop-AmbAppProcesses {
     if ($ProcessId -eq $PID -or $stoppedIds.Contains($ProcessId)) { return }
     $null = $stoppedIds.Add($ProcessId)
 
+    $process = $allProcesses | Where-Object { $_.ProcessId -eq $ProcessId } | Select-Object -First 1
+    if (!$process) { return }
+
     # Descendants are followed only from a root whose exact application
-    # signature was validated above. Children are stopped before their parent.
+    # signature was validated above. Creation time and session also prove that
+    # a reused PID did not create a false parent relationship.
     foreach ($child in $allProcesses | Where-Object { $_.ParentProcessId -eq $ProcessId }) {
-      Stop-OwnedTree -ProcessId ([int]$child.ProcessId)
+      if (Test-AmbParentChildLink -Parent $process -Child $child) {
+        Stop-OwnedTree -ProcessId ([int]$child.ProcessId)
+      }
     }
 
-    $process = $allProcesses | Where-Object { $_.ProcessId -eq $ProcessId } | Select-Object -First 1
     Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
-    if ($process) {
-      Write-Host "Stopped process $($process.ProcessId): $($process.Name)"
-    }
+    Write-Host "Stopped process $($process.ProcessId): $($process.Name)"
   }
 
   foreach ($rootId in @($rootIds)) {

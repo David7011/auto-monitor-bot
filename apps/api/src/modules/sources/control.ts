@@ -1,10 +1,30 @@
-import { prisma, type ListingSource, type Source } from "@amb/db";
-import { QUEUE_NAMES } from "@amb/shared";
+import { Prisma, prisma, type ListingSource, type Source } from "@amb/db";
+import {
+  QUEUE_NAMES,
+  startOfTodayInKyiv,
+  type SourcesStatusResponse,
+} from "@amb/shared";
 import { enqueue, redisConnection } from "../../lib/queues.js";
 import { env } from "../../env.js";
+import {
+  latestActiveIncidentPerSource,
+  mergeIncidentHistory,
+  mergeRecentRunsBySource,
+} from "../../lib/source-status-history.js";
+import { manualSourceCheckBlocked } from "../../lib/manual-source-check.js";
 import { orchestrator } from "../monitoring/orchestrator.js";
 
 const BULK_REAL_SOURCES = ["OLX", "RST", "CARS_UA", "AUTOMOTO"] as const;
+const RECENT_RUNS_PER_SOURCE = 8;
+const RECENT_RESOLVED_INCIDENTS = 20;
+const ACTIVE_INCIDENT_STATUSES = [
+  "DETECTED",
+  "COOLDOWN",
+  "MANUAL_VERIFICATION_REQUIRED",
+  "PROBE_PENDING",
+  "RECOVERING",
+  "REPEATED",
+] as const;
 
 export type ManualCheckBlocked = {
   ok: false;
@@ -16,6 +36,17 @@ export type ManualCheckBlocked = {
   };
 };
 
+export type ProtectedCheckBlocked = {
+  ok: false;
+  statusCode: 409;
+  body: {
+    error: string;
+    code: "SOURCE_PROTECTED";
+    source: ListingSource;
+    pausedUntil: Date | null;
+  };
+};
+
 export type ManualCheckResult = {
   ok: true;
   queued: ListingSource[];
@@ -23,31 +54,60 @@ export type ManualCheckResult = {
   count: number;
 };
 
-export async function getSourcesStatus() {
+export async function getSourcesStatus(): Promise<SourcesStatusResponse<Date>> {
   await orchestrator.ensureSources();
   const sources = await prisma.source.findMany({ orderBy: { name: "asc" } });
-  const runs = await prisma.collectorRun.findMany({
-    where: {
-      OR: [
-        { errorMessage: null },
-        {
-          NOT: {
-            errorMessage: {
-              contains: "supportsNewestFirst",
-            },
-          },
-        },
-      ],
-    },
-    orderBy: { startedAt: "desc" },
-    take: 20,
-  });
-  const challengeIncidents = await prisma.challengeIncident.findMany({
-    orderBy: { detectedAt: "desc" },
-    take: 20,
-    include: { source: { select: { source: true, name: true } } },
-  });
-  return { sources, recentRuns: runs, challengeIncidents };
+  const runWhere: Prisma.CollectorRunWhereInput = {
+    OR: [
+      { errorMessage: null },
+      { NOT: { errorMessage: { contains: "supportsNewestFirst" } } },
+    ],
+  };
+  const [runsBySource, activeIncidents, recentResolvedIncidents, discoveredTodayRows] = await Promise.all([
+    Promise.all(sources.map((source) => prisma.collectorRun.findMany({
+      where: { source: source.source, ...runWhere },
+      orderBy: { startedAt: "desc" },
+      take: RECENT_RUNS_PER_SOURCE,
+    }))),
+    Promise.all(sources.map((source) => prisma.challengeIncident.findFirst({
+      where: {
+        sourceId: source.id,
+        status: { in: [...ACTIVE_INCIDENT_STATUSES] },
+      },
+      orderBy: [{ updatedAt: "desc" }, { detectedAt: "desc" }],
+      include: { source: { select: { source: true, name: true } } },
+    }))),
+    prisma.challengeIncident.findMany({
+      where: { status: "RESOLVED" },
+      orderBy: { detectedAt: "desc" },
+      take: RECENT_RESOLVED_INCIDENTS,
+      include: { source: { select: { source: true, name: true } } },
+    }),
+    prisma.sourceSeenListing.groupBy({
+      by: ["source"],
+      where: { firstSeenAt: { gte: startOfTodayInKyiv() } },
+      _count: { _all: true },
+    }),
+  ]);
+  const recentRuns = mergeRecentRunsBySource(runsBySource);
+  const existingActiveIncidents = activeIncidents.filter(
+    (incident): incident is NonNullable<typeof incident> => incident !== null,
+  );
+  const challengeIncidents = mergeIncidentHistory(
+    latestActiveIncidentPerSource(existingActiveIncidents),
+    recentResolvedIncidents,
+  );
+  const discoveredToday = discoveredTodayRows.map((row) => ({
+    source: row.source,
+    count: row._count._all,
+  }));
+  return {
+    sources,
+    recentRuns,
+    challengeIncidents,
+    discoveredToday,
+    generatedAt: new Date(),
+  };
 }
 
 export async function checkActiveSourcesNow(): Promise<ManualCheckResult | ManualCheckBlocked> {
@@ -74,9 +134,25 @@ export async function checkActiveSourcesNow(): Promise<ManualCheckResult | Manua
   return { ok: true, queued, deduplicated, count: queued.length };
 }
 
-export async function checkSourceNow(source: Source): Promise<{ ok: true; queued: boolean; deduplicated: boolean } | ManualCheckBlocked> {
+export async function checkSourceNow(source: Source): Promise<
+  { ok: true; queued: boolean; deduplicated: boolean }
+  | ManualCheckBlocked
+  | ProtectedCheckBlocked
+> {
   const manualAllowed = await ensureManualCheckAllowed();
   if (!manualAllowed.ok) return manualAllowed;
+  if (manualSourceCheckBlocked(source)) {
+    return {
+      ok: false,
+      statusCode: 409,
+      body: {
+        error: "Источник находится в защитной паузе; дождитесь единственного штатного probe",
+        code: "SOURCE_PROTECTED",
+        source: source.source,
+        pausedUntil: source.pausedUntil,
+      },
+    };
+  }
 
   const result = await enqueueManualCollector(source);
   return { ok: true, ...result };

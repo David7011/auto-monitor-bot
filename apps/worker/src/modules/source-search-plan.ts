@@ -1,12 +1,88 @@
 import { createHash } from "node:crypto";
-import { Prisma, prisma, type Filter, type ListingSource } from "@amb/db";
-import { freshnessCutoff, sortListingsNewestFirst, type NormalizedListing } from "@amb/shared";
+import { compactSourceSearchStates, Prisma, prisma, type Filter, type ListingSource } from "@amb/db";
+import {
+  freshnessCutoff,
+  sortListingsNewestFirst,
+  type ListingDiscoveryLane,
+  type NormalizedListing,
+} from "@amb/shared";
 import type { SourceSearchContext, SourceSearchState } from "../collectors/base.js";
 import { env } from "../env.js";
+import { log } from "../lib/log.js";
 
 const MAX_CONTEXT_KNOWN_IDS = 5000;
+const MAX_COVERAGE_ANCHOR_IDS = 50;
+
+type PlannedStateReconciliation = {
+  signature: string;
+  fingerprints: string[];
+  reconciled: boolean;
+};
+
+const plannedStateReconciliations = new Map<ListingSource, PlannedStateReconciliation>();
 
 type FreshnessMode = SourceSearchContext["freshnessMode"];
+
+export function planCoverageRecovery(options: {
+  source: ListingSource;
+  lane: ListingDiscoveryLane;
+  now: Date;
+  lastSuccessfulScanAt?: Date;
+  currentPending: boolean;
+  currentCutoffAt?: Date;
+  contextCutoffAt?: Date;
+  coverageGap: boolean;
+  knownIdsReset: boolean;
+  outageDetectionSeconds: number;
+  lookbackHours: number;
+  safetyOverlapSeconds: number;
+}): {
+  outageDetected: boolean;
+  requested: boolean;
+  reason: "OFFLINE_WINDOW" | "REALTIME_OVERFLOW" | "KNOWN_IDS_RESET" | null;
+  persistedBoundaryAt: Date | null;
+  requiredCutoffAt: Date | null;
+} {
+  const outageDetected = options.source === "OLX"
+    && options.lane === "REALTIME"
+    && Boolean(options.lastSuccessfulScanAt)
+    && options.now.getTime() - options.lastSuccessfulScanAt!.getTime() >= options.outageDetectionSeconds * 1_000;
+  const newRequest = outageDetected || options.coverageGap || options.knownIdsReset;
+  const requested = options.currentPending || newRequest;
+  if (!requested) {
+    return {
+      outageDetected: false,
+      requested: false,
+      reason: null,
+      persistedBoundaryAt: null,
+      requiredCutoffAt: null,
+    };
+  }
+
+  const lookbackFloor = new Date(options.now.getTime() - options.lookbackHours * 60 * 60 * 1_000);
+  const boundary = options.lastSuccessfulScanAt ?? options.now;
+  const safetyCutoff = laterDate(
+    lookbackFloor,
+    new Date(boundary.getTime() - options.safetyOverlapSeconds * 1_000),
+  );
+  return {
+    outageDetected,
+    requested,
+    reason: outageDetected
+      ? "OFFLINE_WINDOW"
+      : options.coverageGap
+        ? "REALTIME_OVERFLOW"
+        : options.knownIdsReset
+          ? "KNOWN_IDS_RESET"
+          : null,
+    persistedBoundaryAt: boundary,
+    requiredCutoffAt: oldestDate(
+      options.currentCutoffAt,
+      newRequest ? safetyCutoff : undefined,
+      options.contextCutoffAt,
+    ) ?? boundary,
+  };
+}
 
 export async function buildSourceSearchPlan(source: ListingSource, now = new Date()): Promise<SourceSearchContext[]> {
   const filters = await prisma.filter.findMany({
@@ -17,10 +93,16 @@ export async function buildSourceSearchPlan(source: ListingSource, now = new Dat
     orderBy: { updatedAt: "desc" },
   });
 
-  if (filters.length === 0) return [];
+  if (filters.length === 0) {
+    rememberPlannedContexts(source, []);
+    await compactSourceSearchStates({ source, currentFingerprints: [] });
+    return [];
+  }
 
   if (source !== "AUTO_RIA") {
-    return [buildBroadPublicContext(source, filters, now)];
+    const plan = [buildBroadPublicContext(source, filters, now)];
+    rememberPlannedContexts(source, plan);
+    return plan;
   }
 
   const contexts = new Map<string, SourceSearchContext>();
@@ -35,7 +117,9 @@ export async function buildSourceSearchPlan(source: ListingSource, now = new Dat
     }
   }
 
-  return [...contexts.values()];
+  const plan = [...contexts.values()];
+  rememberPlannedContexts(source, plan);
+  return plan;
 }
 
 export function buildSearchContextFromFilter(source: ListingSource, filter: Filter, now = new Date()): SourceSearchContext {
@@ -116,6 +200,10 @@ export async function loadSourceSearchState(context: SourceSearchContext): Promi
       filterIds: context.filterIds,
       query: persistedQuery(context),
       knownExternalIds: predecessor?.knownExternalIds ?? [],
+      coverageAnchorExternalIds: predecessor?.coverageAnchorExternalIds ?? [],
+      coverageRecoveryPending: predecessor?.coverageRecoveryPending ?? false,
+      coverageRecoveryCutoffAt: predecessor?.coverageRecoveryCutoffAt ?? null,
+      knownIdsResetAt: predecessor?.knownIdsResetAt ?? null,
       initialSyncCompletedAt: predecessor?.initialSyncCompletedAt ?? null,
       lastPublishedAt: predecessor?.lastPublishedAt ?? null,
       latestSeenPublishedAt: predecessor?.latestSeenPublishedAt ?? null,
@@ -127,6 +215,8 @@ export async function loadSourceSearchState(context: SourceSearchContext): Promi
       query: persistedQuery(context),
     },
   });
+
+  await reconcilePlannedStates(context.source, record.id);
 
   return {
     id: record.id,
@@ -148,7 +238,52 @@ export async function loadSourceSearchState(context: SourceSearchContext): Promi
     htmlCoveragePausedUntil: record.htmlCoveragePausedUntil ?? undefined,
     lastPrivateCoverageAt: record.lastPrivateCoverageAt ?? undefined,
     knownExternalIds: new Set(record.knownExternalIds),
+    coverageAnchorExternalIds: new Set(record.coverageAnchorExternalIds),
+    coverageRecoveryPending: record.coverageRecoveryPending,
+    coverageRecoveryCutoffAt: record.coverageRecoveryCutoffAt ?? undefined,
+    knownIdsResetAt: record.knownIdsResetAt ?? undefined,
   };
+}
+
+export function contextForCoverageRecovery(
+  context: SourceSearchContext,
+  state: SourceSearchState,
+  lane: ListingDiscoveryLane,
+): SourceSearchContext {
+  if (
+    context.source !== "OLX"
+    || lane !== "BACKFILL"
+    || !state.coverageRecoveryPending
+    || !state.coverageRecoveryCutoffAt
+  ) {
+    return context;
+  }
+  const publishedAfter = !context.publishedAfter || state.coverageRecoveryCutoffAt < context.publishedAfter
+    ? state.coverageRecoveryCutoffAt
+    : context.publishedAfter;
+  return { ...context, publishedAfter };
+}
+
+function rememberPlannedContexts(source: ListingSource, contexts: readonly SourceSearchContext[]): void {
+  const fingerprints = contexts.map((context) => context.fingerprint).sort((a, b) => a.localeCompare(b));
+  const signature = contexts
+    .map((context) => `${context.fingerprint}:${uniqueSorted(context.filterIds).join(",")}`)
+    .sort((a, b) => a.localeCompare(b))
+    .join("|");
+  const current = plannedStateReconciliations.get(source);
+  if (current?.signature === signature) return;
+  plannedStateReconciliations.set(source, { signature, fingerprints, reconciled: false });
+}
+
+async function reconcilePlannedStates(source: ListingSource, preserveStateId: string): Promise<void> {
+  const planned = plannedStateReconciliations.get(source);
+  if (!planned || planned.reconciled) return;
+  const result = await compactSourceSearchStates({
+    source,
+    preserveStateId,
+    currentFingerprints: planned.fingerprints,
+  });
+  if (result.planReady) planned.reconciled = true;
 }
 
 function buildBroadPublicContext(source: ListingSource, filters: Filter[], now: Date): SourceSearchContext {
@@ -159,8 +294,8 @@ function buildBroadPublicContext(source: ListingSource, filters: Filter[], now: 
     return candidate.publishedAfter < current.publishedAfter ? candidate : current;
   });
 
-  const regions = source === "OLX" ? uniqueSorted(filterContexts.flatMap((context) => context.regions)) : [];
-  const cities = source === "OLX" ? uniqueSorted(filterContexts.flatMap((context) => context.cities)) : [];
+  const geography = source === "OLX" ? mergeOlxFilterGeography(filterContexts) : { regions: [], cities: [] };
+  const { regions, cities } = geography;
   // Search text can use AND semantics and silently exclude spelling/model
   // variants. Non-AUTO.RIA collectors therefore scan broadly and filter here.
   const commonBrand = undefined;
@@ -185,6 +320,31 @@ function buildBroadPublicContext(source: ListingSource, filters: Filter[], now: 
     publishedAfter: widest.publishedAfter,
     initialWindowBehavior: env.INITIAL_WINDOW_BEHAVIOR,
     maxInitialWindowNotifications: env.MAX_INITIAL_WINDOW_NOTIFICATIONS,
+  };
+}
+
+/**
+ * Merge filter geography without ever narrowing a wider filter.
+ *
+ * Empty OLX geography means all Ukraine. A region-only filter is wider than a
+ * city filter and must keep region scopes because the OLX resolver deliberately
+ * prefers city scopes whenever at least one city is present.
+ */
+export function mergeOlxFilterGeography(
+  contexts: ReadonlyArray<Pick<SourceSearchContext, "regions" | "cities">>,
+): { regions: string[]; cities: string[] } {
+  if (contexts.some((context) => context.regions.length === 0 && context.cities.length === 0)) {
+    return { regions: [], cities: [] };
+  }
+
+  const regions = uniqueSorted(contexts.flatMap((context) => context.regions));
+  if (contexts.some((context) => context.regions.length > 0 && context.cities.length === 0)) {
+    return { regions, cities: [] };
+  }
+
+  return {
+    regions,
+    cities: uniqueSorted(contexts.flatMap((context) => context.cities)),
   };
 }
 
@@ -233,9 +393,15 @@ export async function markSourceSearchSuccess(
     newestFirstVerified?: boolean;
     cutoff?: Date;
     cutoffReached?: boolean;
-    lane?: "REALTIME" | "BACKFILL" | "MANUAL";
+    lane?: ListingDiscoveryLane;
     pageCount?: number;
     scannedExternalIds?: string[];
+    coverageVerified?: boolean;
+    coverageGap?: boolean;
+    coverageVerificationMethod?: "KNOWN_TAIL" | "CUTOFF" | "EXHAUSTED";
+    runId?: string;
+    requestCount?: number;
+    observedCount?: number;
     coverageStateUpdate?: {
       lastRegionalCoverageAt?: Date;
       lastHtmlCoverageAt?: Date;
@@ -243,15 +409,31 @@ export async function markSourceSearchSuccess(
       lastPrivateCoverageAt?: Date;
     };
   },
-): Promise<void> {
+): Promise<{
+  clearedKnownIdCount: number;
+  recoveryRequired: boolean;
+  outageDetected: boolean;
+  recoveryWindowId: string | null;
+  recoveryWindowOpened: boolean;
+  recoveryVerified: boolean;
+  requiredCutoffAt: Date | null;
+}> {
   const now = new Date();
   const sorted = sortListingsNewestFirst(listings);
   const lane = options.lane ?? "REALTIME";
 
-  await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT "id" FROM "source_search_states" WHERE "id" = ${state.id} FOR UPDATE`;
     const current = await tx.sourceSearchState.findUnique({ where: { id: state.id } });
-    if (!current) return;
+    if (!current) return {
+      clearedKnownIdCount: 0,
+      recoveryRequired: false,
+      outageDetected: false,
+      recoveryWindowId: null,
+      recoveryWindowOpened: false,
+      recoveryVerified: false,
+      requiredCutoffAt: null,
+    };
 
     const batchLatest = sorted[0];
     const batchLatestAt = batchLatest?.publishedAt ?? newestPublishedAt(sorted);
@@ -263,20 +445,119 @@ export async function markSourceSearchSuccess(
       : current.latestSeenExternalId ?? current.lastExternalId ?? undefined;
     const batchOldestAt = oldestPublishedAt(sorted);
     const oldestScannedAt = oldestDate(current.oldestScannedPublishedAt ?? undefined, batchOldestAt);
-    const knownExternalIds = mergeKnownIds(
+    const knownIdRotation = rotateKnownExternalIds(
+      context.source,
       [...sorted.map((listing) => listing.externalId), ...(options.scannedExternalIds ?? [])],
       new Set(current.knownExternalIds),
+      env.OLX_KNOWN_IDS_RESET_THRESHOLD,
     );
+    const recoveryPlan = planCoverageRecovery({
+      source: context.source,
+      lane,
+      now,
+      lastSuccessfulScanAt: current.lastSuccessfulScanAt ?? undefined,
+      currentPending: current.coverageRecoveryPending,
+      currentCutoffAt: current.coverageRecoveryCutoffAt ?? undefined,
+      contextCutoffAt: context.publishedAfter,
+      coverageGap: Boolean(options.coverageGap),
+      knownIdsReset: knownIdRotation.reset,
+      outageDetectionSeconds: env.OLX_OUTAGE_DETECTION_SECONDS,
+      lookbackHours: env.OLX_OUTAGE_RECOVERY_LOOKBACK_HOURS,
+      safetyOverlapSeconds: env.OLX_OUTAGE_SAFETY_OVERLAP_SECONDS,
+    });
+    const { outageDetected } = recoveryPlan;
+    const requestedCutoff = recoveryPlan.requiredCutoffAt ?? undefined;
+    const recoveryWasRequested = recoveryPlan.requested;
+    const verificationMethod = options.coverageVerificationMethod
+      ?? (options.coverageVerified ? (options.cutoffReached ? "CUTOFF" : "KNOWN_TAIL") : undefined);
+    const recoveryVerified = recoveryWasRequested
+      && lane !== "COVERAGE"
+      && Boolean(options.coverageVerified)
+      && Boolean(verificationMethod);
+    const recoveryRequired = recoveryWasRequested && !recoveryVerified;
+    const openingRecoveryWindow = !current.coverageRecoveryPending && recoveryWasRequested;
+    const frozenRecoveryAnchors = openingRecoveryWindow
+      ? current.knownExternalIds.slice(0, MAX_COVERAGE_ANCHOR_IDS)
+      : current.coverageAnchorExternalIds;
     const newestFirstVerifiedAt = options.newestFirstVerified
       ? current.newestFirstVerifiedAt ?? now
       : current.newestFirstVerifiedAt;
+
+    let recoveryWindow = await tx.coverageRecoveryWindow.findFirst({
+      where: { sourceSearchStateId: state.id, status: "PENDING" },
+      orderBy: { detectedAt: "desc" },
+    });
+    let recoveryWindowOpened = false;
+    if (!recoveryWindow && recoveryWasRequested) {
+      const persistedBoundaryAt = recoveryPlan.persistedBoundaryAt
+        ?? current.latestSeenPublishedAt
+        ?? current.lastPublishedAt
+        ?? now;
+      const requiredCutoffAt = requestedCutoff ?? context.publishedAfter ?? persistedBoundaryAt;
+      recoveryWindow = await tx.coverageRecoveryWindow.create({
+        data: {
+          source: context.source,
+          sourceSearchStateId: state.id,
+          reason: recoveryPlan.reason ?? "KNOWN_IDS_RESET",
+          persistedBoundaryAt,
+          requiredCutoffAt,
+          latestSeenAt: batchLatestAt ?? null,
+        },
+      });
+      recoveryWindowOpened = true;
+    }
+
+    const durableCutoff = oldestDate(
+      requestedCutoff,
+      recoveryWindow?.requiredCutoffAt,
+    ) ?? context.publishedAfter ?? null;
+
+    const recordsRecoveryAttempt = openingRecoveryWindow || lane === "BACKFILL" || recoveryVerified;
+    if (recoveryWindow && lane !== "COVERAGE" && recordsRecoveryAttempt) {
+      recoveryWindow = await tx.coverageRecoveryWindow.update({
+        where: { id: recoveryWindow.id },
+        data: recoveryVerified
+          ? {
+              status: "VERIFIED",
+              requiredCutoffAt: durableCutoff ?? recoveryWindow.requiredCutoffAt,
+              latestSeenAt: batchLatestAt ?? recoveryWindow.latestSeenAt,
+              lastAttemptAt: now,
+              lastAttemptRunId: options.runId ?? null,
+              verifiedAt: now,
+              verifiedRunId: options.runId ?? null,
+              verificationMethod,
+              oldestObservedAt: batchOldestAt ?? null,
+              pageCount: options.pageCount ?? 0,
+              requestCount: options.requestCount ?? 0,
+              observedCount: options.observedCount ?? sorted.length,
+            }
+          : {
+              requiredCutoffAt: durableCutoff ?? recoveryWindow.requiredCutoffAt,
+              latestSeenAt: batchLatestAt ?? recoveryWindow.latestSeenAt,
+              lastAttemptAt: now,
+              lastAttemptRunId: options.runId ?? null,
+              oldestObservedAt: batchOldestAt ?? null,
+              pageCount: options.pageCount ?? 0,
+              requestCount: options.requestCount ?? 0,
+              observedCount: options.observedCount ?? sorted.length,
+            },
+      });
+    }
 
     await tx.sourceSearchState.update({
       where: { id: state.id },
       data: {
         filterIds: context.filterIds,
         query: persistedQuery(context),
-        knownExternalIds,
+        knownExternalIds: knownIdRotation.knownExternalIds,
+        coverageAnchorExternalIds: recoveryRequired
+          ? frozenRecoveryAnchors.length > 0
+            ? frozenRecoveryAnchors
+            : knownIdRotation.coverageAnchorExternalIds
+          : [],
+        coverageRecoveryPending: recoveryRequired,
+        coverageRecoveryCutoffAt: recoveryRequired ? durableCutoff : null,
+        knownIdsResetAt: knownIdRotation.reset ? now : current.knownIdsResetAt,
         lastExternalId: latestExternalId ?? null,
         lastPublishedAt: latestPublishedAt ?? null,
         latestSeenPublishedAt: latestPublishedAt ?? null,
@@ -296,18 +577,43 @@ export async function markSourceSearchSuccess(
                 options.cutoff ?? context.publishedAfter,
               ),
             }
-          : {
+          : lane === "COVERAGE"
+            ? {}
+            : {
               realtimeCursor: cursorJson("realtime", now, latestPublishedAt, latestExternalId),
             }),
         newestFirstVerifiedAt,
         ...options.coverageStateUpdate,
-        lastSuccessfulScanAt: now,
+        ...(lane === "COVERAGE" ? {} : { lastSuccessfulScanAt: now }),
         initialSyncCompletedAt: options.initialSyncCompleted
           ? current.initialSyncCompletedAt ?? now
           : current.initialSyncCompletedAt,
       },
     });
+    return {
+      clearedKnownIdCount: knownIdRotation.reset ? knownIdRotation.mergedCount : 0,
+      recoveryRequired,
+      outageDetected,
+      recoveryWindowId: recoveryWindow?.id ?? null,
+      recoveryWindowOpened,
+      recoveryVerified,
+      requiredCutoffAt: recoveryRequired ? durableCutoff : recoveryWindow?.requiredCutoffAt ?? null,
+    };
   });
+
+  if (result.clearedKnownIdCount > 0) {
+    await log.info(
+      "olx-known-ids",
+      `OLX known-ID cache reached ${result.clearedKnownIdCount} entries and was reset to zero; ${MAX_COVERAGE_ANCHOR_IDS} continuity anchors were preserved separately and Telegram favorites were not modified`,
+    );
+  }
+  if (result.outageDetected) {
+    await log.warn(
+      "olx-coverage",
+      "OLX monitoring resumed after an outage; a bounded continuity recovery was requested",
+    );
+  }
+  return result;
 }
 
 export function createSearchFingerprint(query: Record<string, unknown>): string {
@@ -342,10 +648,11 @@ function oldestPublishedAt(listings: NormalizedListing[]): Date | undefined {
     .sort((a, b) => a.getTime() - b.getTime())[0];
 }
 
-function oldestDate(first: Date | undefined, second: Date | undefined): Date | undefined {
-  if (!first) return second;
-  if (!second) return first;
-  return first <= second ? first : second;
+function oldestDate(...values: Array<Date | undefined>): Date | undefined {
+  return values.filter((value): value is Date => Boolean(value)).reduce<Date | undefined>(
+    (oldest, value) => !oldest || value < oldest ? value : oldest,
+    undefined,
+  );
 }
 
 function cursorJson(
@@ -375,6 +682,29 @@ function mergeKnownIds(newestIds: string[], existing: Set<string>): string[] {
     if (merged.size >= MAX_CONTEXT_KNOWN_IDS) break;
   }
   return [...merged];
+}
+
+export function rotateKnownExternalIds(
+  source: ListingSource,
+  newestIds: string[],
+  existing: Set<string>,
+  olxResetThreshold = 2_000,
+): { knownExternalIds: string[]; coverageAnchorExternalIds: string[]; mergedCount: number; reset: boolean } {
+  const merged = mergeKnownIds(newestIds, existing);
+  const reset = source === "OLX" && merged.length >= Math.max(1, Math.trunc(olxResetThreshold));
+  return {
+    knownExternalIds: reset ? [] : merged,
+    coverageAnchorExternalIds: reset ? merged.slice(0, MAX_COVERAGE_ANCHOR_IDS) : [],
+    mergedCount: merged.length,
+    reset,
+  };
+}
+
+function laterDate(...values: Array<Date | undefined>): Date | undefined {
+  return values.filter((value): value is Date => Boolean(value)).reduce<Date | undefined>(
+    (latest, value) => !latest || value > latest ? value : latest,
+    undefined,
+  );
 }
 
 function stableStringify(value: unknown): string {

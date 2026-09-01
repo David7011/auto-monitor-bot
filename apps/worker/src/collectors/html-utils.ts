@@ -1,4 +1,5 @@
 import { sourceHttpClient } from "./source-http-client.js";
+import type { OlxRequestClass } from "../modules/olx-request-coordinator.js";
 
 export type BlockedHtmlResult = {
   rateLimited?: boolean;
@@ -6,6 +7,7 @@ export type BlockedHtmlResult = {
   limitedReason?: string;
   detector?: string;
   retryAfterSeconds?: number;
+  responseStatus?: number;
 };
 
 const CAPTCHA_PATTERNS: Array<{ detector: string; pattern: RegExp }> = [
@@ -27,18 +29,24 @@ export async function fetchHtml(
     timeoutMs?: number;
     source?: string;
     headers?: Record<string, string>;
+    requestClass?: OlxRequestClass;
   } = {},
 ): Promise<{
   status: number;
   contentType: string;
   body: string;
   retryAfterSeconds?: number;
+  requestStartedAt?: Date;
+  firstByteAt?: Date;
+  coordinatorWaitMs?: number;
+  coordinatorPostFinishQuietMs?: number;
 }> {
   const response = await sourceHttpClient.text(url, {
     source: options.source ?? "PUBLIC_HTTP",
     timeoutMs: options.timeoutMs,
     encoding: options.encoding,
     headers: options.headers,
+    requestClass: options.requestClass,
   });
 
   if (response.classification === "TIMEOUT") {
@@ -53,6 +61,10 @@ export async function fetchHtml(
     contentType: response.contentType,
     body: response.body,
     retryAfterSeconds: response.retryAfterSeconds,
+    requestStartedAt: response.requestStartedAt,
+    firstByteAt: response.firstByteAt,
+    coordinatorWaitMs: response.coordinatorWaitMs,
+    coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
   };
 }
 
@@ -63,6 +75,7 @@ export function isBlockedHtml(status: number, body: string, retryAfterSeconds?: 
       detector: "http-429",
       limitedReason: "Источник вернул HTTP 429. Проверки поставлены на паузу без агрессивных повторов.",
       retryAfterSeconds,
+      responseStatus: status,
     };
   }
 
@@ -74,6 +87,7 @@ export function isBlockedHtml(status: number, body: string, retryAfterSeconds?: 
         captchaDetected: true,
         detector: item.detector,
         limitedReason: `Обнаружена CAPTCHA или защитная страница (${item.detector}). Источник поставлен на паузу.`,
+        responseStatus: status,
       };
     }
   }
@@ -85,6 +99,7 @@ export function isBlockedHtml(status: number, body: string, retryAfterSeconds?: 
         detector: item.detector,
         limitedReason: `Обнаружено ограничение запросов или временная блокировка (${item.detector}). Источник поставлен на паузу.`,
         retryAfterSeconds,
+        responseStatus: status,
       };
     }
   }
@@ -94,6 +109,7 @@ export function isBlockedHtml(status: number, body: string, retryAfterSeconds?: 
       captchaDetected: true,
       detector: "http-403",
       limitedReason: "Источник вернул защитный ответ HTTP 403 и поставлен на паузу.",
+      responseStatus: status,
     };
   }
 

@@ -32,6 +32,68 @@ export function sourceLabel(source: string): string {
   return labels[source] ?? source;
 }
 
+export function formatSourceHealthLine(
+  source: {
+    source: string;
+    status: string;
+    lastSuccessfulAt: Date | null;
+    pausedUntil: Date | null;
+  },
+  now = new Date(),
+): string {
+  const icon = source.status === "ACTIVE"
+    ? "✅"
+    : source.status === "ERROR"
+      ? "❌"
+      : ["RATE_LIMITED", "CAPTCHA_DETECTED"].includes(source.status)
+        ? "⛔"
+        : "⚠️";
+  const details = [sourceStatusLabel(source.status)];
+  if (source.lastSuccessfulAt) {
+    details.push(`успех ${relativeAge(now.getTime() - source.lastSuccessfulAt.getTime())} назад`);
+  } else {
+    details.push("успешных проверок нет");
+  }
+  if (source.pausedUntil && source.pausedUntil > now) {
+    details.push(`повтор ${formatKyivShort(source.pausedUntil)}`);
+  }
+  return `${icon} ${sourceLabel(source.source)} — ${details.join(", ")}`;
+}
+
+function sourceStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    ACTIVE: "работает",
+    LIMITED: "ограничен",
+    RATE_LIMITED: "HTTP-ограничение",
+    CAPTCHA_DETECTED: "защитная страница",
+    ERROR: "ошибка",
+    PAUSED: "пауза",
+    DISABLED: "выключен",
+  };
+  return labels[status] ?? status.toLowerCase();
+}
+
+function relativeAge(milliseconds: number): string {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds} сек.`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} мин.`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours} ч.`;
+  return `${Math.floor(hours / 24)} дн.`;
+}
+
+function formatKyivShort(value: Date): string {
+  return new Intl.DateTimeFormat("ru-UA", {
+    timeZone: "Europe/Kyiv",
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(value).replace(",", "");
+}
+
 export function monitoringStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     RUNNING: "работает",

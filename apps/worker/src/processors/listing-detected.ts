@@ -1,8 +1,6 @@
 import { Prisma, prisma, type Filter } from "@amb/db";
 import {
-  BACKFILL_TELEGRAM_PRIORITY,
   QUEUE_NAMES,
-  TELEGRAM_SEND_PRIORITY,
   type ListingDiscoveryLane,
   type NormalizedListing,
 } from "@amb/shared";
@@ -11,11 +9,18 @@ import { checkDuplicate } from "../modules/duplicate-guard.js";
 import { enqueue } from "../lib/queues.js";
 import { log } from "../lib/log.js";
 import { env } from "../env.js";
-import { sendListingLink, type TelegramListingSnapshot } from "../modules/telegram-service.js";
+import {
+  sendListingLink,
+  stageListingForFlash,
+  TELEGRAM_SEND_LEASE_MS,
+  type TelegramListingSnapshot,
+} from "../modules/telegram-service.js";
 import { claimHotListing, releaseHotListingClaim } from "../modules/hot-duplicate-guard.js";
+import { dispatchFirstNotification } from "../modules/first-notification-dispatch.js";
 import {
   buildFilterSetRevision,
   markObservationOutcome,
+  recordPendingObservations,
   recordObservationEvaluation,
 } from "../modules/observation-journal.js";
 
@@ -29,6 +34,8 @@ export type ListingDetectedJob = {
   forceSourceMatch?: boolean;
   discoveryLane?: ListingDiscoveryLane;
   bypassHotClaim?: boolean;
+  observationPersisted?: boolean;
+  flashBundleId?: string;
 };
 
 export type ListingProcessingResult = {
@@ -36,6 +43,7 @@ export type ListingProcessingResult = {
   listingId?: string;
   matchedFilterIds: string[];
   rejectionReasons: string[];
+  flashStaged?: boolean;
 };
 
 /**
@@ -46,6 +54,14 @@ export type ListingProcessingResult = {
  * notification is persisted, so telegram.update always has a message target.
  */
 export async function processListingDetected(job: ListingDetectedJob): Promise<ListingProcessingResult> {
+  const discoveryLane = job.discoveryLane ?? "REALTIME";
+  // PostgreSQL is the durable recovery boundary. Persist before taking the
+  // short-lived Redis claim so a worker crash can never hide an unjournaled
+  // advert until the claim TTL expires.
+  if (!job.observationPersisted) {
+    await recordPendingObservations([job.listing], discoveryLane);
+  }
+
   if (job.bypassHotClaim) {
     try {
       return await processClaimedListing(job);
@@ -55,17 +71,17 @@ export async function processListingDetected(job: ListingDetectedJob): Promise<L
     }
   }
 
-  const claimKey = await claimHotListing(job.listing);
-  if (!claimKey) {
+  const claim = await claimHotListing(job.listing);
+  if (!claim) {
     return { outcome: "HOT_DUPLICATE", matchedFilterIds: [], rejectionReasons: [] };
   }
 
   try {
     const result = await processClaimedListing(job);
-    if (result.outcome === "REJECTED") await releaseHotListingClaim(claimKey);
+    if (result.outcome === "REJECTED") await releaseHotListingClaim(claim);
     return result;
   } catch (error) {
-    await releaseHotListingClaim(claimKey);
+    await releaseHotListingClaim(claim);
     await markObservationOutcome(job.listing.source, job.listing.externalId, { decision: "FAILED" }).catch(() => undefined);
     throw error;
   }
@@ -74,6 +90,20 @@ export async function processListingDetected(job: ListingDetectedJob): Promise<L
 async function processClaimedListing(job: ListingDetectedJob): Promise<ListingProcessingResult> {
   const { listing, filterIds = [], forceSourceMatch = false } = job;
   const discoveryLane = job.discoveryLane ?? "REALTIME";
+
+  // Retention removes the heavy listing row but intentionally keeps a compact
+  // NOTIFIED observation. Never recreate or re-send such an expired advert.
+  const retainedDedupe = await prisma.sourceSeenListing.findUnique({
+    where: { source_externalId: { source: listing.source, externalId: listing.externalId } },
+    select: { decision: true, listingId: true, matchedFilterIds: true },
+  });
+  if (retainedDedupe?.decision === "NOTIFIED" && !retainedDedupe.listingId) {
+    return {
+      outcome: "DUPLICATE",
+      matchedFilterIds: retainedDedupe.matchedFilterIds,
+      rejectionReasons: [],
+    };
+  }
 
   // 1. Filter engine — source-agnostic, works only with NormalizedListing
   const filters = await loadEnabledFilters(filterIds);
@@ -107,7 +137,7 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
         where: { id: dup.matchedListingId },
         data: { lastSeenAt: new Date() },
       });
-      await ensureFirstNotification(dup.matchedListingId, undefined, discoveryLane);
+      if (!job.flashBundleId) await ensureFirstNotification(dup.matchedListingId, undefined, discoveryLane);
     }
     await markObservationOutcome(listing.source, listing.externalId, {
       decision: "DUPLICATE",
@@ -188,7 +218,8 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
       });
       if (existing) {
         await prisma.listing.update({ where: { id: existing.id }, data: { lastSeenAt: new Date() } });
-        await ensureFirstNotification(existing.id, undefined, discoveryLane);
+        const flashStaged = false;
+        if (!job.flashBundleId) await ensureFirstNotification(existing.id, undefined, discoveryLane);
         await markObservationOutcome(listing.source, listing.externalId, {
           decision: "DUPLICATE",
           listingId: existing.id,
@@ -198,6 +229,7 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
           listingId: existing.id,
           matchedFilterIds,
           rejectionReasons: [],
+          flashStaged,
         };
       }
     }
@@ -213,13 +245,17 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
     decision: "DISPATCHED",
     listingId: saved.id,
   });
-  await ensureFirstNotification(saved.id, snapshot, discoveryLane);
+  const flashStaged = job.flashBundleId
+    ? await stageListingForFlash(saved.id, job.flashBundleId, snapshot)
+    : false;
+  if (!job.flashBundleId) await ensureFirstNotification(saved.id, snapshot, discoveryLane);
   void log.info("pipeline", `New matched listing: ${saved.url}`).catch(() => undefined);
   return {
     outcome: "DISPATCHED",
     listingId: saved.id,
     matchedFilterIds,
     rejectionReasons: [],
+    flashStaged,
   };
 }
 
@@ -228,23 +264,32 @@ async function ensureFirstNotification(
   snapshot?: TelegramListingSnapshot,
   discoveryLane: ListingDiscoveryLane = "REALTIME",
 ): Promise<void> {
-  if (discoveryLane !== "BACKFILL" && env.FAST_INLINE_TELEGRAM_SEND_ENABLED) {
-    try {
-      await sendListingLink(listingId, snapshot);
-      await enqueue(QUEUE_NAMES.LISTING_ENRICH, "enrich", { listingId });
-      return;
-    } catch (err) {
-      await log.warn("telegram", "Inline Telegram send failed, queued fallback send", err instanceof Error ? err.message : String(err));
-    }
-  }
-
-  await enqueue(
-    QUEUE_NAMES.TELEGRAM_SEND,
-    "send",
-    { listingId },
+  await dispatchFirstNotification(
     {
-      priority: discoveryLane === "BACKFILL" ? BACKFILL_TELEGRAM_PRIORITY : TELEGRAM_SEND_PRIORITY,
-      jobId: `telegram-send-${listingId}`,
+      discoveryLane,
+      inlineEnabled: env.FAST_INLINE_TELEGRAM_SEND_ENABLED,
+      inlineDeadlineMs: env.FAST_INLINE_TELEGRAM_DEADLINE_MS,
+      ambiguousRetryDelayMs: TELEGRAM_SEND_LEASE_MS + 250,
+    },
+    {
+      sendInline: (signal) => sendListingLink(listingId, snapshot, { signal }),
+      enqueueEnrichment: () => enqueue(QUEUE_NAMES.LISTING_ENRICH, "enrich", { listingId }),
+      enqueueTelegram: (priority, delayMs) => enqueue(
+        QUEUE_NAMES.TELEGRAM_SEND,
+        "send",
+        { listingId },
+        { priority, delay: delayMs, jobId: `telegram-send-${listingId}` },
+      ),
+      warnInlineFailure: (error) => log.warn(
+        "telegram",
+        "Inline Telegram send failed, queued fallback send",
+        error instanceof Error ? error.message : String(error),
+      ),
+      warnEnrichmentFailure: (error) => log.warn(
+        "enrichment",
+        "Telegram sent, but enrichment enqueue failed; periodic recovery will retry enrichment",
+        error instanceof Error ? error.message : String(error),
+      ),
     },
   );
 }

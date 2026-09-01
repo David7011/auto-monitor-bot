@@ -5,6 +5,22 @@ export type CollectorScanOptions = {
   maxPages: number;
   maxCandidates: number;
   deadlineAt: Date;
+  backfillProfile?: "FULL" | "LIGHT";
+  /** Event-driven depth repair; OLX gives these requests priority over routine background work. */
+  recovery?: boolean;
+  /** Durable low-frequency OLX regional/HTML/private reconciliation only. */
+  coverageOnly?: boolean;
+  /** Recent OLX protection response: keep page one alive but suppress secondary/depth traffic. */
+  olxProtectionCooling?: boolean;
+  /** First safe OLX availability probe after a rate-limit/CAPTCHA pause. */
+  olxProtectionProbe?: boolean;
+  /**
+   * Optional fast-path handoff for candidates already returned by a realtime
+   * source. Collectors invoke it before slower pages/details/reconciliation so
+   * Telegram delivery is not held behind the rest of a scan. The normal result
+   * still contains the same listings for durable observation and cursor updates.
+   */
+  onHotCandidates?: (listings: readonly NormalizedListing[]) => Promise<void>;
 };
 
 export function collectorScanOptions(options?: CollectorScanOptions): CollectorScanOptions {
@@ -80,6 +96,10 @@ export type SourceSearchState = {
   htmlCoveragePausedUntil?: Date;
   lastPrivateCoverageAt?: Date;
   knownExternalIds: Set<string>;
+  coverageAnchorExternalIds?: Set<string>;
+  coverageRecoveryPending?: boolean;
+  coverageRecoveryCutoffAt?: Date;
+  knownIdsResetAt?: Date;
 };
 
 export type CollectorCoverageStateUpdate = {
@@ -111,6 +131,10 @@ export type CollectorResult = {
   affectedUrl?: string;
   /** Realtime pagination did not overlap the previous cursor; recover immediately. */
   coverageGap?: boolean;
+  /** The scan overlapped a durable anchor or reached its continuity cutoff. */
+  coverageVerified?: boolean;
+  /** Durable evidence used to close a pending offline/overflow recovery window. */
+  coverageVerificationMethod?: "KNOWN_TAIL" | "CUTOFF" | "EXHAUSTED";
   /** Per-search-fingerprint low-frequency coverage timestamps to persist atomically with scan success. */
   coverageStateUpdate?: CollectorCoverageStateUpdate;
   /** Bounded structured diagnostics used to prove which discovery lanes ran. */
@@ -130,8 +154,8 @@ export interface SourceCollector {
    * Fetches the latest listings.
    * `context` carries the source-specific search query built from active
    * filters. `state.knownExternalIds` enables incremental scan per query:
-   * the collector should stop paginating once it reaches an already-known
-   * listing for the same context.
+   * the collector may stop paginating after a reliable overlap with the known
+   * tail for the same context; one isolated known/promoted card is not enough.
    */
   collect(context: SourceSearchContext, state: SourceSearchState, options?: CollectorScanOptions): Promise<CollectorResult>;
 }

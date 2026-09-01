@@ -26,12 +26,14 @@ try {
 try {
   Push-Location $ProjectRoot
   try {
+    Invoke-Pnpm -Arguments @("security:check")
     Invoke-Pnpm -Arguments @("db:validate")
     Invoke-Pnpm -Arguments @("db:generate")
+    Invoke-Pnpm -Arguments @("docs:check")
     Invoke-Pnpm -Arguments @("typecheck")
     Invoke-Pnpm -Arguments @("lint")
     Invoke-Pnpm -Arguments @("test:powershell")
-    Invoke-Pnpm -Arguments @("test")
+    Invoke-Pnpm -Arguments @("test:coverage")
     & (Join-Path $PSScriptRoot "verify-production-build.ps1") -SkipLock
     if ($LASTEXITCODE -ne 0) {
       throw "Isolated production build failed with exit code $LASTEXITCODE"

@@ -1,7 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import { prisma, type Filter, type ListingSource, type Source, type SourceSearchState } from "@amb/db";
-import { autoRiaGeoParamsForSelection } from "@amb/shared";
+import {
+  autoRiaGeoParamsForSelection,
+  type FilterRow,
+  type SearchPlanResponse,
+  type SearchPlanRow,
+} from "@amb/shared";
 import { env } from "../env.js";
+import { olxHtmlCoverageIssue } from "../lib/search-plan-health.js";
 import { redisConnection } from "../lib/queues.js";
 
 const REAL_SOURCES: ListingSource[] = ["AUTO_RIA", "OLX", "RST", "CARS_UA", "AUTOMOTO"];
@@ -43,13 +49,15 @@ const FIELD_LABELS: Record<(typeof AUTO_RIA_SEARCH_FIELDS)[number], string> = {
 export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
   app.get("/search-plan", async () => {
     const now = new Date();
-    const [filters, sources, states, recentRuns, quota, olxDiscovery] = await Promise.all([
+    const [filters, sources, states, recentRuns, quota, olxDiscovery, monitoringState, recoveryWindows] = await Promise.all([
       prisma.filter.findMany({ where: { enabled: true }, orderBy: { updatedAt: "desc" } }),
       prisma.source.findMany(),
       prisma.sourceSearchState.findMany({ orderBy: { updatedAt: "desc" } }),
       prisma.collectorRun.findMany({ orderBy: { startedAt: "desc" }, take: 40 }),
       autoRiaQuota(now),
       olxDiscoveryDiagnostics(now),
+      prisma.monitoringState.findUnique({ where: { id: "singleton" } }),
+      prisma.coverageRecoveryWindow.findMany({ orderBy: { detectedAt: "desc" }, take: 20 }),
     ]);
 
     const sourceMap = new Map(sources.map((source) => [source.source, source]));
@@ -83,6 +91,67 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       totals,
       autoRia: quota,
       olxDiscovery,
+      olxCadenceCanary: {
+        configured: env.OLX_CADENCE_CANARY_ENABLED,
+        mode: monitoringState?.olxCanaryMode ?? "BASELINE",
+        baseIntervalSeconds: env.LIVE_OLX_INTERVAL_SECONDS,
+        baseJitterSeconds: env.LIVE_OLX_JITTER_SECONDS,
+        canaryIntervalSeconds: env.OLX_CADENCE_CANARY_INTERVAL_SECONDS,
+        canaryJitterSeconds: env.OLX_CADENCE_CANARY_JITTER_SECONDS,
+        qualificationRuns: monitoringState?.olxCanaryCleanRunCount ?? 0,
+        qualificationRunsRequired: env.OLX_CADENCE_CANARY_QUALIFICATION_RUNS,
+        promotionRuns: monitoringState?.olxCanaryRunCount ?? 0,
+        promotionRunsRequired: env.OLX_CADENCE_CANARY_PROMOTION_RUNS,
+        qualificationMaximumP95Ms: env.OLX_CADENCE_CANARY_QUALIFICATION_MAX_P95_MS,
+        rollbackMaximumP95Ms: env.OLX_CADENCE_CANARY_MAX_P95_MS,
+        baselineP95Ms: monitoringState?.olxCanaryBaselineP95Ms ?? null,
+        currentP95Ms: monitoringState?.olxCanaryCurrentP95Ms ?? null,
+        rollbackReason: monitoringState?.olxCanaryRollbackReason ?? null,
+        qualificationStartedAt: monitoringState?.olxCanaryQualificationStartedAt.toISOString() ?? null,
+        canaryStartedAt: monitoringState?.olxCanaryStartedAt?.toISOString() ?? null,
+        lastTransitionAt: monitoringState?.olxCanaryLastTransitionAt?.toISOString() ?? null,
+      },
+      offlineRecovery: {
+        status: recoveryWindows.some((window) => window.status === "PENDING")
+          ? "PENDING"
+          : recoveryWindows.length > 0
+            ? "VERIFIED"
+            : "NONE",
+        pendingCount: recoveryWindows.filter((window) => window.status === "PENDING").length,
+        latest: recoveryWindows[0]
+          ? {
+              id: recoveryWindows[0].id,
+              reason: recoveryWindows[0].reason,
+              status: recoveryWindows[0].status,
+              persistedBoundaryAt: recoveryWindows[0].persistedBoundaryAt.toISOString(),
+              requiredCutoffAt: recoveryWindows[0].requiredCutoffAt.toISOString(),
+              detectedAt: recoveryWindows[0].detectedAt.toISOString(),
+              latestSeenAt: recoveryWindows[0].latestSeenAt?.toISOString() ?? null,
+              lastAttemptAt: recoveryWindows[0].lastAttemptAt?.toISOString() ?? null,
+              lastAttemptRunId: recoveryWindows[0].lastAttemptRunId,
+              verifiedAt: recoveryWindows[0].verifiedAt?.toISOString() ?? null,
+              verifiedRunId: recoveryWindows[0].verifiedRunId,
+              verificationMethod: recoveryWindows[0].verificationMethod,
+              oldestObservedAt: recoveryWindows[0].oldestObservedAt?.toISOString() ?? null,
+              pageCount: recoveryWindows[0].pageCount,
+              requestCount: recoveryWindows[0].requestCount,
+              observedCount: recoveryWindows[0].observedCount,
+            }
+          : null,
+      },
+      coverage: {
+        intervalSeconds: env.OLX_COVERAGE_INTERVAL_SECONDS,
+        initialDelaySeconds: env.OLX_COVERAGE_INITIAL_DELAY_SECONDS,
+        maxDurationMs: env.OLX_COVERAGE_MAX_DURATION_MS,
+        concurrency: env.WORKER_CONCURRENCY_COLLECTOR_COVERAGE,
+      },
+      telegramFlash: {
+        enabled: env.TELEGRAM_FLASH_BUNDLE_ENABLED,
+        minItems: env.TELEGRAM_FLASH_BUNDLE_MIN_ITEMS,
+        maxItems: env.TELEGRAM_FLASH_BUNDLE_MAX_ITEMS,
+        concurrency: env.WORKER_CONCURRENCY_TELEGRAM_FLASH,
+        sendIntervalMs: env.TELEGRAM_LISTING_SEND_MIN_INTERVAL_MS,
+      },
       backfill: {
         intervalSeconds: env.BACKFILL_INTERVAL_SECONDS,
         initialDelaySeconds: env.BACKFILL_INITIAL_DELAY_SECONDS,
@@ -92,7 +161,7 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
         concurrency: env.WORKER_CONCURRENCY_COLLECTOR_BACKFILL,
       },
       plans,
-    };
+    } satisfies SearchPlanResponse;
   });
 }
 
@@ -170,7 +239,7 @@ function buildPlanRow({
 }) {
   const issues = planIssues(filter, source, sourceRecord, state);
   const supported = sourceSupport(filter, source, sourceRecord);
-  const severity = issues.some((issue) => issue.level === "danger")
+  const severity: SearchPlanRow["severity"] = issues.some((issue) => issue.level === "danger")
     ? "danger"
     : issues.some((issue) => issue.level === "warning")
       ? "warning"
@@ -184,7 +253,7 @@ function buildPlanRow({
     sourceNextCheckAt: sourceRecord?.nextCheckAt?.toISOString() ?? null,
     filterId: filter.id,
     filterName: filter.name,
-    freshnessMode: filter.freshnessMode,
+    freshnessMode: filter.freshnessMode as FilterRow["freshnessMode"],
     filterSummary: summarizeFilter(filter),
     initialSyncCompletedAt: state?.initialSyncCompletedAt?.toISOString() ?? null,
     lastSuccessfulScanAt: state?.lastSuccessfulScanAt?.toISOString() ?? null,
@@ -201,6 +270,8 @@ function buildPlanRow({
     lastPrivateCoverageAt: state?.lastPrivateCoverageAt?.toISOString() ?? null,
     lastExternalId: state?.lastExternalId ?? null,
     knownExternalIds: state?.knownExternalIds.length ?? 0,
+    coverageRecoveryPending: state?.coverageRecoveryPending ?? false,
+    coverageRecoveryCutoffAt: state?.coverageRecoveryCutoffAt?.toISOString() ?? null,
     fingerprint: state ? `${state.fingerprint.slice(0, 10)}...` : null,
     estimatedRequestsPerScan: source === "AUTO_RIA" ? 1 + env.AUTO_RIA_MAX_INFO_PER_SCAN : 0,
     supported,
@@ -267,11 +338,19 @@ function planIssues(filter: Filter, source: ListingSource, sourceRecord: Source 
   }
 
   if (source === "OLX" && state) {
-    const htmlStaleAt = Date.now() - Math.max(30, env.OLX_HTML_COVERAGE_INTERVAL_SECONDS) * 2_000;
-    const privateStaleAt = Date.now() - Math.max(30, env.OLX_PRIVATE_COVERAGE_INTERVAL_SECONDS) * 2_000;
-    if (!state.lastHtmlCoverageAt || state.lastHtmlCoverageAt.getTime() < htmlStaleAt) {
-      issues.push({ level: "warning", message: "HTML-сверка OLX давно не подтверждалась; быстрый API-канал продолжает работать" });
+    if (state.coverageRecoveryPending) {
+      issues.push({
+        level: "danger",
+        message: `Offline/realtime окно ещё не подтверждено до ${state.coverageRecoveryCutoffAt?.toISOString() ?? "persisted boundary"}`,
+      });
     }
+    const privateStaleAt = Date.now() - Math.max(30, env.OLX_PRIVATE_COVERAGE_INTERVAL_SECONDS) * 2_000;
+    const htmlCoverageIssue = olxHtmlCoverageIssue({
+      sourceStatus: sourceRecord?.status,
+      lastHtmlCoverageAt: state.lastHtmlCoverageAt,
+      intervalSeconds: env.OLX_HTML_COVERAGE_INTERVAL_SECONDS,
+    });
+    if (htmlCoverageIssue) issues.push({ level: "warning", message: htmlCoverageIssue });
     if (!state.lastPrivateCoverageAt || state.lastPrivateCoverageAt.getTime() < privateStaleAt) {
       issues.push({ level: "warning", message: "Private-сверка OLX давно не подтверждалась" });
     }
@@ -290,7 +369,11 @@ function planIssues(filter: Filter, source: ListingSource, sourceRecord: Source 
   return issues;
 }
 
-function sourceSupport(filter: Filter, source: ListingSource, sourceRecord: Source | undefined) {
+function sourceSupport(
+  filter: Filter,
+  source: ListingSource,
+  sourceRecord: Source | undefined,
+): SearchPlanRow["supported"] {
   if (source === "AUTO_RIA") {
     return {
       mode: "api-filtered",

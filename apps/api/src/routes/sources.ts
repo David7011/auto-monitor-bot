@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { prisma } from "@amb/db";
+import { safeSourceEnableTransition } from "../lib/manual-source-check.js";
 import {
   checkActiveSourcesNow,
   checkSourceNow,
@@ -57,10 +58,18 @@ export async function sourcesRoutes(app: FastifyInstance): Promise<void> {
 
     const data: Record<string, unknown> = { ...parsed.data };
     if (parsed.data.enabled === true && source.status === "DISABLED") {
-      data.status = "ACTIVE";
-      data.pausedUntil = null;
-      data.consecutiveErrors = 0;
-      data.lastError = null;
+      const transition = safeSourceEnableTransition(source);
+      data.status = transition.status;
+      data.pausedUntil = transition.pausedUntil;
+      data.nextCheckAt = transition.nextCheckAt;
+      if (transition.resetErrors) {
+        data.consecutiveErrors = 0;
+        data.lastError = null;
+      }
+    }
+    if (parsed.data.status === "ACTIVE" && source.pausedUntil && source.pausedUntil > new Date()) {
+      data.status = "PAUSED";
+      data.nextCheckAt = source.pausedUntil;
     }
     if (parsed.data.enabled === false) {
       data.status = "DISABLED";

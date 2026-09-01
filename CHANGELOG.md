@@ -1,5 +1,99 @@
 # Changelog
 
+## 2026-08-30 — crash-safe hot handoff and newest-first notification bursts
+
+- Нормализованное объявление теперь записывается в PostgreSQL до Redis hot-claim. Падение worker между claim и первой долговечной записью больше не может скрыть объявление от observation replay.
+- Hot-claim получил случайный owner token и атомарный compare-delete: завершение старого владельца не удалит новый claim после истечения TTL. TTL сокращён с 6 часов до 120 секунд; постоянная дедупликация по-прежнему обеспечивается PostgreSQL.
+- Внутри одинакового Telegram lane ожидающие карточки сортируются по времени публикации, поэтому более свежее объявление получает следующий разрешённый слот даже при параллельной обработке burst-набора.
+- OLX realtime ограничен одной newest-first страницей. Если она не доказывает overlap с известным хвостом, durable recovery немедленно продолжает глубину в отдельной прерываемой backfill-очереди, не удерживая следующий realtime проход.
+- `/system/check` больше не объявляет live-покрытие упавшим, когда мониторинг намеренно остановлен пользователем.
+- Health отделяет недавние BullMQ-сбои от сохранённой истории: завершённые старые stalled jobs остаются видимыми для аудита, но больше не держат Redis в вечном `WARN` при пустом живом хвосте.
+
+## 2026-08-29 — faster adaptive OLX realtime, preemption and redundant hot worker
+
+- Telegram rate gate перенесён из памяти hot-worker в общий атомарный Redis timeline по паре bot/chat. `sendMessage`, edit и delete из API, hot/background workers и watchdog больше не могут одновременно обойти интервал `1100` мс.
+- Резервирование использует `Redis TIME` и Lua, поэтому не зависит от рассинхронизации часов процессов; полученный от Telegram `retry_after` публикуется как общий cooldown. Bot token не сохраняется в Redis-ключе, а штатные процессы fail-closed при потере Redis.
+- Отдельная приёмка с тремя независимыми Redis-клиентами подтвердила межпроцессные интервалы `260/249` мс при тестовом лимите `250` мс и общий cooldown `401` мс; watchdog оставлен с документированным emergency fallback только для сообщения об отказе самого Redis.
+
+- Healthy OLX cadence ускорен с `60 ± 10` до `20 ± 4` секунд по локальному runtime baseline: 127 проходов, start-gap p50 59,03 с, p95 duration 17,45 с и p95 3 HTTP-запроса на проход. Номинальное окно обнаружения сокращено втрое без возврата к прежнему опасному 4-секундному режиму.
+- После OLX protection recovery планировщик автоматически проходит стадии `RECOVERY_INITIAL 60 ± 10` → `RECOVERY_RAMP 30 ± 6` → `HEALTHY 20 ± 4`; неразрешённый incident не ускоряется. Смена режима фиксируется структурированным orchestrator-log.
+- Добавлены чистая cadence-policy, регрессии границ recovery ramp и новый документируемый параметр `OLX_REALTIME_RECOVERY_RAMP_SECONDS=1800`.
+
+- OLX realtime теперь кооперативно отменяет уже начатый background HTTP GET или его DNS-retry delay через `AbortSignal`; тот же backfill/coverage запрос прозрачно возвращается в приоритетную очередь и продолжается после realtime без ложного `TIMEOUT` и без потери coverage.
+- Ответ защиты OLX (`429`, CAPTCHA или access denied) имеет приоритет над одновременной отменой: circuit breaker открывается, а ожидающий realtime не отправляется в уже защищающийся origin. В snapshot/coverage metrics добавлен счётчик `realtimePreemptions`.
+- Добавлены проверки порядка abort → realtime → replay, гонки protection/abort, отмены DNS-backoff и интеграционный тест с реальным loopback HTTP-сокетом.
+
+- Единственная hot-точка отказа заменена двумя процессами `worker-hot-a/b` с атомарным Redis lease, уникальным owner token и compare-and-renew/release Lua-операциями.
+- Standby не создаёт BullMQ consumers до promotion, поэтому единый process-local OLX coordinator сохраняет OLX pacing. Telegram pacing дополнительно защищён отдельным глобальным Redis gate между всеми процессами. Каждый OLX origin request проверяет ownership lease перед отправкой.
+- `/ready` требует согласованные lease/heartbeat/живой PID лидера; `/health` показывает `REDUNDANT`, `DEGRADED` или `FAIL`, оба replica heartbeat и TTL lease.
+- BullMQ lock/stalled интервалы для hot-очередей сокращены, supervisor/watchdog/start/recovery теперь независимо контролируют обе реплики. Добавлен повторяемый forced-kill тест `amb.cmd test:hot-failover` с safety gate `STOPPED`.
+- Telegram-уведомления watchdog теперь передаются как явный UTF-8 JSON даже из Windows PowerShell 5.1. Дедупликация защиты источников использует стабильный ключ `SOURCE=STATUS`: перенос `pausedUntil` и шестичасовой таймер больше не создают повторные сообщения при неизменной CAPTCHA/паузе.
+
+## 2026-08-27 — isolated realtime/background workers and targeted recovery
+
+- Единый BullMQ-процесс разделён на `worker-hot` и `worker-background`: realtime collectors и первая Telegram-доставка больше не делят event loop с replay, OCR/vehicle checks, Telegram updates и retention.
+- Backfill и market research остаются в hot-процессе намеренно: они используют тот же process-local OLX origin-coordinator, поэтому не могут обойти realtime priority, pacing или circuit breaker; сетевое ожидание остаётся асинхронным.
+- Каждая роль публикует отдельный Redis/file heartbeat с p95 event-loop delay и utilization; `/ready` защищает hot-путь, а `/health` отдельно показывает обе роли.
+- Supervisor и Watchdog проверяют точные role-aware PID, восстанавливают только отсутствующий или зависший процесс и подавляют полный restart при кратком `/ready`-сбое, если инфраструктура, процессы и heartbeat живы.
+- Startup recovery больше не закрывает новый realtime collector run только потому, что background worker запустился несколькими миллисекундами позже.
+
+## 2026-08-22 v0.4.1 — safe revival, truthful health and balanced source telemetry
+
+- Worker runtime health отделён от внешней доступности площадок: HTTP 403/CAPTCHA больше не объявляют живой worker упавшим и не создают бессмысленный restart-loop.
+- Watchdog получил отдельное шестичасовое уведомление о protection state. Оно сохраняет cooldown, показывает штатный probe и не утверждает, что запущено восстановление, когда выполняется только безопасное ожидание.
+- Ручная проверка и повторное включение источника больше не могут обойти активную защитную паузу; после cooldown остаётся один штатный OLX probe по одной HTML-странице.
+- `/sources/status` возвращает до восьми последних запусков каждого источника, один актуальный protection incident на источник перед историей и точное число уникальных наблюдений за текущие киевские сутки.
+- Dashboard больше не показывает последние 20 глобальных запусков как «найдено сегодня»; частый Cars.ua не вытесняет историю и активный инцидент OLX.
+- Планировщик и OLX semantic warnings больше не заявляют о работающем API-канале при фактической защитной паузе HTML-first источника.
+- `/system/check` показывает свежий fallback-портфель: при недоступном OLX отдельно фиксируется деградированный live-режим Cars.ua/AutoMoto вместо смешивания с падением локальной инфраструктуры.
+- Добавлены регрессии на worker/source separation, balanced history, manual cooldown guard, planner copy и fallback portfolio health.
+
+## 2026-08-19 — OLX HTML-first recovery
+
+- Основной OLX realtime переведён с недокументированного `/api/v1/offers` на публичную newest-first HTML-выдачу; JSON endpoint остаётся только аварийным fallback после технической ошибки HTML.
+- После HTML `403`, rate limit или CAPTCHA второй OLX-запрос больше не выполняется. Protection probe также проверяет только одну публичную HTML-страницу.
+- HTML-parser теперь извлекает видимые `l-card` объявления даже при изменении или отсутствии `window.__PRERENDERED_STATE__`, вместо скрытого возврата к заблокированному API.
+- Private shadow lane и market comparables используют общий HTML-first маршрут. Добавлена регрессия, доказывающая один HTML-запрос и ноль API-запросов при успешной выдаче.
+
+## 2026-08-09 — восстановление автозапуска и security refresh
+
+- Supervisor снова активирует рабочую сессию сразу при boot/logon trigger; ручной `local:stop` по-прежнему не создаёт restart-loop, а следующий запуск supervisor автоматически поднимает проект.
+- Исправлена ACL-проверка установщика: `ReadAndExecute` больше не ошибочно считается правом записи из-за пересечения с составным флагом `FullControl`; реальные сторонние write-права по-прежнему блокируют установку.
+- Статус и документация приведены к фактическому режиму `AUTOSTART SESSION ACTIVE`.
+- Обновлены уязвимые транзитивные `fast-uri` и `nanoid`, а прямой HTTP-клиент `undici` поднят до исправленной версии 6.28.0; production-аудит снова не находит известных уязвимостей.
+- Полная проверка и изолированная fault-injection приёмка подтверждают сохранность pipeline и OLX recovery после обновления зависимостей.
+
+## 2026-08-02 — доказательство отсутствия локальных пропусков
+
+- Добавлен `acceptance:extended`: изолированные PostgreSQL и Redis 8.8, детерминированный fake OLX feed и fake Telegram API без доступа к рабочим данным и внешним площадкам.
+- Стенд физически останавливает Redis и PostgreSQL, моделирует Telegram 503 и потерю БД после принятого Telegram-запроса, затем проверяет инвариант «отправлено либо находится в наблюдаемом состоянии восстановления».
+- BullMQ producer теперь быстро отклоняет enqueue при недоступном Redis после durable-записи наблюдения; consumer-подключения сохраняют автоматическое переподключение.
+- Транзакционная проверка порога 2000 ID теперь создаёт настоящее избранное Telegram и доказывает неизменность `favoritedAt`, `retainUntil` и статуса сообщения после сброса.
+- Расширенная приёмка прошла на шести известных OLX-объявлениях; рабочая БД, реальные OLX/Telegram и обычный режим запуска не затрагивались.
+
+## 2026-08-02 — OLX hot-path stage 1
+
+- BullMQ consumers создаются и подтверждают готовность до startup recovery, observation replay и обновления курса; фоновые startup-задачи отложены на одну секунду и больше не блокируют первый OLX job.
+- OLX поставлен первым в realtime-планировщике и получил отдельный наивысший приоритет collector queue. При resume его `nextCheckAt` принудительно становится текущим временем, а расчёт Auto.RIA выполняется только после постановки OLX.
+- Каждый direct OLX-response передаёт новые объявления в hot path сразу после завершения, не ожидая другие города; число и защитный pacing запросов не изменены.
+- Inline Telegram получил отменяемый deadline 2500 мс через `AbortSignal`. Ошибка Telegram передаётся приоритетной очереди, а отдельная ошибка enrichment больше не инициирует повторную отправку сообщения.
+- Добавлены регрессии startup ordering, source priority, progressive direct results, deadline и enrichment failure. Полная проверка: 48 файлов / 194 теста, coverage 26,12/72,71/41,59/26,12%, все сборки и Android check прошли.
+
+## 2026-07-27 v0.4.0 P3 — OLX realtime priority, data-race fixes и проверяемая приёмка
+
+- Post-reboot проверка выявила сохранённый в BullMQ старый OLX backfill: теперь scheduled OLX realtime старше 8 с и backfill старше 30 с коалесцируются до сетевого запроса, а свежий backfill сохраняет отдельное 30-секундное окно.
+- Минимальный интервал запуска фоновых OLX-запросов повышен до 3,5 с; ограничение не применяется к realtime и не меняет его 4-секундный приоритетный cadence.
+- Добавлен единый приоритетный координатор OLX-запросов: все lanes делят один origin-slot, realtime имеет высший приоритет, а coverage/backfill/recovery/enrichment получают явные приоритеты и pacing.
+- Direct OLX feed обрабатывается до региональных сверок; объединение географии больше не сужает региональный или all-Ukraine поиск до отдельного города.
+- Redis collector-lock продлевается владельцем на длинных проходах.
+- Финальная corrective migration гарантирует полный сброс known-ID кэша на 2000-м ID, 50 continuity anchors и recovery; отдельный DB-тест доказывает сохранность избранного.
+- Favorite callback и retention-cleaner сериализованы PostgreSQL advisory-lock, устраняя гонку удаления карточки.
+- Добавлена строгая проверка диапазонов `.env`, V8 coverage gate и тесты request coordinator/mixed geography/migration order.
+- Root ACL закрыт до текущего пользователя, Administrators и SYSTEM; SYSTEM autostart переустановлен.
+- Next.js, Playwright, BullMQ, ESLint, PostCSS и PostgreSQL client обновлены до безопасных совместимых patch/minor версий; production audit не нашёл известных уязвимостей.
+- Live acceptance: 66 OLX realtime runs, gap p50 4,13 с / p95 4,92 с / max 5,46 с, 0 ошибок и 0 окон >8 с; 69 realtime + 21 background requests без 429/CAPTCHA/access denied.
+- Полный check: 42 test files / 168 tests, coverage 25,12/71,67/39,58/25,12%, production builds; E2E 4 pass + 1 conditional skip; Android check, real DB trigger test, restore drill и recovery всех трёх процессов прошли.
+
 ## 2026-07-22 v0.4.0 — автономный supervisor, доказуемое покрытие OLX и platform upgrade
 
 - Одноразовый boot launcher заменён долгоживущим `SYSTEM`-супервизором: он проверяет критическую готовность, устраняет ложный провал фиксированных «8 секунд» и автоматически восстанавливает процессы. Задачи запускаются при boot и logon, а файловые lock-и безопасно объединяют дубли.

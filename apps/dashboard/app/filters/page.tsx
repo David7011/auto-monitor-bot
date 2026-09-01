@@ -2,160 +2,46 @@
 
 import { useMemo, useState } from "react"
 import useSWR from "swr"
-import { CarFront, Database, Fuel, Gauge, GitBranch, MapPin, Pencil, Plus, Power, SlidersHorizontal, Trash2, X } from "lucide-react"
+import { AlertTriangle, CarFront, Database, Fuel, Gauge, GitBranch, Pencil, Plus, Power, SlidersHorizontal, Trash2, X } from "lucide-react"
 import { clientApi as api, dashboardErrorMessage } from "@/lib/client-api"
 import type { FilterRow, SourceKind } from "@/lib/types"
 import { GlowButton } from "@/components/hud/glow-button"
 import { HudPanel } from "@/components/hud/hud-panel"
 import { StatusBadge } from "@/components/hud/status-badge"
 import { useToast } from "@/components/ui/toast"
-import { cn } from "@/lib/utils"
+import {
+  AutoRiaFilterBadge,
+  Field,
+  GeoSelector,
+  ToggleGroup,
+  TogglePill,
+  filterInputClass as inputClass,
+} from "./filter-page-components"
+import {
+  FILTER_SOURCES as SOURCES,
+  FRESHNESS_MODES,
+  SOURCE_LABELS,
+  VEHICLE_CATEGORY_ID as CATEGORY_ID,
+  booleanOrNull,
+  formatGeoSummary,
+  labelsFor,
+  normalizeSearch,
+  numberOrNull,
+  rangeText,
+  toList,
+  toggleValue,
+  type AttributeGroupsResponse,
+  type FiltersResponse,
+  type FreshnessMode,
+  type RegionsResponse,
+  type TaxonomyResponse,
+} from "./filter-page-model"
 
-type TaxonomyOption = {
-  name: string
-  value: number
-}
 
-type TaxonomyResponse = {
-  options: TaxonomyOption[]
-  complete: boolean
-  apiConfigured: boolean
-  source: "AUTO_RIA_API" | "LOCAL_FALLBACK"
-  categoryId: number
-  markId?: number
-}
-
-type AttributeOption = {
-  value: string
-  label: string
-  aliases: string[]
-}
-
-type AttributeGroupsResponse = {
-  groups: {
-    bodyTypes: AttributeOption[]
-    fuelTypes: AttributeOption[]
-    gearboxes: AttributeOption[]
-    driveTypes: AttributeOption[]
-  }
-}
-
-type CityOption = {
-  id: string
-  regionId: string
-  nameUk: string
-  nameRu: string
-  aliases: string[]
-  autoRiaCityId?: number
-}
-
-type RegionOption = {
-  id: string
-  nameUk: string
-  nameRu: string
-  aliases: string[]
-  autoRiaStateId?: number
-  cities: CityOption[]
-}
-
-type RegionsResponse = {
-  regions: RegionOption[]
-  dataVersion: string
-  cityCount: number
-}
-
-type FreshnessMode = "LAST_HOUR" | "TODAY" | "LAST_24_HOURS" | "LAST_3_DAYS" | "LAST_7_DAYS" | "ALL_TIME"
-
-const SOURCES: SourceKind[] = ["OLX", "RST", "CARS_UA", "AUTOMOTO", "AUTO_RIA"]
-const SOURCE_LABELS: Record<SourceKind, string> = {
-  AUTO_RIA: "AUTO.RIA",
-  OLX: "OLX",
-  RST: "RST",
-  CARS_UA: "Cars.ua",
-  AUTOMOTO: "AutoMoto.ua",
-  MOCK: "Mock",
-}
-const FRESHNESS_MODES: Array<{ value: FreshnessMode; label: string }> = [
-  { value: "LAST_HOUR", label: "LIVE: последний час" },
-  { value: "TODAY", label: "Только сегодня" },
-  { value: "LAST_24_HOURS", label: "Последние 24 часа" },
-  { value: "LAST_3_DAYS", label: "Последние 3 дня" },
-  { value: "LAST_7_DAYS", label: "Последние 7 дней" },
-  { value: "ALL_TIME", label: "Все время" },
-]
-
-const CATEGORY_ID = 1
-const inputClass =
-  "h-10 w-full rounded-lg border border-line bg-surface-2/80 px-3 text-sm text-foreground outline-none transition-all placeholder:text-faint focus:border-accent/60 focus:bg-surface-3 focus:ring-2 focus:ring-accent/20 disabled:cursor-not-allowed disabled:opacity-60"
-const labelClass = "text-[11px] font-semibold uppercase tracking-widest text-muted"
 const fetcher = <T,>(path: string) => api.get<T>(path)
 
-function toList(value: string) {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)
-}
-
-function numberOrNull(value: string) {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  const parsed = Number(trimmed)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-function booleanOrNull(value: string) {
-  if (value === "true") return true
-  if (value === "false") return false
-  return null
-}
-
-function toggleValue(values: string[], value: string) {
-  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]
-}
-
-function labelsFor(values: string[], options: AttributeOption[] = []) {
-  if (values.length === 0) return "не задано"
-  return values.map((value) => options.find((option) => option.value === value)?.label ?? value).join(", ")
-}
-
-function rangeText(from: number | null, to: number | null, unit = "") {
-  if (from == null && to == null) return "любой"
-  if (from != null && to != null) return `${from}${unit} - ${to}${unit}`
-  if (from != null) return `от ${from}${unit}`
-  return `до ${to}${unit}`
-}
-
-function normalizeSearch(value: string) {
-  return value.toLowerCase().replace(/\s+/g, " ").trim()
-}
-
-function geoMatches(query: string, option: { id: string; nameUk: string; nameRu: string; aliases: string[] }) {
-  const normalized = normalizeSearch(query)
-  if (!normalized) return true
-  return [option.id, option.nameUk, option.nameRu, ...option.aliases]
-    .map(normalizeSearch)
-    .some((value) => value.includes(normalized))
-}
-
-function formatGeoSummary(filter: Pick<FilterRow, "regions" | "cities">, regions: RegionOption[]) {
-  if (filter.regions.length === 0 && filter.cities.length === 0) return "Вся Украина"
-  const cityMap = new Map(regions.flatMap((region) => region.cities.map((city) => [city.id, city] as const)))
-  const regionMap = new Map(regions.map((region) => [region.id, region.nameRu] as const))
-  const parts = filter.regions.flatMap((regionId) => {
-    const regionCities = filter.cities.filter((cityId) => cityMap.get(cityId)?.regionId === regionId)
-    return regionCities.length > 0
-      ? regionCities.map((cityId) => cityMap.get(cityId)?.nameRu ?? cityId)
-      : [regionMap.get(regionId) ?? regionId]
-  })
-  const unscopedCities = filter.cities
-    .filter((cityId) => !filter.regions.includes(cityMap.get(cityId)?.regionId ?? ""))
-    .map((cityId) => cityMap.get(cityId)?.nameRu ?? cityId)
-  return [...parts, ...unscopedCities].join(", ")
-}
-
 export default function FiltersPage() {
-  const { data, mutate } = useSWR<{ filters: FilterRow[] }>("/filters", fetcher)
+  const { data, mutate } = useSWR<FiltersResponse>("/filters", fetcher)
   const { data: marksData } = useSWR<TaxonomyResponse>(`/vehicle-taxonomy/marks?categoryId=${CATEGORY_ID}`, fetcher)
   const { data: attributeData } = useSWR<AttributeGroupsResponse>("/vehicle-taxonomy/options", fetcher)
   const { data: geoData } = useSWR<RegionsResponse>("/vehicle-taxonomy/regions", fetcher)
@@ -201,6 +87,10 @@ export default function FiltersPage() {
   const { toast } = useToast()
 
   const filters = data?.filters ?? []
+  const hygieneWarnings = data?.hygiene?.warnings ?? []
+  const sameNameFilter = filters.find(
+    (filter) => filter.enabled && filter.id !== editingId && normalizeSearch(filter.name) === normalizeSearch(name),
+  )
   const marks = marksData?.options ?? []
   const geoRegions = geoData?.regions ?? []
   const modelKey = autoRiaMarkId
@@ -444,6 +334,11 @@ export default function FiltersPage() {
             <div className="grid gap-3 md:grid-cols-3">
               <Field label="Название" className="md:col-span-3">
                 <input className={inputClass} value={name} onChange={(event) => setName(event.target.value)} />
+                {sameNameFilter ? (
+                  <span className="block text-xs text-warning">
+                    Активный фильтр «{sameNameFilter.name}» уже использует это название. Добавьте марку, географию или диапазон цены.
+                  </span>
+                ) : null}
               </Field>
 
               <Field label="Марка">
@@ -682,6 +577,18 @@ export default function FiltersPage() {
 
       <HudPanel kicker="Боевой набор" title="Активные фильтры">
         <div className="space-y-3">
+          {hygieneWarnings.length > 0 ? (
+            <div className="rounded-xl border border-warning/35 bg-warning/10 p-4 text-sm text-warning">
+              <div className="mb-2 flex items-center gap-2 font-semibold">
+                <AlertTriangle className="size-4" /> Обнаружены пересечения фильтров
+              </div>
+              <ul className="space-y-1 text-xs leading-relaxed">
+                {hygieneWarnings.map((warning) => (
+                  <li key={`${warning.kind}-${warning.filterIds.join("-")}`}>• {warning.message}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {filters.map((filter) => (
             <div
               key={filter.id}
@@ -728,223 +635,5 @@ export default function FiltersPage() {
         </div>
       </HudPanel>
     </div>
-  )
-}
-
-function GeoSelector({
-  regions,
-  availableCities,
-  selectedRegions,
-  selectedCities,
-  regionSearch,
-  citySearch,
-  dataVersion,
-  cityCount,
-  onRegionSearch,
-  onCitySearch,
-  onToggleRegion,
-  onToggleCity,
-  onUseWholeRegion,
-  onAllUkraine,
-  onClearCities,
-}: {
-  regions: RegionOption[]
-  availableCities: CityOption[]
-  selectedRegions: string[]
-  selectedCities: string[]
-  regionSearch: string
-  citySearch: string
-  dataVersion?: string
-  cityCount: number
-  onRegionSearch: (value: string) => void
-  onCitySearch: (value: string) => void
-  onToggleRegion: (value: string) => void
-  onToggleCity: (value: string) => void
-  onUseWholeRegion: (value: string) => void
-  onAllUkraine: () => void
-  onClearCities: () => void
-}) {
-  const visibleRegions = regions.filter((region) => geoMatches(regionSearch, region))
-  const cityQuery = normalizeSearch(citySearch)
-  const visibleCities = (selectedRegions.length > 0 || cityQuery.length >= 2
-    ? availableCities.filter((city) => geoMatches(citySearch, city))
-    : []
-  ).slice(0, 200)
-  const regionMap = new Map(regions.map((region) => [region.id, region] as const))
-  const cityMap = new Map(regions.flatMap((region) => region.cities.map((city) => [city.id, city] as const)))
-  const selectedAutoRiaRegions = selectedRegions.filter((regionId) => regionMap.get(regionId)?.autoRiaStateId).length
-  const selectedAutoRiaCities = selectedCities.filter((cityId) => cityMap.get(cityId)?.autoRiaCityId).length
-
-  return (
-    <div className="space-y-3 rounded-lg border border-border bg-panel-alt/35 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted">
-          <MapPin className="size-4" />
-          География
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <GlowButton onClick={onAllUkraine}>Вся Украина</GlowButton>
-          <GlowButton tone="danger" onClick={onClearCities} disabled={selectedCities.length === 0}>
-            Очистить города
-          </GlowButton>
-        </div>
-      </div>
-
-      <div className="rounded-lg border border-border bg-background/40 px-3 py-2 font-mono text-xs text-muted">
-        {dataVersion ?? "КАТОТТГ"}: {cityCount} городов. AUTO.RIA API: {selectedAutoRiaRegions}/{selectedRegions.length} областей, {selectedAutoRiaCities}/{selectedCities.length} городов.
-        {selectedCities.length > selectedAutoRiaCities ? " Города без AUTO.RIA id будут проверяться локальным post-filter после фильтрации по области." : ""}
-      </div>
-
-      <div className="grid gap-3 lg:grid-cols-2">
-        <div className="space-y-2">
-          <input
-            className={inputClass}
-            value={regionSearch}
-            onChange={(event) => onRegionSearch(event.target.value)}
-            placeholder="Поиск области"
-          />
-          <div className="max-h-48 overflow-auto rounded-lg border border-border bg-background/40 p-2">
-            <div className="flex flex-wrap gap-2">
-              {visibleRegions.map((region) => (
-                <TogglePill
-                  key={region.id}
-                  active={selectedRegions.includes(region.id)}
-                  label={`${region.nameRu}${region.autoRiaStateId ? ` · RIA ${region.autoRiaStateId}` : ""}`}
-                  onClick={() => onToggleRegion(region.id)}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="space-y-2">
-          <input
-            className={inputClass}
-            value={citySearch}
-            onChange={(event) => onCitySearch(event.target.value)}
-            placeholder={selectedRegions.length ? "Поиск города в выбранных областях" : "Поиск города по Украине"}
-          />
-          <div className="max-h-48 overflow-auto rounded-lg border border-border bg-background/40 p-2">
-            <div className="flex flex-wrap gap-2">
-              {visibleCities.map((city) => (
-                <TogglePill
-                  key={city.id}
-                  active={selectedCities.includes(city.id)}
-                  label={`${city.nameRu} · ${regionMap.get(city.regionId)?.nameRu ?? city.regionId}${city.autoRiaCityId ? ` · RIA ${city.autoRiaCityId}` : ""}`}
-                  onClick={() => onToggleCity(city.id)}
-                />
-              ))}
-              {visibleCities.length === 0 ? (
-                <span className="px-2 py-1 text-xs text-muted">Выберите область или введите минимум 2 буквы города</span>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {selectedRegions.length > 0 ? (
-        <div className="grid gap-2 md:grid-cols-2">
-          {selectedRegions.map((regionId) => {
-            const region = regionMap.get(regionId)
-            const regionCities = selectedCities.filter((cityId) => cityMap.get(cityId)?.regionId === regionId)
-            return (
-              <div key={regionId} className="flex items-center justify-between gap-3 border-t border-border px-1 py-2 text-sm">
-                <div className="min-w-0">
-                  <div className="truncate font-medium">{region?.nameRu ?? regionId}</div>
-                  <div className="truncate text-xs text-muted">
-                    {regionCities.length === 0
-                      ? "Вся область"
-                      : regionCities.map((cityId) => cityMap.get(cityId)?.nameRu ?? cityId).join(", ")}
-                  </div>
-                </div>
-                <GlowButton onClick={() => onUseWholeRegion(regionId)} disabled={regionCities.length === 0}>
-                  Вся область
-                </GlowButton>
-              </div>
-            )
-          })}
-        </div>
-      ) : null}
-
-      <div className="flex flex-wrap gap-2 text-xs">
-        {selectedRegions.length === 0 && selectedCities.length === 0 ? (
-          <span className="rounded-md border border-border bg-background/50 px-2 py-1 text-muted">Вся Украина</span>
-        ) : null}
-        {selectedRegions.map((regionId) => (
-          <button
-            key={regionId}
-            type="button"
-            className="rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-accent-soft"
-            onClick={() => onToggleRegion(regionId)}
-          >
-            {regionMap.get(regionId)?.nameRu ?? regionId} ×
-          </button>
-        ))}
-        {selectedCities.map((cityId) => (
-          <button
-            key={cityId}
-            type="button"
-            className="rounded-md border border-success/40 bg-success/10 px-2 py-1 text-success"
-            onClick={() => onToggleCity(cityId)}
-          >
-            {cityMap.get(cityId)?.nameRu ?? cityId} ×
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function Field({ label, className, children }: { label: string; className?: string; children: React.ReactNode }) {
-  return (
-    <label className={cn("space-y-1.5", className)}>
-      <span className={labelClass}>{label}</span>
-      {children}
-    </label>
-  )
-}
-
-function ToggleGroup({ icon, label, children }: { icon: React.ReactNode; label: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted">
-        <span className="[&_svg]:size-4">{icon}</span>
-        {label}
-      </div>
-      <div className="flex flex-wrap gap-2">{children}</div>
-    </div>
-  )
-}
-
-function TogglePill({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      className={cn(
-        "min-h-9 max-w-full break-words whitespace-normal rounded-lg border px-3 py-2 text-left text-sm leading-snug transition-all active:scale-[0.97]",
-        active
-          ? "border-accent/50 bg-accent/12 text-accent-soft shadow-[0_0_16px_-8px_rgba(242,106,31,0.6)]"
-          : "border-line bg-surface-2/70 text-muted hover:border-line-strong hover:bg-surface-3 hover:text-foreground",
-      )}
-      onClick={onClick}
-    >
-      {label}
-    </button>
-  )
-}
-
-function AutoRiaFilterBadge({ filter }: { filter: FilterRow }) {
-  if (!filter.autoRiaMarkId) {
-    return (
-      <span className="rounded-md border border-danger/30 bg-danger/10 px-2 py-1 text-danger">
-        AUTO.RIA широкий поиск
-      </span>
-    )
-  }
-
-  return (
-    <span className="rounded-md border border-success/30 bg-success/10 px-2 py-1 text-success">
-      AUTO.RIA марка #{filter.autoRiaMarkId}{filter.autoRiaModelId ? ` / модель #${filter.autoRiaModelId}` : ""}
-    </span>
   )
 }

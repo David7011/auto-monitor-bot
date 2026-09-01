@@ -1,5 +1,5 @@
 import { prisma, type ListingSource } from "@amb/db";
-import { SOURCE_CAPABILITIES } from "@amb/shared";
+import { SOURCE_CAPABILITIES, type MonitoringStatusResponse } from "@amb/shared";
 import { getQueueCounts } from "../../lib/queues.js";
 import { env } from "../../env.js";
 import { orchestrator } from "./orchestrator.js";
@@ -89,7 +89,7 @@ export async function stopMonitoring() {
   return { ok: true, state };
 }
 
-export async function getMonitoringStatus() {
+export async function getMonitoringStatus(): Promise<MonitoringStatusResponse<Date>> {
   const state = await orchestrator.ensureState();
   await orchestrator.ensureSources();
   const [sources, queueCounts, todayCount, lastRun, totalFilters, activeFilters, activeRealFilters] = await Promise.all([

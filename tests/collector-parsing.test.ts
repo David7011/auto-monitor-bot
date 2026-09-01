@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FUEL_TYPE_OPTIONS, findAttributeValue } from "../packages/shared/src/utils/vehicle-attributes.js";
 import { decodeHtmlEntities, parseEngineVolume } from "../apps/worker/src/collectors/html-utils.js";
+import { autoMotoListingIsInFreshnessWindow } from "../apps/worker/src/collectors/automoto.js";
 
 describe("fuel classification", () => {
   it("classifies dual-fuel 'газ / бензин' as gas, not gasoline", () => {
@@ -37,5 +38,13 @@ describe("decodeHtmlEntities", () => {
 
   it("decodes ordinary entities", () => {
     expect(decodeHtmlEntities("Toyota &amp; Lexus &lt;3")).toBe("Toyota & Lexus <3");
+  });
+});
+
+describe("AutoMoto freshness traversal", () => {
+  it("skips an old card without treating the unordered page as exhausted", () => {
+    const cutoff = new Date("2026-08-16T00:00:00.000Z");
+    expect(autoMotoListingIsInFreshnessWindow(new Date("2026-08-15T12:00:00.000Z"), cutoff)).toBe(false);
+    expect(autoMotoListingIsInFreshnessWindow(new Date("2026-08-16T12:00:00.000Z"), cutoff)).toBe(true);
   });
 });

@@ -15,3 +15,11 @@ export async function logInfo(scope: string, message: string, details?: string):
     console.error("[api] failed to write info log:", err);
   }
 }
+
+export async function logWarn(scope: string, message: string, details?: string): Promise<void> {
+  try {
+    await writeDeduplicatedLog("WARN", scope, message, details);
+  } catch (err) {
+    console.error("[api] failed to write warning log:", err);
+  }
+}

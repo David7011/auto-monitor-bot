@@ -24,12 +24,24 @@ function Get-DotEnvValue([string]$Key) {
 
 function Resolve-PostgresTool([string]$Name) {
   $candidates = @(
+    (Join-Path $ProjectRoot ".runtime\postgresql\bin\$Name.exe"),
     "D:\PostgreSQL\bin\$Name.exe",
     "C:\Program Files\PostgreSQL\17\bin\$Name.exe",
     "C:\Program Files\PostgreSQL\16\bin\$Name.exe",
     (Get-Command "$Name.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1)
   )
   return $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+}
+
+function Get-Sha256Hex([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+    $stream.Dispose()
+  }
 }
 
 New-Item -ItemType Directory -Force -Path $DrillRoot | Out-Null
@@ -44,7 +56,7 @@ if (!(Test-Path -LiteralPath $SevenZip)) { throw "7-Zip is required: $SevenZip" 
 $hashPath = "$ArchivePath.sha256"
 if (!(Test-Path -LiteralPath $hashPath)) { throw "Backup checksum is missing: $hashPath" }
 $expectedHash = ((Get-Content -LiteralPath $hashPath -Raw) -split "\s+", 2)[0].Trim().ToLowerInvariant()
-$actualHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$actualHash = Get-Sha256Hex $ArchivePath
 if ($expectedHash -ne $actualHash) { throw "Backup checksum mismatch" }
 
 $databaseUrl = Get-DotEnvValue "DATABASE_URL"

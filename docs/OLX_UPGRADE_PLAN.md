@@ -7,7 +7,7 @@
 
 | Пункт | Статус |
 |-------|--------|
-| A1 адаптивная пагинация realtime | ✅ внедрено (`OLX_REALTIME_MAX_PAGES=5`, стоп по пересечению с известными ID / срезу свежести) |
+| A1 адаптивная полнота realtime | ✅ обновлено (`OLX_REALTIME_MAX_PAGES=1`; отсутствие overlap создаёт немедленный recovery в отдельной прерываемой очереди) |
 | A2 размер страницы 50 | ✅ внедрено (`OLX_API_PAGE_SIZE=50`; живая проверка: `limit<=50`, страница отдаёт ~65 объявлений) |
 | A3 приватный фид | ✅ код готов (`OLX_PRIVATE_FEED_ENABLED`, API `owner_type=private` подтверждён живой проверкой); по умолчанию выключен — широкий фид с A1 уже покрывает частников, а второй фид удваивает запросы |
 | A4 сентинел переполнения | ✅ внедрено (warning `OLX realtime window overflow` в collector run / статусе источника) |
@@ -98,7 +98,7 @@ replay. На пиках категории 108 всплески >40/скан р�
     `knownExternalIds`).
   - в `collect` для realtime: заменить `maxPages=1` на цикл «продолжать, пока
     `observedOnPage>0 && !sawKnownId && !cutoffReached && page < OLX_REALTIME_MAX_PAGES`».
-- `apps/worker/src/env.ts`: добавить `OLX_REALTIME_MAX_PAGES` (дефолт 5) и
+- `apps/worker/src/env.ts`: добавить `OLX_REALTIME_MAX_PAGES` (первоначально 5, текущий hot-path дефолт 1) и
   `OLX_API_PAGE_SIZE` (сделать env-настраиваемым, дефолт 50 — см. A2).
 
 ### A2. Размер страницы 40 → 50 (минимум, если не делать A1)
@@ -236,7 +236,7 @@ B3/C1, иначе повышенная частота на одном IP → 429
 | `LIVE_OLX_JITTER_SECONDS` | `0` | `1`–`2` | B3 |
 | `LIVE_OLX_INTERVAL_SECONDS` | `5` | `3` (после анти-блока) | B2 |
 | `OLX_API_PAGE_SIZE` (новый) | — (40 хардкод) | `50` | A2 |
-| `OLX_REALTIME_MAX_PAGES` (новый) | — (1 хардкод) | `5` | A1 |
+| `OLX_REALTIME_MAX_PAGES` (новый) | — (1 хардкод) | `1` | A1 |
 | `OLX_BACKFILL_MAX_PAGES` | `30` | `~20` при page=50 | A6 |
 | `SOURCE_HTTP_CONNECTIONS_PER_ORIGIN` | `4` | `6`–`8` | B4 |
 

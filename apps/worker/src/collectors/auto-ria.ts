@@ -161,10 +161,19 @@ export class AutoRiaCollector implements SourceCollector {
     const now = new Date();
     let requestCount = 1;
     const maxCandidates = Math.max(1, Math.min(env.AUTO_RIA_MAX_INFO_PER_SCAN, scan.maxCandidates));
+    const candidateIds = selectAutoRiaCandidateIds(
+      ids,
+      state.knownExternalIds,
+      maxCandidates,
+      env.KNOWN_LISTING_STOP_THRESHOLD,
+    );
+    const semanticWarnings: string[] = [];
 
-    for (const id of ids) {
-      if (state.knownExternalIds.has(id)) break;
-      if (listings.length >= maxCandidates) break;
+    for (const id of candidateIds) {
+      if (Date.now() >= scan.deadlineAt.getTime()) {
+        semanticWarnings.push(`AUTO.RIA scan deadline reached after ${requestCount} request(s)`);
+        break;
+      }
 
       const info = await loadAutoRiaInfo(id, apiKey);
       if (info.requestMade) requestCount += 1;
@@ -178,6 +187,7 @@ export class AutoRiaCollector implements SourceCollector {
             observedCount: ids.length,
             pageCount: 1,
             requestCount,
+            semanticWarnings,
           };
         }
         if (info.rateLimited || info.captchaDetected) {
@@ -190,17 +200,53 @@ export class AutoRiaCollector implements SourceCollector {
             observedCount: ids.length,
             pageCount: 1,
             requestCount,
+            semanticWarnings,
           };
         }
         continue;
       }
 
       const listing = normalizeAutoRiaInfo(id, info.data, now);
-      if (listing) listings.push(listing);
+      if (listing) {
+        listings.push(listing);
+        if (scan.onHotCandidates) await scan.onHotCandidates([listing]);
+      }
     }
 
-    return { listings, observedCount: ids.length, pageCount: 1, requestCount };
+    return { listings, observedCount: ids.length, pageCount: 1, requestCount, semanticWarnings };
   }
+}
+
+/**
+ * Do not trust one known ID as a complete continuity anchor: promoted or
+ * reordered cards can put a genuinely new ID immediately below it. Continue
+ * through a bounded consecutive-known tail, while strictly capping expensive
+ * info calls. A stable feed therefore costs no extra detail requests.
+ */
+export function selectAutoRiaCandidateIds(
+  ids: readonly string[],
+  knownExternalIds: ReadonlySet<string>,
+  maxCandidates: number,
+  knownTailThreshold: number,
+): string[] {
+  const selected: string[] = [];
+  let knownTail = 0;
+  const limit = Math.max(0, Math.trunc(maxCandidates));
+  const tailLimit = Math.max(1, Math.trunc(knownTailThreshold));
+  if (limit === 0) return selected;
+
+  for (const id of ids) {
+    if (knownExternalIds.has(id)) {
+      knownTail += 1;
+      if (knownTail >= tailLimit) break;
+      continue;
+    }
+    knownTail = 0;
+    if (!id || selected.includes(id)) continue;
+    selected.push(id);
+    if (selected.length >= limit) break;
+  }
+  return selected;
 }
 
 export function buildAutoRiaSearchUrl(context: SourceSearchContext, apiKey: string): string {

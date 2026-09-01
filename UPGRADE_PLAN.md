@@ -1,12 +1,12 @@
 # План апгрейда Auto Monitor Bot
 
-Статус на 22.07.2026: этап 0.4.0 выполнен и переведён в live.
+Статус на 22.08.2026: corrective-этап 0.4.1 реализован; перед live-деплоем проходит полный acceptance gate.
 
 ## Выполнено
 
 1. Windows lifecycle переведён на долгоживущий `SYSTEM`-supervisor с boot+logon triggers, стабильной readiness-проверкой, коалесингом запусков, отдельными журналами попыток и минутным watchdog.
 2. Fast Startup/гибернация отключены. Включение ноутбука гарантированно даёт полный boot, сон S3 сохранён, C: получил около 6,1 ГБ свободного места.
-3. OLX hot path сохранён на 4 ± 1 секунде. HTML, regional и private shadow coverage вынесены в низкочастотные независимые lanes с per-fingerprint состоянием в PostgreSQL.
+3. После реальных HTTP 403 исходный безопасный OLX cadence был установлен на 60 ± 10 секунд. После накопления runtime baseline healthy-режим ускорен до 20 ± 4 с, но восстановление после защиты остаётся ступенчатым 60 → 30 → 20 с. HTML, regional и private shadow coverage используют единый origin coordinator, а повторная защита включает 6/12/24-часовой cooldown и только один HTML probe без API-дубля.
 4. Добавлены структурированные OLX coverage metrics и прямой parity test. Финальная контрольная сверка: 213 из 213 доступных ID уже присутствовали в search state/journal; private lane обнаружил 47 дополнительных к fast-feed ID, HTML lane — ещё 3.
 5. Observation replay, coverage-gap backfill, candidate overflow guard и безопасные cutoff/anchor правила сохранены; CAPTCHA обход не добавлялся.
 6. База получила почасовые агрегаты старых collector runs, дедупликацию error log со счётчиками и транзакционную очистку legacy/orphan данных.
@@ -17,6 +17,9 @@
 11. Установлены и проверены четыре Windows-задачи: supervisor, watchdog, daily backup, weekly restore drill.
 12. Добавлены fault-injection recovery, OLX parity, database restore и safe cleanup commands.
 13. Финальный fault-injection подтвердил автоматическое восстановление принудительно завершённого API за 44 секунды.
+14. В 0.4.1 runtime health отделён от source protection, ручной обход cooldown закрыт, активные инциденты и суточные наблюдения показываются без перекоса частых источников.
+15. При блокировке OLX система явно показывает деградированный live-портфель Cars.ua/AutoMoto; быстрый inline Telegram handoff остаётся общим для всех инициализированных realtime-источников.
+16. Telegram rate gate сделан глобальным для API, hot/background workers и watchdog: атомарные Redis TIME/Lua-слоты по bot/chat, общий `retry_after`, отсутствие секрета в ключе и fail-closed для штатных путей.
 
 ## Внешние ограничения
 

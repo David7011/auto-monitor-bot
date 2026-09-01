@@ -49,20 +49,55 @@ export async function enqueue(
   });
 }
 
-export async function getQueueCounts(): Promise<Record<string, { waiting: number; active: number; failed: number }>> {
-  const result: Record<string, { waiting: number; active: number; failed: number }> = {};
-  await getRedisDiagnostics();
-
-  for (const name of Object.values(QUEUE_NAMES)) {
+export async function getQueueCounts(): Promise<Record<string, {
+  waiting: number;
+  active: number;
+  delayed: number;
+  prioritized: number;
+  failed: number;
+  failedRecent: number;
+}>> {
+  const result: Record<string, {
+    waiting: number;
+    active: number;
+    delayed: number;
+    prioritized: number;
+    failed: number;
+    failedRecent: number;
+  }> = {};
+  const rows = await Promise.all(Object.values(QUEUE_NAMES).map(async (name) => {
     const q = getQueue(name);
-    const counts = await q.getJobCounts("waiting", "active", "failed");
+    const counts = await q.getJobCounts("waiting", "active", "delayed", "prioritized", "failed");
+    const failedJobs = (counts.failed ?? 0) > 0
+      ? await q.getJobs(["failed"], 0, Math.min(199, (counts.failed ?? 1) - 1), false)
+      : [];
+    const recentCutoff = Date.now() - 30 * 60 * 1000;
+    const failedRecent = failedJobs.filter((job) =>
+      (job.finishedOn ?? job.processedOn ?? job.timestamp) >= recentCutoff
+    ).length;
+    return { name, counts, failedRecent };
+  }));
+  for (const { name, counts, failedRecent } of rows) {
     result[name] = {
       waiting: counts.waiting ?? 0,
       active: counts.active ?? 0,
+      delayed: counts.delayed ?? 0,
+      prioritized: counts.prioritized ?? 0,
       failed: counts.failed ?? 0,
+      failedRecent,
     };
   }
   return result;
+}
+
+export function queueFailureSummary(queues: Record<string, { failed: number; failedRecent: number }>): {
+  total: number;
+  recent: number;
+  historical: number;
+} {
+  const total = Object.values(queues).reduce((sum, queue) => sum + queue.failed, 0);
+  const recent = Object.values(queues).reduce((sum, queue) => sum + queue.failedRecent, 0);
+  return { total, recent, historical: Math.max(0, total - recent) };
 }
 
 export async function getRedisDiagnostics(): Promise<RedisDiagnostics> {

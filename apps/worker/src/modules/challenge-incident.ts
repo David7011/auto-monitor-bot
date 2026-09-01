@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@amb/db";
+import {
+  nextChallengeIncidentStatus,
+  type ActiveChallengeIncidentStatus,
+} from "./challenge-incident-policy.js";
 
 export async function recordChallengeIncident(input: {
   sourceId: string;
@@ -8,31 +12,77 @@ export async function recordChallengeIncident(input: {
   affectedUrl?: string;
   cooldownUntil: Date;
   limitedReason: string;
-}): Promise<void> {
-  await prisma.challengeIncident.updateMany({
-    where: {
-      sourceId: input.sourceId,
-      status: { in: ["DETECTED", "COOLDOWN", "PROBE_PENDING", "RECOVERING"] },
-    },
-    data: {
-      status: "REPEATED",
-      resolution: "Проверка источника повторно встретила защитную страницу",
-    },
-  });
+  manualVerificationRequired?: boolean;
+}): Promise<{
+  incidentId: string;
+  repeated: boolean;
+  manualVerificationRequired: boolean;
+  manualVerificationNew: boolean;
+}> {
+  return prisma.$transaction(async (tx) => {
+    const active = await tx.challengeIncident.findFirst({
+      where: {
+        sourceId: input.sourceId,
+        status: {
+          in: [
+            "DETECTED",
+            "COOLDOWN",
+            "PROBE_PENDING",
+            "RECOVERING",
+            "REPEATED",
+            "MANUAL_VERIFICATION_REQUIRED",
+          ],
+        },
+      },
+      orderBy: { detectedAt: "desc" },
+      select: { id: true, status: true },
+    });
 
-  await prisma.challengeIncident.create({
-    data: {
-      sourceId: input.sourceId,
+    const status = nextChallengeIncidentStatus({
+      activeStatus: active?.status as ActiveChallengeIncidentStatus | undefined,
+      manualVerificationRequired: Boolean(input.manualVerificationRequired),
+    });
+    const manualVerificationRequired = status === "MANUAL_VERIFICATION_REQUIRED";
+    const manualVerificationNew = manualVerificationRequired
+      && active?.status !== "MANUAL_VERIFICATION_REQUIRED";
+
+    const data = {
       detector: input.detector,
       responseStatus: input.responseStatus,
       affectedUrlHash: input.affectedUrl ? hashUrl(input.affectedUrl) : null,
       cooldownUntil: input.cooldownUntil,
-      status: "COOLDOWN",
+      status,
+      resolution: manualVerificationRequired
+        ? "После повторных CAPTCHA требуется ручная проверка доступности источника; автоматический обход не выполняется"
+        : active
+          ? "Проверка источника повторно встретила тот же защитный ответ"
+          : null,
       metadataRedacted: {
         limitedReason: input.limitedReason,
         hasAffectedUrl: Boolean(input.affectedUrl),
       },
-    },
+    };
+
+    if (active) {
+      await tx.challengeIncident.update({ where: { id: active.id }, data });
+      return {
+        incidentId: active.id,
+        repeated: true,
+        manualVerificationRequired,
+        manualVerificationNew,
+      };
+    }
+
+    const created = await tx.challengeIncident.create({
+      data: { sourceId: input.sourceId, ...data },
+      select: { id: true },
+    });
+    return {
+      incidentId: created.id,
+      repeated: false,
+      manualVerificationRequired,
+      manualVerificationNew,
+    };
   });
 }
 

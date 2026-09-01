@@ -37,6 +37,7 @@ export class RstCollector implements SourceCollector {
   ): Promise<CollectorResult> {
     const scan = collectorScanOptions(input);
     const listings: NormalizedListing[] = [];
+    const classifiedExternalIds = new Set<string>();
     const now = new Date();
     const semanticWarnings: string[] = [];
     const maxPages = scan.lane === "BACKFILL" ? Math.max(1, scan.maxPages) : 1;
@@ -70,18 +71,30 @@ export class RstCollector implements SourceCollector {
         break;
       }
 
+      const pageCandidates: NormalizedListing[] = [];
       for (const article of articles) {
-        if (state.knownExternalIds.has(article.id)) continue;
+        if (state.knownExternalIds.has(article.id)) {
+          classifiedExternalIds.add(article.id);
+          continue;
+        }
         if (listings.length >= maxCandidates) break;
         const listing = normalizeRstArticle(article, now, scan.lane === "REALTIME");
-        if (listing) listings.push(listing);
+        if (listing) {
+          classifiedExternalIds.add(article.id);
+          listings.push(listing);
+          pageCandidates.push(listing);
+        }
       }
 
+      if (pageCandidates.length > 0 && scan.onHotCandidates) {
+        await scan.onHotCandidates(pageCandidates);
+      }
       if (listings.length >= maxCandidates) break;
     }
 
     return {
       listings,
+      scannedExternalIds: [...classifiedExternalIds],
       observedCount,
       pageCount,
       requestCount,

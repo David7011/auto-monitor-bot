@@ -3,6 +3,7 @@ import {
   autoRiaGeoParamsForSelection,
   listingMatchesGeoSelection,
   normalizeCityIds,
+  normalizeGeoText,
   normalizeRegionIds,
   UKRAINE_CITIES_DATA_VERSION,
   UKRAINE_REGIONS,
@@ -26,6 +27,19 @@ describe("region/city filtering", () => {
   it("limits matching to selected cities when city ids are present", () => {
     expect(listingMatchesGeoSelection({ region: "Дніпропетровська область", city: "Дніпро" }, ["dnipropetrovska"], ["dnipro"])).toBe(true);
     expect(listingMatchesGeoSelection({ region: "Дніпропетровська область", city: "Кривий Ріг" }, ["dnipropetrovska"], ["dnipro"])).toBe(false);
+  });
+
+  it("matches AUTO.RIA legacy city labels and suffixless region names", () => {
+    expect(normalizeGeoText("Дніпропетровська область")).toBe("дніпропетровська");
+    expect(normalizeGeoText("Дніпропетровська")).toBe("дніпропетровська");
+    expect(normalizeGeoText("Дніпро (Дніпропетровськ)")).toBe("дніпро");
+    expect(
+      listingMatchesGeoSelection(
+        { region: "Дніпропетровська", city: "Дніпро (Дніпропетровськ)" },
+        ["dnipropetrovska"],
+        ["dnipro"],
+      ),
+    ).toBe(true);
   });
 
   it("drops cities outside selected regions during normalization", () => {

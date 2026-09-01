@@ -28,12 +28,24 @@ function Get-DotEnvValue([string]$Key) {
 
 function Resolve-PostgresTool([string]$Name) {
   $candidates = @(
+    (Join-Path $ProjectRoot ".runtime\postgresql\bin\$Name.exe"),
     "D:\PostgreSQL\bin\$Name.exe",
     "C:\Program Files\PostgreSQL\17\bin\$Name.exe",
     "C:\Program Files\PostgreSQL\16\bin\$Name.exe",
     (Get-Command "$Name.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1)
   )
   return $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+}
+
+function Get-Sha256Hex([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+    $stream.Dispose()
+  }
 }
 
 function Remove-BackupItem([string]$Path) {
@@ -104,7 +116,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Encrypted archive validation failed" }
     Move-Item -LiteralPath $partialArchive -Destination $archivePath -Force
 
-    $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-Sha256Hex $archivePath
     "$hash  $([IO.Path]::GetFileName($archivePath))" | Set-Content -LiteralPath $hashPath -Encoding ASCII
     @{
       createdAt = (Get-Date).ToString("o")

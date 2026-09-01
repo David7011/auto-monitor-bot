@@ -29,6 +29,33 @@ import {
 } from "./html-utils.js";
 
 const BASE_URL = "https://cars.ua";
+const CARS_UA_CITY_PATH_BY_ID: Readonly<Record<string, string>> = {
+  kyiv: "kiev",
+  vinnytsia: "vinnica",
+  lutsk: "luck",
+  dnipro: "dnepr",
+  donetsk: "doneck",
+  zhytomyr: "zhitomir",
+  uzhhorod: "uzhgorod",
+  zaporizhzhia: "zaporozhe",
+  "ivano-frankivsk": "ivano-frankovsk",
+  kropyvnytskyi: "kropivnickij",
+  luhansk: "lugansk",
+  lviv: "lvov",
+  mykolaiv: "nikolaev",
+  odesa: "odessa",
+  poltava: "poltava",
+  rivne: "rovno",
+  sumy: "sumy",
+  ternopil: "ternopol",
+  kharkiv: "harkov",
+  kherson: "herson",
+  khmelnytskyi: "hmelnickij",
+  cherkasy: "cherkassy",
+  chernihiv: "chernigov",
+  chernivtsi: "chernovcy",
+  sevastopol: "sevastopol",
+};
 
 export class CarsUaCollector implements SourceCollector {
   readonly source = "CARS_UA" as const;
@@ -43,6 +70,7 @@ export class CarsUaCollector implements SourceCollector {
     const scan = collectorScanOptions(input);
     const listings: NormalizedListing[] = [];
     const seenExternalIds = new Set<string>();
+    const classifiedExternalIds = new Set<string>();
     const now = new Date();
     const semanticWarnings: string[] = [];
     const isBackfill = scan.lane === "BACKFILL";
@@ -53,66 +81,82 @@ export class CarsUaCollector implements SourceCollector {
     let pageCount = 0;
     let requestCount = 0;
     let observedCount = 0;
-    let cutoffReached = false;
-    let anchored = false;
-
-    for (let page = 1; page <= maxPages; page += 1) {
-      if (scanDeadlineReached(scan)) {
-        semanticWarnings.push(`Cars.ua scan deadline reached after ${pageCount} page(s)`);
-        break;
-      }
-
-      const pageUrl = carsUaPageUrl(env.CARS_UA_SEARCH_URL, page);
-      const response = await fetchHtml(pageUrl, { source: "CARS_UA" });
-      requestCount += 1;
-      const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds);
-      if (blocked.rateLimited || blocked.captchaDetected) {
-        return { listings, ...blocked, responseStatus: response.status, affectedUrl: pageUrl, pageCount, requestCount, observedCount, semanticWarnings };
-      }
-      if (response.status < 200 || response.status >= 300) {
-        throw new Error(`Cars.ua search failed: HTTP ${response.status}`);
-      }
-
-      const cards = extractCards(response.body);
-      pageCount += 1;
-      let observedOnPage = 0;
-      let knownEncountered = false;
-
-      for (const card of cards) {
-        if (!card.id || seenExternalIds.has(card.id)) continue;
-        seenExternalIds.add(card.id);
-        observedOnPage += 1;
-
-        if (state.knownExternalIds.has(card.id)) {
-          knownEncountered = true;
-          continue;
+    const cutoffReached = false;
+    const searchUrls = carsUaSearchUrls(env.CARS_UA_SEARCH_URL, context.cities);
+    let anchoredTargets = 0;
+    targetLoop: for (const searchUrl of searchUrls) {
+      let targetAnchored = false;
+      for (let page = 1; page <= maxPages; page += 1) {
+        if (scanDeadlineReached(scan)) {
+          semanticWarnings.push(`Cars.ua scan deadline reached after ${pageCount} page(s)`);
+          break targetLoop;
         }
-        if (listings.length >= maxCandidates) continue;
 
-        const listing = normalizeCarsUaCard(card, now);
-        if (!listing) continue;
-        // Cars.ua order is not verified newest-first, so a single out-of-window
-        // card must not truncate the rest of the page — skip it, keep scanning.
-        if (context.publishedAfter && listing.publishedAt && listing.publishedAt < context.publishedAfter) {
-          cutoffReached = true;
-          continue;
+        const pageUrl = carsUaPageUrl(searchUrl, page);
+        const response = await fetchHtml(pageUrl, { source: "CARS_UA" });
+        requestCount += 1;
+        const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds);
+        if (blocked.rateLimited || blocked.captchaDetected) {
+          return { listings, ...blocked, responseStatus: response.status, affectedUrl: pageUrl, pageCount, requestCount, observedCount, semanticWarnings };
         }
-        listings.push(listing);
-      }
+        if (response.status < 200 || response.status >= 300) {
+          throw new Error(`Cars.ua search failed: HTTP ${response.status}`);
+        }
 
-      observedCount += observedOnPage;
-      if (observedOnPage === 0) {
-        if (page === 1) semanticWarnings.push("Cars.ua returned no parseable adverts on the first page");
-        anchored = true;
-        break;
+        const cards = extractCards(response.body);
+        pageCount += 1;
+        let observedOnPage = 0;
+        const knownSequence: boolean[] = [];
+        const pageCandidates: NormalizedListing[] = [];
+
+        for (const card of cards) {
+          if (!card.id || seenExternalIds.has(card.id)) continue;
+          seenExternalIds.add(card.id);
+          observedOnPage += 1;
+
+          const known = state.knownExternalIds.has(card.id);
+          knownSequence.push(known);
+          if (known) {
+            classifiedExternalIds.add(card.id);
+            continue;
+          }
+          if (listings.length >= maxCandidates) continue;
+
+          const listing = normalizeCarsUaCard(card, now);
+          if (!listing) continue;
+          classifiedExternalIds.add(card.id);
+          // Cars.ua order is not verified newest-first, so a single out-of-window
+          // card must not truncate the rest of the page — skip it, keep scanning.
+          if (context.publishedAfter && listing.publishedAt && listing.publishedAt < context.publishedAfter) {
+            continue;
+          }
+          listings.push(listing);
+          pageCandidates.push(listing);
+        }
+
+        observedCount += observedOnPage;
+        if (pageCandidates.length > 0 && scan.onHotCandidates) {
+          await scan.onHotCandidates(pageCandidates);
+        }
+        if (observedOnPage === 0) {
+          if (page === 1) semanticWarnings.push(`Cars.ua returned no parseable adverts for ${searchUrl}`);
+          targetAnchored = true;
+          break;
+        }
+        // Every selected city is scanned independently. An overlap in one city
+        // must not suppress another selected city's hot page.
+        if (!isBackfill && (
+          carsUaPageIsAnchored(knownSequence, env.KNOWN_LISTING_STOP_THRESHOLD)
+          || listings.length >= maxCandidates
+        )) {
+          targetAnchored = true;
+          break;
+        }
       }
-      // Overlap with known adverts (or the freshness cutoff) proves nothing was
-      // missed between scans, so realtime pagination can stop here.
-      if (!isBackfill && (knownEncountered || cutoffReached || listings.length >= maxCandidates)) {
-        anchored = true;
-        break;
-      }
+      if (targetAnchored) anchoredTargets += 1;
+      if (listings.length >= maxCandidates) break;
     }
+    const anchored = anchoredTargets === searchUrls.length;
 
     if (!isBackfill && !anchored && state.knownExternalIds.size > 0 && observedCount > 0) {
       semanticWarnings.push(
@@ -120,8 +164,30 @@ export class CarsUaCollector implements SourceCollector {
       );
     }
 
-    return { listings, observedCount, pageCount, requestCount, cutoffReached, semanticWarnings };
+    return {
+      listings,
+      scannedExternalIds: [...classifiedExternalIds],
+      observedCount,
+      pageCount,
+      requestCount,
+      cutoffReached,
+      semanticWarnings,
+    };
   }
+}
+
+export function carsUaPageIsAnchored(
+  knownSequence: readonly boolean[],
+  knownTailThreshold: number,
+): boolean {
+  if (knownSequence.length === 0) return true;
+  if (knownSequence.every(Boolean)) return true;
+  const threshold = Math.max(1, Math.trunc(knownTailThreshold));
+  let trailingKnown = 0;
+  for (let index = knownSequence.length - 1; index >= 0 && knownSequence[index]; index -= 1) {
+    trailingKnown += 1;
+  }
+  return trailingKnown >= threshold;
 }
 
 export function carsUaPageUrl(value: string, page: number): string {
@@ -130,6 +196,19 @@ export function carsUaPageUrl(value: string, page: number): string {
   const basePath = url.pathname.replace(/\/p=\d+\/?$/u, "/").replace(/\/?$/u, "/");
   url.pathname = `${basePath}p=${Math.max(2, Math.trunc(page))}/`;
   return url.toString();
+}
+
+export function carsUaSearchUrls(value: string, cityIds: readonly string[]): string[] {
+  const cityPaths = [...new Set(cityIds
+    .map((cityId) => CARS_UA_CITY_PATH_BY_ID[cityId])
+    .filter((cityPath): cityPath is string => Boolean(cityPath)))];
+  if (cityPaths.length === 0) return [value];
+
+  return cityPaths.map((cityPath) => {
+    const url = new URL(value);
+    url.pathname = `/avtobazar/${cityPath}/`;
+    return url.toString();
+  });
 }
 
 function normalizeCarsUaCard(card: { id: string; html: string }, now: Date): NormalizedListing | undefined {

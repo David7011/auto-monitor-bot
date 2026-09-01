@@ -6,6 +6,7 @@ import {
   extractRenderedOlxCards,
   normalizeOlxAd,
   olxApiFeedUrls,
+  parseRenderedCardDate,
   selectOlxCandidates,
   shouldStopOlxRealtimePage,
   type OlxAd,
@@ -99,6 +100,10 @@ describe("OLX fast feed URLs", () => {
         <a href="/d/uk/obyavlenie/test-ID123.html?search_reason=search&amp;page=1">
           <h4>Renault &amp; Dacia</h4>
         </a>
+        <p data-testid="ad-price">320 000 грн.</p>
+        <p data-testid="location-date">Дніпро, Центральний - 05 серпня 2026 р.</p>
+        <span>2016 120 тис.км.</span><span>1.6 л.</span><span>Механічна</span><span>Бензин</span>
+        <img src="https://example.test/car.jpg" alt="car">
       </div>
     `);
 
@@ -106,8 +111,23 @@ describe("OLX fast feed URLs", () => {
       id: "929999999",
       title: "Renault & Dacia",
       url: "https://www.olx.ua/d/uk/obyavlenie/test-ID123.html?search_reason=search&page=1",
+      createdTime: "2026-08-05T09:00:00.000Z",
+      location: { cityName: "Дніпро" },
+      price: { regularPrice: { value: 320000, currencyCode: "UAH" } },
+      photos: ["https://example.test/car.jpg"],
       htmlCardOnly: true,
     })]);
+    expect(cards[0]?.params).toEqual(expect.arrayContaining([
+      { key: "motor_year", value: "2016" },
+      { key: "motor_mileage_thou", value: "120" },
+      { key: "engine_size", value: "1.6" },
+    ]));
+  });
+
+  it("normalizes Ukrainian relative card dates in the Kyiv timezone", () => {
+    const now = new Date("2026-08-19T17:30:00.000Z");
+    expect(parseRenderedCardDate("Сьогодні о 16:20", now)?.toISOString()).toBe("2026-08-19T13:20:00.000Z");
+    expect(parseRenderedCardDate("Вчора о 23:05", now)?.toISOString()).toBe("2026-08-18T20:05:00.000Z");
   });
 
   it("builds separate fast API feeds for Dnipro and Samar", () => {
@@ -192,6 +212,9 @@ describe("OLX mixed promoted feed", () => {
       maxCandidates: 10,
       observationChannel: "OLX_HTML_COVERAGE",
       observationTarget: "region:21;city:121;page:1;owner:all",
+      requestStartedAt: new Date("2026-07-10T09:59:58.000Z"),
+      firstByteAt: new Date("2026-07-10T09:59:58.200Z"),
+      hotCandidateAt: new Date("2026-07-10T09:59:58.250Z"),
     });
 
     expect(result.knownEncountered).toBe(true);
@@ -202,6 +225,9 @@ describe("OLX mixed promoted feed", () => {
     expect(result.listings[0]).toMatchObject({
       observationChannel: "OLX_HTML_COVERAGE",
       observationTarget: "region:21;city:121;page:1;owner:all",
+      requestStartedAt: new Date("2026-07-10T09:59:58.000Z"),
+      firstByteAt: new Date("2026-07-10T09:59:58.200Z"),
+      hotCandidateAt: new Date("2026-07-10T09:59:58.250Z"),
     });
   });
 
@@ -269,7 +295,7 @@ describe("source protection pauses", () => {
     expect(protectionPauseSeconds({ consecutiveErrors: 0, baseSeconds: 90, maxSeconds: 900 })).toBe(90);
     expect(protectionPauseSeconds({ consecutiveErrors: 1, baseSeconds: 90, maxSeconds: 900 })).toBe(180);
     expect(protectionPauseSeconds({ consecutiveErrors: 2, baseSeconds: 90, maxSeconds: 900 })).toBe(360);
-    expect(protectionPauseSeconds({ consecutiveErrors: 6, baseSeconds: 90, maxSeconds: 900 })).toBe(720);
+    expect(protectionPauseSeconds({ consecutiveErrors: 6, baseSeconds: 90, maxSeconds: 900 })).toBe(900);
     expect(protectionPauseSeconds({ consecutiveErrors: 6, baseSeconds: 90, maxSeconds: 600 })).toBe(600);
   });
 });

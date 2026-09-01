@@ -7,7 +7,11 @@ $ProjectRoot = if ($env:PROJECT_ROOT) { (Resolve-Path $env:PROJECT_ROOT).Path } 
 $ProjectRootMsys = "/cygdrive/" + (Split-Path -Qualifier $ProjectRoot).TrimEnd(":").ToLowerInvariant() + "/" + ($ProjectRoot.Substring(3).Replace("\", "/"))
 $PidDir = Join-Path $ProjectRoot ".runtime\pids"
 $ProcessManagementScript = Join-Path $PSScriptRoot "process-management.ps1"
+$RuntimeIntentScript = Join-Path $PSScriptRoot "runtime-intent.ps1"
 . $ProcessManagementScript
+. $RuntimeIntentScript
+
+Clear-AmbRunIntent
 
 function Resolve-PostgresCtl {
   if ($env:POSTGRES_BIN) {
@@ -16,6 +20,7 @@ function Resolve-PostgresCtl {
   }
 
   $candidates = @(
+    (Join-Path $ProjectRoot ".runtime\postgresql\bin\pg_ctl.exe"),
     "D:\PostgreSQL\bin\pg_ctl.exe",
     "C:\Program Files\PostgreSQL\16\bin\pg_ctl.exe",
     "C:\Program Files\PostgreSQL\15\bin\pg_ctl.exe",

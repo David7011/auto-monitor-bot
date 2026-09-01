@@ -1,9 +1,55 @@
 import { describe, expect, it } from "vitest";
-import { olxCoverageSchedule } from "../apps/worker/src/collectors/olx-coverage.js";
+import {
+  olxCoverageExecutionSchedule,
+  olxCoverageSchedule,
+} from "../apps/worker/src/collectors/olx-coverage.js";
+import { partitionOlxExecutionTargets } from "../apps/worker/src/collectors/olx.js";
 
 const now = new Date("2026-07-22T00:00:00.000Z");
 
 describe("OLX coverage scheduling", () => {
+  it("never attaches regional, HTML or private reconciliation to realtime", () => {
+    expect(olxCoverageExecutionSchedule({
+      coverageOnly: false,
+      suppressBackground: false,
+      now,
+      state: {},
+      hasRegionalFilters: true,
+      regionalIntervalSeconds: 60,
+      htmlIntervalSeconds: 60,
+      privateIntervalSeconds: 90,
+    })).toEqual({ regionalDue: false, htmlDue: false, privateDue: false });
+  });
+
+  it("runs due reconciliation in the dedicated coverage execution", () => {
+    expect(olxCoverageExecutionSchedule({
+      coverageOnly: true,
+      suppressBackground: false,
+      now,
+      state: {},
+      hasRegionalFilters: true,
+      regionalIntervalSeconds: 60,
+      htmlIntervalSeconds: 60,
+      privateIntervalSeconds: 90,
+    })).toEqual({ regionalDue: true, htmlDue: true, privateDue: true });
+  });
+
+  it("keeps exact realtime targets out of a coverage-only execution", () => {
+    const targets = [
+      { observationTarget: "city:121" },
+      { observationTarget: "region:21" },
+    ];
+    const directKeys = new Set(["city:121"]);
+
+    expect(partitionOlxExecutionTargets(targets, directKeys, false)).toEqual({
+      directTargets: [targets[0]],
+      regionalTargets: [targets[1]],
+    });
+    expect(partitionOlxExecutionTargets(targets, directKeys, true)).toEqual({
+      directTargets: [],
+      regionalTargets: [targets[1]],
+    });
+  });
   it("schedules every lane for a new search fingerprint", () => {
     expect(olxCoverageSchedule({
       now,

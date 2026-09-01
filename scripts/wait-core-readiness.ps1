@@ -1,6 +1,7 @@
 param(
   [int]$TimeoutSeconds = 75,
   [int]$StableChecks = 2,
+  [switch]$SingleAttempt,
   [switch]$Quiet
 )
 
@@ -36,19 +37,63 @@ function Test-RecordedProcess([string]$Name) {
   $value = Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
   if (!$value -or ![int]::TryParse($value, [ref]$recordedPid) -or $recordedPid -le 0) { return $false }
   $process = Get-CimInstance Win32_Process -Filter "ProcessId = $recordedPid" -ErrorAction SilentlyContinue
-  return [bool]($process -and (Test-AmbOwnedProcess -Process $process -ProjectRoot $ProjectRoot))
+  return [bool]($process -and (Test-AmbOwnedServiceProcess -Process $process -ProjectRoot $ProjectRoot -ServiceName $Name))
+}
+
+function Convert-HeartbeatToUtc($Value) {
+  if ($Value -is [datetime]) { return ([datetime]$Value).ToUniversalTime() }
+  return [datetimeoffset]::Parse(
+    [string]$Value,
+    [Globalization.CultureInfo]::InvariantCulture,
+    [Globalization.DateTimeStyles]::RoundtripKind
+  ).UtcDateTime
+}
+
+function Test-WorkerHeartbeat([string]$ServiceName, [string]$HeartbeatFile) {
+  $pidPath = Join-Path $PidDir "$serviceName.pid"
+  $heartbeatPath = Join-Path $ProjectRoot ".runtime\worker-heartbeats\$HeartbeatFile"
+  if (!(Test-Path -LiteralPath $pidPath) -or !(Test-Path -LiteralPath $heartbeatPath)) { return $false }
+  try {
+    $recordedPid = 0
+    $heartbeatPid = 0
+    $pidValue = Get-Content -LiteralPath $pidPath -ErrorAction Stop | Select-Object -First 1
+    $heartbeat = Get-Content -LiteralPath $heartbeatPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $checkedAtUtc = Convert-HeartbeatToUtc $heartbeat.checkedAt
+    return [int]::TryParse([string]$pidValue, [ref]$recordedPid) -and
+      [int]::TryParse([string]$heartbeat.pid, [ref]$heartbeatPid) -and
+      $recordedPid -eq $heartbeatPid -and
+      $checkedAtUtc -ge [datetime]::UtcNow.AddSeconds(-20)
+  } catch {
+    return $false
+  }
 }
 
 function Test-CoreReady {
-  foreach ($name in @("api", "worker", "dashboard")) {
+  foreach ($name in @("api", "worker-hot-a", "worker-hot-b", "worker-background", "dashboard")) {
     if (!(Test-RecordedProcess $name)) { return $false }
   }
+  if (!(Test-WorkerHeartbeat "worker-hot-a" "hot-a.json")) { return $false }
+  if (!(Test-WorkerHeartbeat "worker-hot-b" "hot-b.json")) { return $false }
+  if (!(Test-WorkerHeartbeat "worker-background" "background.json")) { return $false }
+
+  $leaderHeartbeatPath = Join-Path $ProjectRoot ".runtime\worker-heartbeats\hot.json"
+  if (!(Test-Path -LiteralPath $leaderHeartbeatPath)) { return $false }
+  try {
+    $leader = Get-Content -LiteralPath $leaderHeartbeatPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $leaderCheckedAtUtc = Convert-HeartbeatToUtc $leader.checkedAt
+    $hotPids = @("worker-hot-a", "worker-hot-b") | ForEach-Object {
+      Get-Content -LiteralPath (Join-Path $PidDir "$_.pid") -ErrorAction Stop | Select-Object -First 1
+    }
+    if ($leader.leadership -ne "leader" -or
+        [string]$leader.pid -notin @($hotPids | ForEach-Object { [string]$_ }) -or
+        $leaderCheckedAtUtc -lt [datetime]::UtcNow.AddSeconds(-20)) { return $false }
+  } catch { return $false }
 
   $token = Get-DotEnvValue "LOCAL_API_TOKEN"
   $headers = if ($token) { @{ Authorization = "Bearer $token" } } else { @{} }
   try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:4000/health" -Headers $headers -TimeoutSec 5
-    if ($health.api.status -ne "OK" -or $health.database.status -ne "OK" -or $health.redis.status -eq "FAIL") {
+    $health = Invoke-RestMethod -Uri "http://127.0.0.1:4000/ready" -Headers $headers -TimeoutSec 3
+    if ($health.status -ne "OK") {
       return $false
     }
     $response = Invoke-WebRequest -Uri "http://127.0.0.1:3001/login" -UseBasicParsing -TimeoutSec 5
@@ -70,6 +115,7 @@ do {
   } else {
     $stable = 0
   }
+  if ($SingleAttempt) { break }
   Start-Sleep -Seconds 2
 } while ((Get-Date) -lt $deadline)
 

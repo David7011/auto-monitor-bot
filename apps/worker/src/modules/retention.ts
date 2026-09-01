@@ -56,11 +56,19 @@ export async function runRetentionMaintenance(now = new Date()): Promise<void> {
       where: { startedAt: { lt: new Date(now.getTime() - env.RETENTION_AUDIT_DAYS * DAY_MS) } },
     });
     const observations = await tx.sourceSeenListing.deleteMany({
-      where: { lastSeenAt: { lt: new Date(now.getTime() - env.RETENTION_OBSERVATION_DAYS * DAY_MS) } },
+      where: {
+        lastSeenAt: { lt: new Date(now.getTime() - env.RETENTION_OBSERVATION_DAYS * DAY_MS) },
+        // Compact NOTIFIED rows are permanent dedupe tombstones. Their heavy
+        // normalizedData is removed by listing retention, but the external ID
+        // must survive so an old advert can never be sent again.
+        decision: { not: "NOTIFIED" },
+      },
     });
     const legacyObservations = await tx.$executeRaw`
       DELETE FROM "source_seen_listings"
-      WHERE "normalizedData" IS NULL AND "createdAt" < ${legacyObservationCutoff}
+      WHERE "normalizedData" IS NULL
+        AND "decision" <> 'NOTIFIED'
+        AND "createdAt" < ${legacyObservationCutoff}
     `;
     const supersededStates = await tx.$executeRaw`
       DELETE FROM "source_search_states" AS old_state

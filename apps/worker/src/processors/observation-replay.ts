@@ -58,6 +58,7 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
         // (hydrate selects them via equals: DbNull), so the complement is DbNull.
         normalizedData: { not: Prisma.DbNull },
         listingId: null,
+        decision: { not: "NOTIFIED" },
         AND: [
           { OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }] },
           {
@@ -107,6 +108,7 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
           listing,
           discoveryLane: "BACKFILL",
           bypassHotClaim: true,
+          observationPersisted: true,
         });
         counts.evaluated += 1;
         if (result.outcome === "REJECTED") counts.rejected += 1;
@@ -131,6 +133,7 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
       where: {
         normalizedData: { not: Prisma.DbNull },
         listingId: null,
+        decision: { not: "NOTIFIED" },
         OR: [
           { filterRevision: null },
           { filterRevision: { not: filterRevision } },
@@ -198,6 +201,7 @@ async function hydrateIncompleteObservations(cutoff: Date): Promise<Array<{
   const rows = await prisma.sourceSeenListing.findMany({
     where: {
       normalizedData: { equals: Prisma.DbNull },
+      decision: { not: "NOTIFIED" },
       OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }],
       AND: [{ OR: [{ lastEvaluatedAt: null }, { lastEvaluatedAt: { lte: retryBefore } }] }],
     },

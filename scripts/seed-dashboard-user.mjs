@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, scrypt as scryptCallback } from "node:crypto";
 import { promisify } from "node:util";
-import { prisma } from "../packages/db/dist/index.js";
+import { closeDatabase, prisma } from "../packages/db/dist/index.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 loadEnv(path.join(projectRoot, ".env"));
@@ -41,7 +41,7 @@ try {
   });
   console.log(JSON.stringify({ ok: true, user }, null, 2));
 } finally {
-  await prisma.$disconnect();
+  await closeDatabase();
 }
 
 async function hashPassword(value) {

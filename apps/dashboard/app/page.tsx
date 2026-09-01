@@ -100,7 +100,7 @@ export default function DashboardPage() {
 
   const coverage = metrics?.coverageToday
   const detectMs = metrics?.publicationToDetectionMs.p95 ?? null
-  const telegramMs = metrics?.detectionToTelegramMs.p95 ?? null
+  const telegramMs = metrics?.durableJournalToTelegramAcceptanceMs.p95 ?? null
 
   return (
     <div className="space-y-6 py-2">
@@ -241,6 +241,11 @@ export default function DashboardPage() {
               tone={toneForLatency(metrics?.collectorDurationMs.p95 ?? null, 15 * 1000)}
             />
             <div className="grid grid-cols-3 gap-2 border-t border-line pt-3 text-center">
+              <MiniValue label="START → OLX" value={formatMs(metrics?.currentSession.startupToFirstOlxSuccessMs ?? null)} />
+              <MiniStat label="CATCH-UP" value={metrics?.currentSession.catchUp.observations ?? 0} />
+              <MiniStat label="STEADY" value={metrics?.currentSession.steadyState.observations ?? 0} />
+            </div>
+            <div className="grid grid-cols-3 gap-2 border-t border-line pt-3 text-center">
               <MiniStat label="Отправок" value={metrics?.sampleSize.telegramNotifications ?? 0} />
               <MiniStat label="Прогонов" value={metrics?.sampleSize.collectorRuns ?? 0} />
               <MiniStat label="Ждут TG" value={coverage?.telegramPending ?? 0} tone={coverage?.telegramPending ? "warning" : "default"} />
@@ -254,6 +259,7 @@ export default function DashboardPage() {
               segments={[
                 { label: "Сразу (LIVE)", value: coverage?.realtime ?? 0, color: "var(--c-accent)" },
                 { label: "Восстановлено", value: coverage?.recovered ?? 0, color: "var(--c-amber-soft)" },
+                { label: "Сверка", value: coverage?.coverage ?? 0, color: "var(--c-success)" },
                 { label: "Вручную", value: coverage?.manual ?? 0, color: "var(--c-faint)" },
               ]}
             />
@@ -366,8 +372,17 @@ function MiniStat({ label, value, tone = "default" }: { label: string; value: nu
   )
 }
 
+function MiniValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="num text-sm font-semibold text-foreground">{value}</div>
+      <div className="text-[10px] tracking-widest text-muted uppercase">{label}</div>
+    </div>
+  )
+}
+
 function LaneRow({ lane, max }: { lane: MetricsResponse["laneRunsToday"][number]; max: number }) {
-  const labels: Record<string, string> = { REALTIME: "Реалтайм", BACKFILL: "Глубокий", MANUAL: "Ручной" }
+  const labels: Record<string, string> = { REALTIME: "Реалтайм", BACKFILL: "Глубокий", COVERAGE: "Сверка", MANUAL: "Ручной" }
   return (
     <div className="flex items-center gap-3">
       <span className="w-20 shrink-0 text-xs text-muted">{labels[lane.lane] ?? lane.lane}</span>

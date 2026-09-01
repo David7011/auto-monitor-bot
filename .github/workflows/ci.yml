@@ -53,6 +53,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm db:migrate:deploy
+      - run: pnpm db:verify:olx-reset
 
   dashboard-e2e:
     runs-on: ubuntu-latest

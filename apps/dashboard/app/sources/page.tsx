@@ -4,7 +4,7 @@ import { useState } from "react"
 import useSWR from "swr"
 import { Power, RadioTower, ShieldAlert, Zap } from "lucide-react"
 import { clientApi as api, dashboardErrorMessage } from "@/lib/client-api"
-import type { BulkSourceActionResponse, ChallengeIncidentRow, CollectorRunRow, SourceKind, SourceRow } from "@/lib/types"
+import type { BulkSourceActionResponse, ChallengeIncidentRow, CollectorRunRow, SourceKind, SourceRow, SourcesStatusResponse } from "@/lib/types"
 import { HudPanel } from "@/components/hud/hud-panel"
 import { GlowButton } from "@/components/hud/glow-button"
 import { StatusBadge } from "@/components/hud/status-badge"
@@ -15,23 +15,16 @@ import { formatDateTime, sourceLabel } from "@/lib/format"
 
 const fetcher = <T,>(path: string) => api.get<T>(path)
 
-type SourcesStatus = {
-  sources: SourceRow[]
-  recentRuns: CollectorRunRow[]
-  challengeIncidents: ChallengeIncidentRow[]
-}
-
 export default function SourcesPage() {
   const [busyId, setBusyId] = useState<string | null>(null)
   const { toast } = useToast()
-  const { data, mutate } = useSWR<SourcesStatus>("/sources/status", fetcher, { refreshInterval: 4000 })
+  const { data, mutate } = useSWR<SourcesStatusResponse>("/sources/status", fetcher, { refreshInterval: 4000 })
   const sources = data?.sources ?? []
   const activeRealSources = sources.filter((s) => ["OLX", "RST", "CARS_UA", "AUTOMOTO", "AUTO_RIA"].includes(s.source) && s.enabled && ["ACTIVE", "LIMITED"].includes(s.status)).length
 
-  const foundBySource = new Map<SourceKind, number>()
-  for (const run of data?.recentRuns ?? []) {
-    foundBySource.set(run.source, (foundBySource.get(run.source) ?? 0) + run.foundCount)
-  }
+  const foundBySource = new Map<SourceKind, number>(
+    (data?.discoveredToday ?? []).map((row) => [row.source, row.count]),
+  )
 
   async function command(key: string, fn: () => Promise<{ tone?: "success" | "info" | "warning"; title: string; description?: string }>) {
     setBusyId(key)
@@ -68,7 +61,7 @@ export default function SourcesPage() {
   })
 
   const incidentColumns: Column<ChallengeIncidentRow>[] = [
-    { key: "time", header: "Время", render: (r) => <span className="num text-xs text-muted">{formatDateTime(r.detectedAt)}</span> },
+    { key: "time", header: "Последнее событие", render: (r) => <span className="num text-xs text-muted">{formatDateTime(r.status === "RESOLVED" ? r.detectedAt : r.updatedAt)}</span> },
     { key: "source", header: "Источник", render: (r) => <span className="font-medium text-fg-dim">{r.source?.name ?? r.sourceId}</span> },
     { key: "status", header: "Статус", render: (r) => <StatusBadge status={r.status} /> },
     { key: "detector", header: "Детектор", render: (r) => <span className="font-mono text-xs text-muted">{r.detector}</span> },

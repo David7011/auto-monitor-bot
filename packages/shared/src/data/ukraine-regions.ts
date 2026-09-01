@@ -378,7 +378,16 @@ export function normalizeGeoText(value: string): string {
   return value
     .toLowerCase()
     .replace(/['’`´]/gu, "")
-    .replace(/\b(область|обл|oblast|region)\b\.?/giu, "")
+    // Marketplaces sometimes append a legacy or alternate city name, for
+    // example `Дніпро (Дніпропетровськ)`.  The canonical leading name is the
+    // reliable lookup key; keeping the parenthetical text makes an otherwise
+    // exact city fail the geo filter.
+    .replace(/\([^)]*\)/gu, " ")
+    // JavaScript's `\b` boundary is ASCII-oriented and does not reliably
+    // recognize Ukrainian/Cyrillic words.  Use whitespace boundaries so that
+    // both `Дніпропетровська область` and `Дніпропетровська` normalize to the
+    // same token.
+    .replace(/(^|\s)(?:область|обл|oblast|region)(?:\.|,)?(?=\s|$)/giu, "$1")
     .replace(/\s+/gu, " ")
     .trim();
 }

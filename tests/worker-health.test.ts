@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { workerHealthStatus } from "../apps/api/src/lib/worker-health.js";
 
 describe("worker health aggregation", () => {
-  it("does not turn an external source outage into a worker liveness failure", () => {
+  it("warns without declaring the worker crashed when a remote source stops making progress", () => {
     expect(workerHealthStatus({
       monitoringRunning: true,
       heartbeatStale: false,
@@ -11,7 +11,7 @@ describe("worker health aggregation", () => {
     })).toBe("WARN");
   });
 
-  it("fails only when the worker heartbeat itself is stale", () => {
+  it("also fails when the worker heartbeat itself is stale", () => {
     expect(workerHealthStatus({
       monitoringRunning: true,
       heartbeatStale: true,

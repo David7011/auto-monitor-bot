@@ -1,4 +1,4 @@
-import { prisma } from "../packages/db/dist/index.js";
+import { closeDatabase, prisma } from "../packages/db/dist/index.js";
 
 const username = process.argv[2] ?? "";
 if (!/^e2e-[a-f0-9]{32}$/u.test(username)) {
@@ -10,5 +10,5 @@ try {
   const result = await prisma.dashboardUser.deleteMany({ where: { username } });
   console.log(JSON.stringify({ ok: true, deleted: result.count }));
 } finally {
-  await prisma.$disconnect();
+  await closeDatabase();
 }

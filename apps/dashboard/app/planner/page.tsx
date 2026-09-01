@@ -58,6 +58,8 @@ function olxChannelLabel(value: string) {
     OLX_PUBLIC_API: "Быстрый публичный API",
     OLX_REGIONAL_API: "Региональная API-сверка",
     OLX_PRIVATE_API: "Private API-сверка",
+    OLX_PUBLIC_HTML: "Быстрая публичная HTML-выдача",
+    OLX_REGIONAL_HTML: "Региональная HTML-выдача",
     OLX_HTML_COVERAGE: "HTML-сверка",
     OLX_HTML_FALLBACK: "Резервный HTML-канал",
     LEGACY_UNATTRIBUTED: "До включения измерений",
@@ -156,6 +158,36 @@ export default function PlannerPage() {
         <MetricCard label="Блокировки" value={data?.totals.blocked ?? 0} icon={<ShieldAlert />} hint="Контекст не сканирует корректно" />
       </section>
 
+      <HudPanel
+        kicker="P0 · OFFLINE WINDOW"
+        title="Доказательство восстановления до persisted boundary"
+        action={data?.offlineRecovery.status === "PENDING" ? <ShieldAlert className="size-4 text-danger" /> : <CheckCircle2 className="size-4 text-success" />}
+      >
+        {data?.offlineRecovery.latest ? (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <StatusLine
+              label="Статус"
+              ok={data.offlineRecovery.status === "VERIFIED"}
+              value={data.offlineRecovery.status === "PENDING" ? `не закрыто (${data.offlineRecovery.pendingCount})` : "подтверждено"}
+            />
+            <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
+              Persisted boundary<br /><span className="font-mono text-foreground">{formatDate(data.offlineRecovery.latest.persistedBoundaryAt)}</span>
+            </div>
+            <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
+              Обязательный cutoff<br /><span className="font-mono text-foreground">{formatDate(data.offlineRecovery.latest.requiredCutoffAt)}</span>
+            </div>
+            <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
+              Свидетельство<br /><span className="font-mono text-foreground">{data.offlineRecovery.latest.verificationMethod ?? "ожидается"}</span>
+              <br />run: <span className="font-mono text-foreground">{data.offlineRecovery.latest.verifiedRunId?.slice(0, 12) ?? "—"}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-sm text-muted">
+            Окна восстановления ещё не регистрировались. При первом запуске после длительного простоя здесь появится durable proof.
+          </div>
+        )}
+      </HudPanel>
+
       <section className="grid gap-4 xl:grid-cols-[1fr_1.6fr]">
         <HudPanel title="Лимиты AUTO.RIA" action={<Gauge className="size-4 text-accent-soft" />}>
           <div className="space-y-4">
@@ -181,6 +213,33 @@ export default function PlannerPage() {
               <span className="font-mono text-foreground">{data?.backfill.maxPages ?? 4}</span> страниц и{" "}
               <span className="font-mono text-foreground">{data?.backfill.maxCandidates ?? 300}</span> объявлений; параллельность{" "}
               <span className="font-mono text-foreground">{data?.backfill.concurrency ?? 1}</span>.
+            </div>
+            <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
+              OLX regional/HTML/private сверка: отдельная durable очередь каждые{" "}
+              <span className="font-mono text-foreground">{data?.coverage.intervalSeconds ?? 60} с</span>, максимум{" "}
+              <span className="font-mono text-foreground">{data?.coverage.maxDurationMs ?? 30000} мс</span>;
+              realtime её завершения не ждёт.
+            </div>
+            <div className={cn(
+              "rounded-lg border p-3 text-xs",
+              data?.olxCadenceCanary.mode === "ROLLED_BACK"
+                ? "border-warning/30 bg-warning/10 text-warning"
+                : "border-border bg-panel-alt/45 text-muted",
+            )}>
+              OLX cadence canary: <span className="font-mono text-foreground">{data?.olxCadenceCanary.mode ?? "BASELINE"}</span>. Чистые baseline-проходы:{" "}
+              <span className="font-mono text-foreground">{data?.olxCadenceCanary.qualificationRuns ?? 0}/{data?.olxCadenceCanary.qualificationRunsRequired ?? 100}</span>; режим{" "}
+              <span className="font-mono text-foreground">
+                {data?.olxCadenceCanary.baseIntervalSeconds ?? 20}±{data?.olxCadenceCanary.baseJitterSeconds ?? 4} → {data?.olxCadenceCanary.canaryIntervalSeconds ?? 15}±{data?.olxCadenceCanary.canaryJitterSeconds ?? 3} с
+              </span>. Baseline/current p95:{" "}
+              <span className="font-mono text-foreground">{data?.olxCadenceCanary.baselineP95Ms ?? "—"}/{data?.olxCadenceCanary.currentP95Ms ?? "—"} мс</span>.
+              {data?.olxCadenceCanary.rollbackReason ? ` Rollback: ${data.olxCadenceCanary.rollbackReason}.` : ""}
+            </div>
+            <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
+              Telegram flash bundle: <span className="text-foreground">{data?.telegramFlash.enabled ? "включён" : "выключен"}</span>, burst от{" "}
+              <span className="font-mono text-foreground">{data?.telegramFlash.minItems ?? 2}</span> до{" "}
+              <span className="font-mono text-foreground">{data?.telegramFlash.maxItems ?? 20}</span> ссылок сначала уходит одним сообщением;
+              подробные карточки следуют с глобальным интервалом{" "}
+              <span className="font-mono text-foreground">{data?.telegramFlash.sendIntervalMs ?? 1100} мс</span>.
             </div>
             {data?.autoRia.initialWindowBehavior === "NOTIFY_MATCHING_IN_WINDOW" ? (
               <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">

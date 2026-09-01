@@ -13,7 +13,7 @@ import type {
   TimestampConfidence,
 } from "@amb/shared";
 
-const NORMALIZER_VERSION = 2;
+const NORMALIZER_VERSION = 3;
 const WRITE_BATCH_SIZE = 12;
 
 export type ObservationEvaluationInput = {
@@ -28,11 +28,14 @@ export type ObservationEvaluationInput = {
 export function buildFilterSetRevision(
   filters: Array<Pick<Filter, "id" | "enabled" | "updatedAt">>,
 ): string {
-  const value = filters
+  const filtersValue = filters
     .map((filter) => `${filter.id}:${filter.enabled ? 1 : 0}:${filter.updatedAt.toISOString()}`)
     .sort()
     .join("|");
-  return createHash("sha256").update(value || "no-active-filters").digest("hex").slice(0, 32);
+  // A normalization/filtering bugfix must make recent rejected observations
+  // eligible for replay even when the user's filters did not change.
+  const value = `normalizer:${NORMALIZER_VERSION}|${filtersValue || "no-active-filters"}`;
+  return createHash("sha256").update(value).digest("hex").slice(0, 32);
 }
 
 export async function recordPendingObservations(
@@ -111,6 +114,7 @@ export async function releaseIncompleteObservationIds(lookbackHours: number): Pr
         SELECT seen.source, seen."externalId"
         FROM "source_seen_listings" AS seen
         WHERE seen."normalizedData" IS NULL
+          AND seen."decision" <> 'NOTIFIED'
           AND (seen."lastEvaluatedAt" IS NULL OR seen."lastEvaluatedAt" <= ${retryBefore})
           AND (
             seen."publishedAt" >= ${cutoff}
@@ -189,6 +193,9 @@ export function deserializeNormalizedListing(value: Prisma.JsonValue): Normalize
     freshnessFallback: stringValue(data.freshnessFallback) === "FIRST_SEEN" ? "FIRST_SEEN" : undefined,
     skipReason: stringValue(data.skipReason) as NormalizedListing["skipReason"],
     firstSeenAt: dateValue(data.firstSeenAt) ?? new Date(),
+    requestStartedAt: dateValue(data.requestStartedAt),
+    firstByteAt: dateValue(data.firstByteAt),
+    hotCandidateAt: dateValue(data.hotCandidateAt),
     observationChannel: stringValue(data.observationChannel) as NormalizedListing["observationChannel"],
     observationTarget: stringValue(data.observationTarget),
     raw: { replayedFromObservation: true },
@@ -225,6 +232,9 @@ function observationData(listing: NormalizedListing, lane: ListingDiscoveryLane)
     normalizedData: serializeNormalizedListing(listing),
     normalizerVersion: NORMALIZER_VERSION,
     firstSeenAt: new Date(listing.firstSeenAt),
+    requestStartedAt: listing.requestStartedAt ?? null,
+    firstByteAt: listing.firstByteAt ?? null,
+    hotCandidateAt: listing.hotCandidateAt ?? null,
     lastSeenAt: new Date(),
     discoveryLane: lane,
     firstObservedChannel: listing.observationChannel ?? null,

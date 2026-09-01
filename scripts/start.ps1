@@ -1,7 +1,8 @@
 param(
   [switch]$Dev,
   [switch]$SkipDatabase,
-  [switch]$SkipRedis
+  [switch]$SkipRedis,
+  [switch]$FromSupervisor
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,10 +17,35 @@ $RedisPort = 6380
 $NodeRuntimeDir = Join-Path $ProjectRoot ".runtime\node"
 $EnsureNodeRuntimeScript = Join-Path $PSScriptRoot "ensure-node-runtime.ps1"
 $ProcessManagementScript = Join-Path $PSScriptRoot "process-management.ps1"
+$RuntimeIntentScript = Join-Path $PSScriptRoot "runtime-intent.ps1"
 $StartLockPath = Join-Path $ProjectRoot ".runtime\start.lock"
+$StartupMetricsPath = Join-Path $ProjectRoot ".runtime\startup-metrics.json"
+$StartupStartedAt = [DateTime]::UtcNow
+$StartupPreviousCheckpoint = $StartupStartedAt
+$StartupPhases = [ordered]@{}
+
+function Add-StartupCheckpoint([string]$Name) {
+  $now = [DateTime]::UtcNow
+  $StartupPhases[$Name] = [Math]::Max(0, [Math]::Round(($now - $script:StartupPreviousCheckpoint).TotalMilliseconds))
+  $script:StartupPreviousCheckpoint = $now
+}
+
+function Write-StartupMetrics([string]$Status) {
+  $finishedAt = [DateTime]::UtcNow
+  $payload = [ordered]@{
+    status = $Status
+    startedAt = $StartupStartedAt.ToString("o")
+    finishedAt = $finishedAt.ToString("o")
+    totalMs = [Math]::Max(0, [Math]::Round(($finishedAt - $StartupStartedAt).TotalMilliseconds))
+    phasesMs = $StartupPhases
+  } | ConvertTo-Json -Depth 4
+  [IO.File]::WriteAllText($StartupMetricsPath, $payload, [Text.UTF8Encoding]::new($false))
+}
 
 New-Item -ItemType Directory -Force -Path $LogDir, $PidDir, $RedisDir, $NodeRuntimeDir | Out-Null
 . $ProcessManagementScript
+. $RuntimeIntentScript
+Set-AmbRunIntent
 
 try {
   $script:StartLock = [IO.File]::Open(
@@ -125,8 +151,18 @@ function Start-Postgres {
     Write-Warning "PostgreSQL data directory not found: $PgData"
     return
   }
+  $sharedBuffers = if ($env:POSTGRES_SHARED_BUFFERS) { $env:POSTGRES_SHARED_BUFFERS.Trim() } else { "32MB" }
+  if ($sharedBuffers -notmatch "^[1-9][0-9]*(kB|MB|GB)$") {
+    throw "POSTGRES_SHARED_BUFFERS must be a positive PostgreSQL memory value such as 32MB"
+  }
+  $maxConnections = 50
+  if ($env:POSTGRES_MAX_CONNECTIONS -and
+      (![int]::TryParse($env:POSTGRES_MAX_CONNECTIONS, [ref]$maxConnections) -or $maxConnections -lt 20 -or $maxConnections -gt 100)) {
+    throw "POSTGRES_MAX_CONNECTIONS must be an integer from 20 to 100"
+  }
   $log = Join-Path $LogDir "postgres.log"
-  Start-Process -FilePath $pgCtl -WindowStyle Hidden -ArgumentList @("start", "-D", $PgData, "-l", $log, "-o", "`"-p $PostgresPort -h 127.0.0.1`"")
+  $serverOptions = "-p $PostgresPort -h 127.0.0.1 -c shared_buffers=$sharedBuffers -c max_connections=$maxConnections"
+  Start-Process -FilePath $pgCtl -WindowStyle Hidden -ArgumentList @("start", "-D", $PgData, "-l", $log, "-o", "`"$serverOptions`"")
 }
 
 function Resolve-PostgresCtl {
@@ -136,6 +172,7 @@ function Resolve-PostgresCtl {
   }
 
   $candidates = @(
+    (Join-Path $ProjectRoot ".runtime\postgresql\bin\pg_ctl.exe"),
     "D:\PostgreSQL\bin\pg_ctl.exe",
     "C:\Program Files\PostgreSQL\16\bin\pg_ctl.exe",
     "C:\Program Files\PostgreSQL\15\bin\pg_ctl.exe",
@@ -248,6 +285,11 @@ port $RedisPort
 dir $redisData
 appendonly yes
 appendfsync everysec
+# PostgreSQL is the durable observation journal and AOF is Redis' restart
+# source. Periodic RDB forks caused measured 100-500ms BullMQ stalls on this
+# Windows laptop, so do not duplicate persistence on the latency-critical Redis.
+save ""
+latency-monitor-threshold 25
 maxmemory-policy noeviction
 logfile "$redisLog"
 "@ | Set-Content -LiteralPath $config -Encoding ascii
@@ -444,21 +486,71 @@ if (!$SkipRedis) { Start-Redis }
 
 Wait-Port $PostgresPort 20 "PostgreSQL"
 Wait-Port $RedisPort 20 "Redis"
+Add-StartupCheckpoint "infrastructure"
 Ensure-PrismaClientGenerated
 Invoke-Pnpm @("db:migrate:deploy")
+Add-StartupCheckpoint "database"
 
 if ($Dev) {
   Clear-DashboardBuildCache
   Start-App "API" (Get-PnpmCommand @("dev:api")) (Join-Path $LogDir "api.out.log") (Join-Path $LogDir "api.err.log")
-  Start-App "Worker" (Get-PnpmCommand @("worker")) (Join-Path $LogDir "worker.out.log") (Join-Path $LogDir "worker.err.log")
+  Start-App "worker-hot-a" (Get-PnpmCommand @("--filter", "@amb/worker", "dev:hot:a")) (Join-Path $LogDir "worker-hot-a.out.log") (Join-Path $LogDir "worker-hot-a.err.log")
+  Start-App "worker-hot-b" (Get-PnpmCommand @("--filter", "@amb/worker", "dev:hot:b")) (Join-Path $LogDir "worker-hot-b.out.log") (Join-Path $LogDir "worker-hot-b.err.log")
+  Start-App "worker-background" (Get-PnpmCommand @("--filter", "@amb/worker", "dev:background")) (Join-Path $LogDir "worker-background.out.log") (Join-Path $LogDir "worker-background.err.log")
   Start-App "Dashboard" (Get-PnpmCommand @("dev")) (Join-Path $LogDir "dashboard.out.log") (Join-Path $LogDir "dashboard.err.log")
 } else {
   Ensure-ProductionBuilds
+  Add-StartupCheckpoint "productionBuild"
   $env:NODE_ENV = "production"
   Start-NodeApp "API" (Join-Path $ProjectRoot "apps\api") @("--conditions=production", (Join-Path $ProjectRoot "apps\api\dist\server.js")) (Join-Path $LogDir "api.out.log") (Join-Path $LogDir "api.err.log")
-  Start-NodeApp "Worker" (Join-Path $ProjectRoot "apps\worker") @("--conditions=production", (Join-Path $ProjectRoot "apps\worker\dist\index.js")) (Join-Path $LogDir "worker.out.log") (Join-Path $LogDir "worker.err.log")
+  Start-NodeApp "worker-hot-a" (Join-Path $ProjectRoot "apps\worker") @("--conditions=production", (Join-Path $ProjectRoot "apps\worker\dist\index.js"), "--role=hot", "--instance=a") (Join-Path $LogDir "worker-hot-a.out.log") (Join-Path $LogDir "worker-hot-a.err.log")
+  Start-NodeApp "worker-hot-b" (Join-Path $ProjectRoot "apps\worker") @("--conditions=production", (Join-Path $ProjectRoot "apps\worker\dist\index.js"), "--role=hot", "--instance=b") (Join-Path $LogDir "worker-hot-b.out.log") (Join-Path $LogDir "worker-hot-b.err.log")
+  Start-NodeApp "worker-background" (Join-Path $ProjectRoot "apps\worker") @("--conditions=production", (Join-Path $ProjectRoot "apps\worker\dist\index.js"), "--role=background") (Join-Path $LogDir "worker-background.out.log") (Join-Path $LogDir "worker-background.err.log")
   Start-NodeApp "Dashboard" (Join-Path $ProjectRoot "apps\dashboard") @((Join-Path $ProjectRoot "apps\dashboard\node_modules\next\dist\bin\next"), "start", "-H", "127.0.0.1", "-p", "3001") (Join-Path $LogDir "dashboard.out.log") (Join-Path $LogDir "dashboard.err.log")
 }
 
 & (Join-Path $PSScriptRoot "wait-core-readiness.ps1") -TimeoutSeconds 90 -StableChecks 2
 if ($LASTEXITCODE -ne 0) { throw "Services started but core readiness verification failed" }
+Add-StartupCheckpoint "servicesReady"
+Write-StartupMetrics "READY"
+Write-Host "Startup ready in $([Math]::Round(([DateTime]::UtcNow - $StartupStartedAt).TotalSeconds, 1)) seconds"
+
+# A scheduled PowerShell process keeps the script version it loaded at task
+# start. Manual deployments therefore reload the long-lived supervisor after
+# all services are ready; recoveries initiated by that supervisor must not
+# restart their own parent task.
+if (!$FromSupervisor) {
+  $supervisorTask = Get-ScheduledTask -TaskName "Auto Monitor Bot" -ErrorAction SilentlyContinue
+  if ($supervisorTask) {
+    $previousSupervisorPid = 0
+    $supervisorHeartbeatPath = Join-Path $ProjectRoot ".runtime\supervisor-heartbeat.json"
+    try {
+      $previousHeartbeat = Get-Content -LiteralPath $supervisorHeartbeatPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      [void][int]::TryParse([string]$previousHeartbeat.pid, [ref]$previousSupervisorPid)
+    } catch {}
+    if ($supervisorTask.State -eq "Running") {
+      Stop-ScheduledTask -TaskName "Auto Monitor Bot" -ErrorAction Stop
+      $stopDeadline = (Get-Date).AddSeconds(15)
+      do {
+        Start-Sleep -Milliseconds 250
+        $supervisorTask = Get-ScheduledTask -TaskName "Auto Monitor Bot" -ErrorAction Stop
+      } while ($supervisorTask.State -eq "Running" -and (Get-Date) -lt $stopDeadline)
+    }
+    Start-ScheduledTask -TaskName "Auto Monitor Bot" -ErrorAction Stop
+    $reloadDeadline = (Get-Date).AddSeconds(20)
+    $reloaded = $false
+    do {
+      Start-Sleep -Milliseconds 250
+      try {
+        $heartbeat = Get-Content -LiteralPath $supervisorHeartbeatPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $heartbeatPid = 0
+        $reloaded = [int]::TryParse([string]$heartbeat.pid, [ref]$heartbeatPid) -and
+          $heartbeatPid -gt 0 -and $heartbeatPid -ne $previousSupervisorPid
+      } catch {
+        $reloaded = $false
+      }
+    } while (!$reloaded -and (Get-Date) -lt $reloadDeadline)
+    if (!$reloaded) { throw "Services are ready, but the scheduled supervisor did not reload" }
+    Write-Host "Scheduled supervisor reloaded with the deployed scripts."
+  }
+}

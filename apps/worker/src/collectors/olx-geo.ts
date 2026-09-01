@@ -132,7 +132,12 @@ async function fetchOlxCities(regionId: number): Promise<OlxGeoCity[]> {
 
   const response = await sourceHttpClient.json<OlxGeoCitiesResponse>(
     `https://www.olx.ua/api/v1/geo-encoder/regions/${regionId}/cities`,
-    { source: "OLX", timeoutMs: env.OLX_REQUEST_TIMEOUT_MS, headers: { referer: OLX_FEED_REFERER } },
+    {
+      source: "OLX",
+      timeoutMs: env.OLX_REQUEST_TIMEOUT_MS,
+      headers: { referer: OLX_FEED_REFERER },
+      requestClass: "REALTIME",
+    },
   );
   const cities = response.classification === "SUCCESS" ? response.data?.data ?? [] : [];
   if (cities.length > 0) {

@@ -1,4 +1,4 @@
-import { prisma, type Source } from "@amb/db";
+import { prisma, type ListingSource, type Source } from "@amb/db";
 import {
   DEFAULT_INTERVAL_SECONDS,
   DEFAULT_JITTER_SECONDS,
@@ -7,11 +7,42 @@ import {
   intervalWithJitterMs,
 } from "@amb/shared";
 import { env } from "../../env.js";
-import { logError, logInfo } from "../../lib/error-log.js";
+import { logError, logInfo, logWarn } from "../../lib/error-log.js";
 import { enqueue } from "../../lib/queues.js";
+import {
+  BACKFILL_EVIDENCE_TRIGGERS,
+  backfillDue,
+  backfillProfileFromMetrics,
+  decideAdaptiveBackfill,
+  targetedSources,
+  type AdaptiveBackfillDecision,
+  type AdaptiveBackfillEvidence,
+} from "./backfill-policy.js";
+import {
+  deferOlxBackfillAfterRealtime,
+  nextBackfillTickAfterAttempt,
+  startupBackfillDeadline,
+} from "./startup-backfill-policy.js";
+import {
+  prioritizeRealtimeSources,
+  realtimeCollectorPriority,
+  SCHEDULED_SOURCES,
+} from "./realtime-source-priority.js";
+import {
+  decideOlxRealtimeCadence,
+  type OlxRealtimeCadenceDecision,
+} from "./olx-realtime-cadence.js";
+import {
+  evaluateOlxCadenceCanary,
+} from "./olx-cadence-canary.js";
+import type { OlxCadenceCanaryDecision } from "./olx-cadence-canary-policy.js";
+import {
+  coverageJobId,
+  nextCoverageTickAfterAttempt,
+  startupCoverageDeadline,
+} from "./coverage-schedule.js";
 
 const STATE_ID = "singleton";
-const SCHEDULED_SOURCES = ["AUTO_RIA", "OLX", "RST", "CARS_UA", "AUTOMOTO", "MOCK"] as const;
 const BACKFILL_SOURCES = new Set(["OLX", "RST", "CARS_UA", "AUTOMOTO"]);
 
 export function defaultSourceDefinitions(
@@ -31,6 +62,9 @@ export class MonitoringOrchestrator {
   private timer: NodeJS.Timeout | null = null;
   private tickInProgress = false;
   private running = false;
+  private activeTargetSources = new Set<ListingSource>();
+  private backfillPolicyModes = new Map<string, string>();
+  private olxCadenceSignature: string | null = null;
 
   async ensureState() {
     return prisma.monitoringState.upsert({
@@ -97,7 +131,8 @@ export class MonitoringOrchestrator {
         generation: currentState.status === "RUNNING" ? currentState.generation : { increment: 1 },
         startedAt: now,
         stoppedAt: null,
-        nextBackfillTickAt: new Date(now.getTime() + env.BACKFILL_INITIAL_DELAY_SECONDS * 1000),
+        nextBackfillTickAt: startupBackfillDeadline(now, null, env.BACKFILL_INITIAL_DELAY_SECONDS),
+        nextCoverageTickAt: startupCoverageDeadline(now, null, env.OLX_COVERAGE_INITIAL_DELAY_SECONDS),
       },
     });
 
@@ -118,6 +153,7 @@ export class MonitoringOrchestrator {
         stoppedAt: currentState.status === "STOPPED" ? currentState.stoppedAt : new Date(),
         nextTickAt: null,
         nextBackfillTickAt: null,
+        nextCoverageTickAt: null,
       },
     });
     await logInfo("orchestrator", `Monitoring stopped, generation ${state.generation}`);
@@ -129,10 +165,30 @@ export class MonitoringOrchestrator {
     if (state.status !== "RUNNING" && state.status !== "STARTING") return;
     this.running = true;
     await this.ensureSources();
-    if (!state.nextBackfillTickAt) {
+    const resumedAt = new Date();
+    await prisma.source.updateMany({
+      where: { source: "OLX", enabled: true },
+      data: { nextCheckAt: resumedAt },
+    });
+    const nextBackfillTickAt = startupBackfillDeadline(
+      resumedAt,
+      state.nextBackfillTickAt,
+      env.BACKFILL_INITIAL_DELAY_SECONDS,
+    );
+    const nextCoverageTickAt = startupCoverageDeadline(
+      resumedAt,
+      state.nextCoverageTickAt,
+      env.OLX_COVERAGE_INITIAL_DELAY_SECONDS,
+    );
+    if (
+      !state.nextBackfillTickAt
+      || state.nextBackfillTickAt.getTime() !== nextBackfillTickAt.getTime()
+      || !state.nextCoverageTickAt
+      || state.nextCoverageTickAt.getTime() !== nextCoverageTickAt.getTime()
+    ) {
       await prisma.monitoringState.update({
         where: { id: STATE_ID },
-        data: { nextBackfillTickAt: new Date(Date.now() + env.BACKFILL_INITIAL_DELAY_SECONDS * 1000) },
+        data: { nextBackfillTickAt, nextCoverageTickAt },
       });
     }
     void this.tick();
@@ -151,16 +207,80 @@ export class MonitoringOrchestrator {
         return;
       }
 
-      const sources = await prisma.source.findMany({
-        where: { enabled: true, source: { in: [...SCHEDULED_SOURCES] } },
-      });
-      const autoRiaContextCount = sources.some((source) => source.source === "AUTO_RIA")
-        ? await estimateAutoRiaContextCount()
-        : 1;
+      const [enabledSources, activeFilters] = await Promise.all([
+        prisma.source.findMany({
+          where: { enabled: true, source: { in: [...SCHEDULED_SOURCES] } },
+        }),
+        prisma.filter.findMany({
+          where: { enabled: true },
+          select: { sources: true },
+        }),
+      ]);
+      const targets = targetedSources(activeFilters, SCHEDULED_SOURCES);
+      this.activeTargetSources = new Set(targets);
+      const sources = prioritizeRealtimeSources(
+        enabledSources.filter((source) => targets.has(source.source)),
+      );
+      let autoRiaContextCount: number | undefined;
 
+      const realtimeEnqueued = new Set<ListingSource>();
       for (const source of sources) {
-        if (!sourceDue(source, now)) continue;
-        const intervalSeconds = effectiveRealtimeIntervalSeconds(source, autoRiaContextCount);
+        let acceleratedCanary: OlxCadenceCanaryDecision | null = null;
+        let acceleratedIncident: {
+          status: string;
+          detectedAt: Date;
+          cooldownUntil: Date | null;
+          recoveredAt: Date | null;
+        } | null | undefined;
+        if (
+          source.source === "OLX"
+          && (state.olxCanaryMode === "CANARY" || state.olxCanaryMode === "PROMOTED")
+        ) {
+          acceleratedIncident = await this.latestOlxIncident(source.id);
+          acceleratedCanary = await evaluateOlxCadenceCanary({
+            baseIntervalSeconds: source.intervalSeconds,
+            baseJitterSeconds: source.jitterSeconds,
+            protectionActive: source.status === "RATE_LIMITED"
+              || source.status === "CAPTCHA_DETECTED"
+              || Boolean(acceleratedIncident && (acceleratedIncident.status !== "RESOLVED" || !acceleratedIncident.recoveredAt)),
+            now,
+          });
+          await this.reportOlxCanary(acceleratedCanary);
+        }
+        if (!sourceDue(source, now)) {
+          continue;
+        }
+        if (source.source === "AUTO_RIA" && autoRiaContextCount == null) {
+          autoRiaContextCount = await estimateAutoRiaContextCount();
+        }
+        let intervalSeconds = effectiveRealtimeIntervalSeconds(source, autoRiaContextCount ?? 1);
+        let jitterSeconds = source.jitterSeconds;
+        if (source.source === "OLX") {
+          const incident = acceleratedIncident === undefined
+            ? await this.latestOlxIncident(source.id)
+            : acceleratedIncident;
+          const canary = acceleratedCanary ?? await evaluateOlxCadenceCanary({
+            baseIntervalSeconds: intervalSeconds,
+            baseJitterSeconds: jitterSeconds,
+            protectionActive: source.status === "RATE_LIMITED"
+              || source.status === "CAPTCHA_DETECTED"
+              || Boolean(incident && (incident.status !== "RESOLVED" || !incident.recoveredAt)),
+            now,
+          });
+          intervalSeconds = canary.intervalSeconds;
+          jitterSeconds = canary.jitterSeconds;
+          await this.reportOlxCanary(canary);
+          const cadence = decideOlxRealtimeCadence({
+            configuredIntervalSeconds: intervalSeconds,
+            configuredJitterSeconds: jitterSeconds,
+            recoveryRampSeconds: env.OLX_REALTIME_RECOVERY_RAMP_SECONDS,
+            incident,
+            now,
+          });
+          intervalSeconds = cadence.intervalSeconds;
+          jitterSeconds = cadence.jitterSeconds;
+          await this.reportOlxCadence(cadence);
+        }
         const dueTimestamp = source.nextCheckAt?.getTime() ?? now.getTime();
         await enqueue(
           QUEUE_NAMES.COLLECTOR_RUN,
@@ -173,20 +293,57 @@ export class MonitoringOrchestrator {
             monitoringGeneration: state.generation,
             scheduledAt: now.toISOString(),
           },
-          { jobId: `collector-${source.source}-${state.generation}-${dueTimestamp}` },
+          {
+            jobId: `collector-${source.source}-${state.generation}-${dueTimestamp}`,
+            priority: realtimeCollectorPriority(source.source),
+          },
         );
+        realtimeEnqueued.add(source.source);
         await prisma.source.update({
           where: { id: source.id },
-          data: { nextCheckAt: new Date(now.getTime() + intervalWithJitterMs(intervalSeconds, source.jitterSeconds)) },
+          data: { nextCheckAt: new Date(now.getTime() + intervalWithJitterMs(intervalSeconds, jitterSeconds)) },
         });
       }
 
       let nextBackfillTickAt = state.nextBackfillTickAt;
+      let backfillCycleCompleted = false;
       if (!nextBackfillTickAt) {
-        nextBackfillTickAt = new Date(now.getTime() + env.BACKFILL_INITIAL_DELAY_SECONDS * 1000);
+        nextBackfillTickAt = startupBackfillDeadline(now, null, env.BACKFILL_INITIAL_DELAY_SECONDS);
       } else if (nextBackfillTickAt <= now) {
-        await this.enqueueBackfill(sources, state.generation, now);
-        nextBackfillTickAt = new Date(now.getTime() + env.BACKFILL_INTERVAL_SECONDS * 1000);
+        const backfill = await this.enqueueBackfill(sources, state.generation, now, realtimeEnqueued);
+        backfillCycleCompleted = !backfill.deferred;
+        nextBackfillTickAt = nextBackfillTickAfterAttempt(
+          now,
+          env.BACKFILL_INTERVAL_SECONDS,
+          backfill.deferred,
+        );
+      }
+
+      let nextCoverageTickAt = state.nextCoverageTickAt;
+      let coverageCycleEnqueued = false;
+      if (!nextCoverageTickAt) {
+        nextCoverageTickAt = startupCoverageDeadline(now, null, env.OLX_COVERAGE_INITIAL_DELAY_SECONDS);
+      } else if (nextCoverageTickAt <= now) {
+        const olx = sources.find((source) => source.source === "OLX");
+        if (olx && (!olx.pausedUntil || olx.pausedUntil <= now)) {
+          await enqueue(
+            QUEUE_NAMES.COLLECTOR_COVERAGE,
+            "collect",
+            {
+              sourceId: olx.id,
+              source: "OLX",
+              trigger: "COVERAGE",
+              lane: "COVERAGE",
+              monitoringGeneration: state.generation,
+              scheduledAt: now.toISOString(),
+            },
+            {
+              jobId: coverageJobId(state.generation, nextCoverageTickAt),
+            },
+          );
+          coverageCycleEnqueued = true;
+        }
+        nextCoverageTickAt = nextCoverageTickAfterAttempt(now, env.OLX_COVERAGE_INTERVAL_SECONDS);
       }
 
       await prisma.monitoringState.update({
@@ -194,7 +351,11 @@ export class MonitoringOrchestrator {
         data: {
           lastTickAt: now,
           nextBackfillTickAt,
-          ...(state.nextBackfillTickAt && state.nextBackfillTickAt <= now ? { lastBackfillTickAt: now } : {}),
+          nextCoverageTickAt,
+          ...(state.nextBackfillTickAt && state.nextBackfillTickAt <= now && backfillCycleCompleted
+            ? { lastBackfillTickAt: now }
+            : {}),
+          ...(coverageCycleEnqueued ? { lastCoverageTickAt: now } : {}),
         },
       });
     } catch (error) {
@@ -205,10 +366,39 @@ export class MonitoringOrchestrator {
     }
   }
 
-  private async enqueueBackfill(sources: Source[], generation: number, now: Date): Promise<void> {
+  private async enqueueBackfill(
+    sources: Source[],
+    generation: number,
+    now: Date,
+    realtimeEnqueued: ReadonlySet<ListingSource>,
+  ): Promise<{ deferred: boolean }> {
+    if (
+      sources.some((source) => source.source === "OLX")
+      && deferOlxBackfillAfterRealtime("OLX", realtimeEnqueued)
+    ) {
+      return { deferred: true };
+    }
     for (const source of sources) {
       if (!BACKFILL_SOURCES.has(source.source)) continue;
       if (source.pausedUntil && source.pausedUntil > now) continue;
+      const evidence = source.source === "OLX" ? await loadOlxBackfillEvidence(now) : undefined;
+      const decision = evidence
+        ? decideAdaptiveBackfill(evidence, env.BACKFILL_INTERVAL_SECONDS, now)
+        : defaultBackfillDecision();
+      const scheduledDecision = source.source === "OLX"
+        ? {
+            ...decision,
+            intervalSeconds: Math.max(
+              decision.intervalSeconds,
+              env.OLX_BACKFILL_MIN_INTERVAL_SECONDS,
+            ),
+          }
+        : decision;
+      await this.reportBackfillPolicy(source.source, scheduledDecision);
+
+      const lastBackfillAt = evidence?.runs[0]?.startedAt;
+      if (source.source === "OLX" && !backfillDue(lastBackfillAt, scheduledDecision, now)) continue;
+
       await enqueue(
         QUEUE_NAMES.COLLECTOR_BACKFILL,
         "collect",
@@ -219,10 +409,72 @@ export class MonitoringOrchestrator {
           lane: "BACKFILL",
           monitoringGeneration: generation,
           scheduledAt: now.toISOString(),
+          backfillProfile: scheduledDecision.profile,
+          backfillReason: scheduledDecision.reason,
         },
         { jobId: `collector-backfill-${source.source}-${generation}-${now.getTime()}` },
       );
     }
+    return { deferred: false };
+  }
+
+  private async reportBackfillPolicy(source: string, decision: AdaptiveBackfillDecision): Promise<void> {
+    if (source !== "OLX") return;
+    const signature = `${decision.mode}:${decision.profile}:${decision.intervalSeconds}`;
+    if (this.backfillPolicyModes.get(source) === signature) return;
+    this.backfillPolicyModes.set(source, signature);
+    await logInfo(
+      "orchestrator",
+      `${source} adaptive backfill mode changed to ${decision.mode}`,
+      `profile=${decision.profile}; interval=${decision.intervalSeconds}s; reason=${decision.reason}`,
+    );
+  }
+
+  private async reportOlxCadence(decision: OlxRealtimeCadenceDecision): Promise<void> {
+    const signature = `${decision.mode}:${decision.intervalSeconds}:${decision.jitterSeconds}`;
+    if (this.olxCadenceSignature === signature) return;
+    this.olxCadenceSignature = signature;
+    await logInfo(
+      "orchestrator",
+      `OLX realtime cadence changed to ${decision.mode}`,
+      `interval=${decision.intervalSeconds}s; jitter=${decision.jitterSeconds}s; reason=${decision.reason}`,
+    );
+  }
+
+  private async reportOlxCanary(decision: OlxCadenceCanaryDecision): Promise<void> {
+    if (decision.transition === "NONE") return;
+    const details = [
+      `mode=${decision.mode}`,
+      `interval=${decision.intervalSeconds}s`,
+      `jitter=${decision.jitterSeconds}s`,
+      `clean=${decision.cleanRunCount}`,
+      `canary=${decision.canaryRunCount}`,
+      `baselineP95=${decision.baselineP95Ms ?? "n/a"}ms`,
+      `currentP95=${decision.currentP95Ms ?? "n/a"}ms`,
+      `reason=${decision.reason}`,
+    ].join("; ");
+    if (decision.transition === "ROLLBACK") {
+      await logWarn("olx-cadence-canary", "OLX cadence canary rolled back immediately", details);
+      return;
+    }
+    await logInfo(
+      "olx-cadence-canary",
+      `OLX cadence canary transition: ${decision.transition}`,
+      details,
+    );
+  }
+
+  private latestOlxIncident(sourceId: string) {
+    return prisma.challengeIncident.findFirst({
+      where: { sourceId },
+      orderBy: [{ detectedAt: "desc" as const }, { updatedAt: "desc" as const }],
+      select: {
+        status: true,
+        detectedAt: true,
+        cooldownUntil: true,
+        recoveredAt: true,
+      },
+    });
   }
 
   private async scheduleNext(): Promise<void> {
@@ -234,18 +486,18 @@ export class MonitoringOrchestrator {
     try {
       const [state, nextSource] = await Promise.all([
         prisma.monitoringState.findUnique({ where: { id: STATE_ID } }),
-        prisma.source.findFirst({
+        this.activeTargetSources.size > 0 ? prisma.source.findFirst({
           where: {
             enabled: true,
             status: { not: "DISABLED" },
-            source: { in: [...SCHEDULED_SOURCES] },
+            source: { in: [...this.activeTargetSources] },
             OR: [{ pausedUntil: null }, { pausedUntil: { lte: new Date(now) } }],
           },
           orderBy: { nextCheckAt: "asc" },
           select: { nextCheckAt: true },
-        }),
+        }) : Promise.resolve(null),
       ]);
-      const deadlines = [nextSource?.nextCheckAt, state?.nextBackfillTickAt]
+      const deadlines = [nextSource?.nextCheckAt, state?.nextBackfillTickAt, state?.nextCoverageTickAt]
         .filter((value): value is Date => Boolean(value))
         .map((value) => value.getTime());
       if (deadlines.length > 0) delayMs = Math.min(delayMs, Math.max(0, Math.min(...deadlines) - now));
@@ -305,6 +557,99 @@ async function estimateAutoRiaContextCount(): Promise<number> {
   if (filters.length === 0) return 1;
   const fingerprints = new Set(filters.map((filter) => JSON.stringify(filter, Object.keys(filter).sort())));
   return Math.max(1, fingerprints.size);
+}
+
+async function loadOlxBackfillEvidence(now: Date): Promise<AdaptiveBackfillEvidence> {
+  const evidenceCutoff = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+  const anomalyCutoff = new Date(now.getTime() - 30 * 60 * 1000);
+  const observationCutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const [runs, recoveredObservations, unresolvedObservationCount, realtimeAnomaly, adverseAudit] = await Promise.all([
+    prisma.collectorRun.findMany({
+      where: {
+        source: "OLX",
+        lane: "BACKFILL",
+        trigger: { in: [...BACKFILL_EVIDENCE_TRIGGERS] },
+        startedAt: { gte: evidenceCutoff },
+      },
+      orderBy: { startedAt: "desc" },
+      take: 50,
+      select: {
+        startedAt: true,
+        finishedAt: true,
+        status: true,
+        recoveredCount: true,
+        errorMessage: true,
+        coverageMetrics: true,
+      },
+    }),
+    prisma.sourceSeenListing.findMany({
+      where: {
+        source: "OLX",
+        discoveryLane: "BACKFILL",
+        decision: "NOTIFIED",
+        firstSeenAt: { gte: evidenceCutoff },
+      },
+      select: { firstSeenAt: true },
+    }),
+    prisma.sourceSeenListing.count({
+      where: {
+        source: "OLX",
+        listingId: null,
+        decision: { in: ["PENDING", "MATCHED", "FAILED"] },
+        firstSeenAt: { gte: observationCutoff },
+      },
+    }),
+    prisma.collectorRun.findFirst({
+      where: {
+        source: "OLX",
+        lane: "REALTIME",
+        startedAt: { gte: anomalyCutoff },
+        status: { in: ["FAILED", "RATE_LIMITED", "CAPTCHA_DETECTED"] },
+      },
+      orderBy: { startedAt: "desc" },
+      select: { startedAt: true },
+    }),
+    prisma.completenessAudit.findFirst({
+      where: {
+        startedAt: { gte: evidenceCutoff },
+        finishedAt: { not: null },
+        OR: [
+          { failedCount: { gt: 0 } },
+          { pendingCount: { gt: 0 } },
+        ],
+      },
+      orderBy: { startedAt: "desc" },
+      select: { startedAt: true },
+    }),
+  ]);
+
+  return {
+    runs: runs.map((run) => ({
+      startedAt: run.startedAt,
+      status: run.status,
+      recoveredCount: Math.max(
+        run.recoveredCount,
+        recoveredObservations.filter((observation) =>
+          observation.firstSeenAt >= run.startedAt
+          && Boolean(run.finishedAt && observation.firstSeenAt <= run.finishedAt)
+        ).length,
+      ),
+      errorMessage: run.errorMessage,
+      profile: backfillProfileFromMetrics(run.coverageMetrics),
+    })),
+    unresolvedObservationCount,
+    realtimeAnomalyAt: realtimeAnomaly?.startedAt,
+    adverseAuditAt: adverseAudit?.startedAt,
+  };
+}
+
+function defaultBackfillDecision(): AdaptiveBackfillDecision {
+  return {
+    mode: "EVIDENCE",
+    profile: "FULL",
+    intervalSeconds: env.BACKFILL_INTERVAL_SECONDS,
+    reason: "fixed safety backfill for this source",
+  };
 }
 
 export const orchestrator = new MonitoringOrchestrator();

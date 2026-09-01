@@ -1,41 +1,71 @@
-import { Prisma, prisma, type Filter, type ListingSource } from "@amb/db";
+import {
+  acquireTelegramRetentionLock,
+  prisma,
+} from "@amb/db";
 import {
   getCityById,
   getRegionById,
-  UKRAINE_REGIONS,
-  normalizeCityIds,
-  normalizeRegionIds,
-  normalizeVehicleText,
-  FILTER_REJECTION_LABELS,
   QUEUE_NAMES,
-  type FilterRejectionReason,
+  TELEGRAM_FAVORITE_CALLBACK_PREFIX,
+  telegramListingKeyboard,
+  telegramRetentionClaimIsActive,
 } from "@amb/shared";
-import { logError, logInfo } from "../lib/error-log.js";
+import { logError, logInfo, logWarn } from "../lib/error-log.js";
+import { telegramPollingFailurePolicy } from "../lib/telegram-polling-policy.js";
 import { env } from "../env.js";
 import { checkActiveSourcesNow, disableBulkRealSources, enableBulkRealSources } from "./sources/control.js";
 import {
-  getMonitoringStatus,
   startLiveMonitoring,
   startMonitoring,
   startStandardMonitoring,
   stopMonitoring,
 } from "./monitoring/control.js";
-import { getMarks, getModels, type TaxonomyOption } from "./vehicle-taxonomy.js";
 import { enqueue } from "../lib/queues.js";
-import { extractGeo, parseQuickFilter } from "./telegram-filter-parser.js";
 import {
   errorMessage,
-  escapeRegex,
-  formatGeo,
   formatList,
-  formatRange,
-  freshnessLabel,
-  monitoringModeLabel,
-  monitoringStatusLabel,
   shorten,
   sourceLabel,
   translateApiError,
 } from "./telegram-control-format.js";
+import {
+  addAutoRiaToCompatibleFilters,
+  cancelKeyboard,
+  clearPendingAction,
+  createFilterFromTelegram,
+  deleteFilterById,
+  filterDetailsKeyboard,
+  filtersKeyboard,
+  formatFilterDetails,
+  formatFiltersPanel,
+  geoCitiesKeyboard,
+  geoPrompt,
+  geoRegionsKeyboard,
+  getPendingAction,
+  newFilterPrompt,
+  runFilterTextCommand,
+  runPendingAction,
+  setFilterAllSources,
+  setFilterGeoByIds,
+  setPendingAction,
+  toggleFilterById,
+  type ReplyMarkup,
+} from "./telegram-control-filters.js";
+import {
+  abortActiveTelegramRequests,
+  answerTelegramCallback as answerCallback,
+  editTelegramMessage as editMessage,
+  editTelegramReplyMarkup as editMessageReplyMarkup,
+  isAllowedTelegramChat as isAllowedChat,
+  sendTelegramMessage as sendMessage,
+  telegramApi,
+} from "./telegram-control-client.js";
+import {
+  formatCompletenessText,
+  formatPanelText,
+} from "./telegram-control-status.js";
+
+export { geoCitiesKeyboard, geoRegionsKeyboard } from "./telegram-control-filters.js";
 
 type ControlCommand = "panel" | "status" | "live" | "start" | "standard" | "stop" | "scan" | "sources_on" | "sources_off";
 
@@ -59,25 +89,11 @@ type TelegramCallbackQuery = {
   message?: TelegramMessage;
 };
 
-type TelegramApiResponse<T> =
-  | { ok: true; result: T }
-  | { ok: false; error_code?: number; description?: string };
-
-type ReplyMarkup = {
-  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
-};
-
-type PendingAction =
-  | { type: "create_filter"; expiresAt: number }
-  | { type: "set_geo"; filterId: string; expiresAt: number };
-
 const CONTROL_PREFIX = "amb:";
 const POLLING_TIMEOUT_SECONDS = 25;
 const RETRY_BASE_DELAY_MS = 3000;
 const RETRY_MAX_DELAY_MS = 60_000;
-const FILTER_LIST_LIMIT = 8;
 const PENDING_ACTION_TTL_MS = 5 * 60 * 1000;
-const REAL_FILTER_SOURCES: ListingSource[] = ["OLX", "RST", "CARS_UA", "AUTOMOTO", "AUTO_RIA"];
 
 const PANEL_KEYBOARD: ReplyMarkup = {
   inline_keyboard: [
@@ -108,8 +124,6 @@ const PANEL_KEYBOARD: ReplyMarkup = {
 
 let stopRequested = false;
 let pollingPromise: Promise<void> | null = null;
-let currentAbortController: AbortController | null = null;
-const pendingActions = new Map<string, PendingAction>();
 
 export function startTelegramControlBot(): void {
   if (!env.TELEGRAM_CONTROL_BOT_ENABLED) return;
@@ -130,8 +144,7 @@ export function startTelegramControlBot(): void {
 
 export function stopTelegramControlBot(): void {
   stopRequested = true;
-  currentAbortController?.abort();
-  currentAbortController = null;
+  abortActiveTelegramRequests();
 }
 
 async function pollingLoop(): Promise<void> {
@@ -156,7 +169,7 @@ async function pollingLoop(): Promise<void> {
           timeout: POLLING_TIMEOUT_SECONDS,
           allowed_updates: ["message", "callback_query"],
         },
-        (POLLING_TIMEOUT_SECONDS + 5) * 1000,
+        (POLLING_TIMEOUT_SECONDS + 15) * 1000,
       );
 
       if (consecutiveFailures > 0) {
@@ -171,17 +184,28 @@ async function pollingLoop(): Promise<void> {
     } catch (err) {
       if (stopRequested) break;
       consecutiveFailures += 1;
+      const policy = telegramPollingFailurePolicy(
+        err,
+        consecutiveFailures,
+        RETRY_BASE_DELAY_MS,
+        RETRY_MAX_DELAY_MS,
+      );
       const now = Date.now();
       if (consecutiveFailures === 1 || now - lastFailureLogAt >= 5 * 60 * 1000) {
-        await logError(
-          "telegram-control",
-          `Telegram control polling failed (${consecutiveFailures} consecutive failure(s))`,
-          errorMessage(err),
-        );
+        const message = policy.timedOut
+          ? `Telegram control polling timed out (${consecutiveFailures} consecutive timeout(s))`
+          : `Telegram control polling failed (${consecutiveFailures} consecutive failure(s))`;
+        if (policy.severity === "WARN") {
+          await logWarn("telegram-control", message, errorMessage(err));
+        } else {
+          await logError("telegram-control", message, errorMessage(err));
+        }
         lastFailureLogAt = now;
       }
-      const exponential = Math.min(RETRY_MAX_DELAY_MS, RETRY_BASE_DELAY_MS * 2 ** Math.min(5, consecutiveFailures - 1));
-      await sleep(exponential + Math.floor(Math.random() * Math.max(1, Math.round(exponential * 0.25))));
+      await sleep(
+        policy.retryDelayMs +
+          Math.floor(Math.random() * Math.max(1, Math.round(policy.retryDelayMs * 0.25))),
+      );
     }
   }
 
@@ -263,6 +287,11 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
 
   const data = callback.data ?? "";
   const messageId = callback.message?.message_id;
+
+  if (data.startsWith(TELEGRAM_FAVORITE_CALLBACK_PREFIX)) {
+    await handleListingFavoriteCallback(callback.id, chatId, messageId, data);
+    return;
+  }
 
   if (data === `${CONTROL_PREFIX}filters`) {
     await answerCallback(callback.id, "Открываю фильтры");
@@ -440,7 +469,7 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
 
   if (data.startsWith(`${CONTROL_PREFIX}filter_geo_all:`)) {
     const id = data.slice(`${CONTROL_PREFIX}filter_geo_all:`.length);
-    const text = await setFilterGeo(id, "вся Украина");
+    const text = await setFilterGeoByIds(id, [], []);
     await answerCallback(callback.id, "Гео сброшено");
     await respondToCallback(chatId, messageId, `${text}\n\n${await formatFiltersPanel()}`, await filtersKeyboard());
     return;
@@ -463,6 +492,97 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
   await answerCallback(callback.id, "Выполняю");
   const responseText = command === "panel" ? await formatPanelText() : await runControlCommand(command);
   await respondToCallback(chatId, messageId, responseText, PANEL_KEYBOARD);
+}
+
+async function handleListingFavoriteCallback(
+  callbackId: string,
+  chatId: number | string,
+  messageId: number | undefined,
+  data: string,
+): Promise<void> {
+  const listingId = data.slice(TELEGRAM_FAVORITE_CALLBACK_PREFIX.length);
+  if (!messageId || !/^[a-zA-Z0-9_-]{1,48}$/u.test(listingId)) {
+    await answerCallback(callbackId, "Карточка устарела");
+    return;
+  }
+
+  const toggle = await prisma.$transaction(async (tx) => {
+    await acquireTelegramRetentionLock(tx, listingId);
+    const notification = await tx.telegramNotification.findUnique({
+      where: { listingId },
+      include: { listing: { select: { url: true } } },
+    });
+    if (
+      !notification
+      || notification.messageId !== String(messageId)
+      || notification.chatId !== String(chatId)
+    ) {
+      return null;
+    }
+
+    const now = new Date();
+    if (telegramRetentionClaimIsActive(notification.cleanupAttemptedAt, now)) {
+      return { kind: "cleanup-in-progress" as const };
+    }
+    const currentlyFavorite = Boolean(
+      notification.favoritedAt && notification.retainUntil && notification.retainUntil > now,
+    );
+    const favoriting = !currentlyFavorite;
+    const retainUntil = favoriting
+      ? new Date(now.getTime() + env.LISTING_FAVORITE_RETENTION_DAYS * 24 * 60 * 60 * 1000)
+      : null;
+    const sentAt = notification.sentAt ?? now;
+    const deleteAfter = favoriting
+      ? null
+      : new Date(sentAt.getTime() + env.LISTING_RETENTION_HOURS * 60 * 60 * 1000);
+
+    const updated = await tx.telegramNotification.update({
+      where: { id: notification.id },
+      data: {
+        favoritedAt: favoriting ? now : null,
+        retainUntil,
+        deleteAfter,
+        retentionPolicyAppliedAt: notification.retentionPolicyAppliedAt ?? now,
+        cleanupAttemptedAt: null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+      },
+      select: { retainUntil: true },
+    });
+    return { kind: "updated" as const, notification, updated, favoriting };
+  }, { maxWait: 5_000, timeout: 30_000 });
+
+  if (!toggle) {
+    await answerCallback(callbackId, "Карточка уже удалена");
+    return;
+  }
+  if (toggle.kind === "cleanup-in-progress") {
+    await answerCallback(callbackId, "Срок карточки уже истёк, выполняется очистка");
+    return;
+  }
+
+  await answerCallback(
+    callbackId,
+    toggle.favoriting
+      ? `Сохранено на ${env.LISTING_FAVORITE_RETENTION_DAYS} дней`
+      : "Снято с сохранения",
+  );
+  await editMessageReplyMarkup(
+    chatId,
+    messageId,
+    telegramListingKeyboard(
+      toggle.notification.listing.url,
+      listingId,
+      toggle.updated.retainUntil,
+      env.LISTING_FAVORITE_RETENTION_DAYS,
+    ),
+  ).catch((error) =>
+    logError(
+      "telegram-favorite",
+      "Не удалось обновить кнопку сохранения",
+      error instanceof Error ? error.message : String(error),
+    ),
+  );
 }
 
 async function respondToCallback(chatId: number | string, messageId: number | undefined, text: string, replyMarkup: ReplyMarkup): Promise<void> {
@@ -506,606 +626,6 @@ async function runControlCommand(command: ControlCommand): Promise<string> {
   }
 }
 
-async function formatPanelText(): Promise<string> {
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const [status, observationCounts] = await Promise.all([
-    getMonitoringStatus(),
-    prisma.sourceSeenListing.groupBy({
-      by: ["decision"],
-      where: {
-        normalizedData: { not: Prisma.JsonNull },
-        OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }],
-      },
-      _count: { _all: true },
-    }),
-  ]);
-  const queueTotals = Object.values(status.queues).reduce(
-    (acc, counts) => ({
-      waiting: acc.waiting + counts.waiting,
-      active: acc.active + counts.active,
-      failed: acc.failed + counts.failed,
-    }),
-    { waiting: 0, active: 0, failed: 0 },
-  );
-  const sourceLine = status.sources
-    .filter((source) => ["AUTO_RIA", "OLX", "RST", "CARS_UA", "AUTOMOTO"].includes(source.source) && source.enabled)
-    .map((source) => sourceLabel(source.source))
-    .join(", ");
-  const observed24h = observationCounts.reduce((sum, row) => sum + row._count._all, 0);
-  const notified24h = observationCounts.find((row) => row.decision === "NOTIFIED")?._count._all ?? 0;
-  const unresolved24h = observationCounts
-    .filter((row) => ["PENDING", "MATCHED", "FAILED"].includes(row.decision))
-    .reduce((sum, row) => sum + row._count._all, 0);
-  return trimTelegramMessage(
-    [
-      "Автомонитор",
-      `Статус: ${monitoringStatusLabel(status.state.status)}`,
-      `Режим: ${monitoringModeLabel(status.mode)}`,
-      `Сегодня: ${status.foundToday}`,
-      `Фильтры: ${status.filters.activeReal}/${status.filters.total}`,
-      `Очередь: ${queueTotals.waiting} ждут, ${queueTotals.active} в работе, ${queueTotals.failed} ошибок`,
-      `Контроль 24 ч: ${observed24h} увидено, ${notified24h} отправлено, ${unresolved24h} требуют проверки`,
-      `Источники: ${sourceLine || "не включены"}`,
-    ].join("\n"),
-  );
-}
-
-async function formatCompletenessText(): Promise<string> {
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const where = {
-    normalizedData: { not: Prisma.JsonNull },
-    OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }],
-  } satisfies Prisma.SourceSeenListingWhereInput;
-  const [byDecision, bySource, latestAudit, rejected, legacyWithoutSnapshot] = await Promise.all([
-    prisma.sourceSeenListing.groupBy({ by: ["decision"], where, _count: { _all: true } }),
-    prisma.sourceSeenListing.groupBy({ by: ["source"], where, _count: { _all: true } }),
-    prisma.completenessAudit.findFirst({ orderBy: { startedAt: "desc" } }),
-    prisma.sourceSeenListing.findMany({
-      where: { ...where, decision: "REJECTED" },
-      select: { rejectionReasons: true },
-      take: 2_000,
-    }),
-    prisma.sourceSeenListing.count({
-      where: {
-        normalizedData: { equals: Prisma.DbNull },
-        OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }],
-      },
-    }),
-  ]);
-  const decisionCount = (decision: string) => byDecision.find((row) => row.decision === decision)?._count._all ?? 0;
-  const observed = byDecision.reduce((sum, row) => sum + row._count._all, 0);
-  const rejectionCounts = new Map<string, number>();
-  for (const row of rejected) {
-    for (const reason of row.rejectionReasons) rejectionCounts.set(reason, (rejectionCounts.get(reason) ?? 0) + 1);
-  }
-  const topReasons = [...rejectionCounts.entries()]
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 3)
-    .map(([reason, count]) => `${FILTER_REJECTION_LABELS[reason as FilterRejectionReason] ?? reason}: ${count}`);
-
-  return trimTelegramMessage([
-    "Полнота мониторинга за 24 часа",
-    `Увидено: ${observed}`,
-    `Отправлено: ${decisionCount("NOTIFIED")}`,
-    `Отсеяно фильтрами: ${decisionCount("REJECTED")}`,
-    `Ожидают решения: ${decisionCount("PENDING") + decisionCount("MATCHED") + decisionCount("FAILED")}`,
-    `Исторические ID без снимка: ${legacyWithoutSnapshot}`,
-    `По источникам: ${bySource.map((row) => `${sourceLabel(row.source)} ${row._count._all}`).join(", ") || "нет данных"}`,
-    latestAudit
-      ? `Последняя сверка: обработано ${latestAudit.evaluatedCount}, восстановлено ${latestAudit.dispatchedCount}, ошибок ${latestAudit.failedCount}`
-      : "Сверка еще не выполнялась",
-    ...(topReasons.length > 0 ? ["", "Частые причины отказа:", ...topReasons] : []),
-  ].join("\n"));
-}
-
-async function formatFiltersPanel(): Promise<string> {
-  const filters = await prisma.filter.findMany({ orderBy: { createdAt: "desc" }, take: FILTER_LIST_LIMIT });
-  const total = await prisma.filter.count();
-  const active = filters.filter((filter) => filter.enabled).length;
-
-  if (total === 0) {
-    return "Фильтров пока нет.\nНажми «Новый» и напиши одной строкой: BMW X5 2015-2020 10000-35000 Днепр";
-  }
-
-  const lines = [
-    `Фильтры: ${active}/${total} активных`,
-    "",
-    ...filters.map((filter, index) => filterSummaryLine(filter, index + 1)),
-    total > filters.length ? `\nПоказано первые ${filters.length}. Остальные есть на сайте.` : "",
-  ];
-
-  return trimTelegramMessage(lines.join("\n"));
-}
-
-function filterSummaryLine(filter: Filter, index: number): string {
-  const vehicle = [filter.brand, filter.model].filter(Boolean).join(" ") || "любое авто";
-  const years = formatRange(filter.yearFrom, filter.yearTo);
-  const price = formatRange(filter.priceFrom, filter.priceTo, "$");
-  const geo = formatGeo(filter);
-  return `${index}. ${filter.enabled ? "вкл" : "выкл"} | ${vehicle} | ${years} | ${price} | ${geo}`;
-}
-
-async function filtersKeyboard(): Promise<ReplyMarkup> {
-  const filters = await prisma.filter.findMany({
-    orderBy: { createdAt: "desc" },
-    take: FILTER_LIST_LIMIT,
-    select: { id: true, name: true, enabled: true },
-  });
-
-  return {
-    inline_keyboard: [
-      [
-        { text: "Новый", callback_data: `${CONTROL_PREFIX}filter_new` },
-        { text: "AUTO.RIA в фильтры", callback_data: `${CONTROL_PREFIX}filter_auto_ria` },
-      ],
-      ...filters.map((filter, index) => [
-        {
-          text: `${index + 1}. ${shorten(filter.name, 20)}`,
-          callback_data: `${CONTROL_PREFIX}filter_open:${filter.id}`,
-        },
-        {
-          text: filter.enabled ? "Выкл" : "Вкл",
-          callback_data: `${CONTROL_PREFIX}filter_toggle:${filter.id}`,
-        },
-        { text: "Гео", callback_data: `${CONTROL_PREFIX}filter_geo:${filter.id}` },
-      ]),
-      [{ text: "Назад", callback_data: `${CONTROL_PREFIX}panel` }],
-    ],
-  };
-}
-
-function filterHelpText(): string {
-  return newFilterPrompt();
-}
-
-async function createFilterFromTelegram(text: string): Promise<string> {
-  const parsed = parseQuickFilter(text);
-  if (!parsed.cleanQuery) return filterHelpText();
-
-  const taxonomy = await resolveAutoRiaIds(parsed.brand, parsed.model);
-  const sources = defaultSourcesForFilter(Boolean(taxonomy.autoRiaMarkId));
-  const displayVehicle = [parsed.brand, parsed.model].filter(Boolean).join(" ") || parsed.vehicleQuery || "Любое авто";
-
-  const filter = await prisma.filter.create({
-    data: {
-      name: `ТГ: ${displayVehicle}`.slice(0, 120),
-      enabled: true,
-      sources,
-      autoRiaCategoryId: 1,
-      autoRiaMarkId: taxonomy.autoRiaMarkId,
-      autoRiaModelId: taxonomy.autoRiaModelId,
-      brand: parsed.brand,
-      model: parsed.model,
-      modelNames: parsed.model ? [parsed.model] : [],
-      generation: null,
-      bodyTypes: [],
-      fuelTypes: [],
-      gearboxes: [],
-      driveTypes: [],
-      colors: [],
-      engineVolumeFrom: null,
-      engineVolumeTo: null,
-      enginePowerFrom: null,
-      enginePowerTo: null,
-      doorsFrom: null,
-      doorsTo: null,
-      seatsFrom: null,
-      seatsTo: null,
-      conditions: [],
-      customsCleared: null,
-      bargainPossible: null,
-      freshnessMode: "LAST_HOUR",
-      yearFrom: parsed.yearFrom,
-      yearTo: parsed.yearTo,
-      priceFrom: parsed.priceFrom,
-      priceTo: parsed.priceTo,
-      mileageFrom: null,
-      mileageTo: null,
-      regions: parsed.regions,
-      cities: parsed.cities,
-      keywords: parsed.brand || parsed.model || !parsed.vehicleQuery ? [] : [parsed.vehicleQuery],
-      excludeKeywords: [],
-    },
-  });
-
-  const autoRiaLine = taxonomy.autoRiaMarkId
-    ? `AUTO.RIA подключен: марка ${taxonomy.autoRiaMarkId}${taxonomy.autoRiaModelId ? `, модель ${taxonomy.autoRiaModelId}` : ""}.`
-    : env.AUTO_RIA_API_KEY
-      ? "AUTO.RIA не добавлен: не удалось точно распознать марку в справочнике."
-      : "AUTO.RIA не добавлен: API ключ не настроен.";
-
-  return trimTelegramMessage(
-    [
-      "Фильтр создан.",
-      `Авто: ${[filter.brand, filter.model].filter(Boolean).join(" ") || "по ключевым словам"}`,
-      `Годы: ${formatRange(filter.yearFrom, filter.yearTo)}`,
-      `Цена: ${formatRange(filter.priceFrom, filter.priceTo, "$")}`,
-      `Гео: ${formatGeo(filter)}`,
-      `Источники: ${formatList(filter.sources.map(sourceLabel))}`,
-      autoRiaLine,
-    ].join("\n"),
-  );
-}
-
-async function formatFilterDetails(id: string): Promise<string | null> {
-  const filters = await prisma.filter.findMany({ orderBy: { createdAt: "desc" }, take: FILTER_LIST_LIMIT });
-  const filter = filters.find((item) => item.id === id) ?? (await prisma.filter.findUnique({ where: { id } }));
-  if (!filter) return null;
-  const index = filters.findIndex((item) => item.id === filter.id);
-  const vehicle = [filter.brand, filter.model].filter(Boolean).join(" ") || "любое авто";
-
-  return trimTelegramMessage(
-    [
-      `Фильтр${index >= 0 ? ` ${index + 1}` : ""}: ${filter.enabled ? "включен" : "выключен"}`,
-      `Авто: ${vehicle}`,
-      `Годы: ${formatRange(filter.yearFrom, filter.yearTo)}`,
-      `Цена: ${formatRange(filter.priceFrom, filter.priceTo, "$")}`,
-      `Гео: ${formatGeo(filter)}`,
-      `Источники: ${formatList(filter.sources.map(sourceLabel))}`,
-      `Свежесть: ${freshnessLabel(filter.freshnessMode)}`,
-    ].join("\n"),
-  );
-}
-
-function filterDetailsKeyboard(id: string): ReplyMarkup {
-  return {
-    inline_keyboard: [
-      [
-        { text: "Вкл/выкл", callback_data: `${CONTROL_PREFIX}filter_toggle:${id}` },
-        { text: "Гео", callback_data: `${CONTROL_PREFIX}filter_geo:${id}` },
-      ],
-      [
-        { text: "Вся Украина", callback_data: `${CONTROL_PREFIX}filter_geo_all:${id}` },
-        { text: "Все источники", callback_data: `${CONTROL_PREFIX}filter_sources_all:${id}` },
-      ],
-      [
-        { text: "Удалить", callback_data: `${CONTROL_PREFIX}filter_delete:${id}` },
-        { text: "К списку", callback_data: `${CONTROL_PREFIX}filters` },
-      ],
-    ],
-  };
-}
-
-function cancelKeyboard(): ReplyMarkup {
-  return {
-    inline_keyboard: [[{ text: "Отмена", callback_data: `${CONTROL_PREFIX}filters` }]],
-  };
-}
-
-export function geoRegionsKeyboard(filterId: string, requestedPage: number): ReplyMarkup {
-  const pageSize = 8;
-  const pages = Math.max(1, Math.ceil(UKRAINE_REGIONS.length / pageSize));
-  const page = Math.max(0, Math.min(requestedPage, pages - 1));
-  const regions = UKRAINE_REGIONS.slice(page * pageSize, (page + 1) * pageSize);
-  const rows: ReplyMarkup["inline_keyboard"] = [];
-  for (let index = 0; index < regions.length; index += 2) {
-    rows.push(
-      regions.slice(index, index + 2).map((region) => ({
-        text: region.nameRu,
-        callback_data: `${CONTROL_PREFIX}grr:${filterId}:${region.id}`,
-      })),
-    );
-  }
-  rows.push([
-    { text: "Назад", callback_data: `${CONTROL_PREFIX}gr:${filterId}:${Math.max(0, page - 1)}` },
-    { text: `${page + 1}/${pages}`, callback_data: `${CONTROL_PREFIX}gr:${filterId}:${page}` },
-    { text: "Дальше", callback_data: `${CONTROL_PREFIX}gr:${filterId}:${Math.min(pages - 1, page + 1)}` },
-  ]);
-  rows.push([
-    { text: "Вся Украина", callback_data: `${CONTROL_PREFIX}filter_geo_all:${filterId}` },
-    { text: "Ввести название", callback_data: `${CONTROL_PREFIX}gt:${filterId}` },
-  ]);
-  rows.push([{ text: "К фильтру", callback_data: `${CONTROL_PREFIX}filter_open:${filterId}` }]);
-  return { inline_keyboard: rows };
-}
-
-export function geoCitiesKeyboard(filterId: string, regionId: string, requestedPage: number): ReplyMarkup {
-  const region = getRegionById(regionId);
-  const cities = region?.cities ?? [];
-  const pageSize = 8;
-  const pages = Math.max(1, Math.ceil(cities.length / pageSize));
-  const page = Math.max(0, Math.min(requestedPage, pages - 1));
-  const visibleCities = cities.slice(page * pageSize, (page + 1) * pageSize);
-  const rows: ReplyMarkup["inline_keyboard"] = [
-    [{ text: "Вся область", callback_data: `${CONTROL_PREFIX}gw:${filterId}:${regionId}` }],
-  ];
-  for (let index = 0; index < visibleCities.length; index += 2) {
-    rows.push(
-      visibleCities.slice(index, index + 2).map((city) => ({
-        text: city.nameRu,
-        callback_data: `${CONTROL_PREFIX}g:${filterId}:${city.id}`,
-      })),
-    );
-  }
-  rows.push([
-    { text: "Назад", callback_data: `${CONTROL_PREFIX}gc:${filterId}:${regionId}:${Math.max(0, page - 1)}` },
-    { text: `${page + 1}/${pages}`, callback_data: `${CONTROL_PREFIX}gc:${filterId}:${regionId}:${page}` },
-    { text: "Дальше", callback_data: `${CONTROL_PREFIX}gc:${filterId}:${regionId}:${Math.min(pages - 1, page + 1)}` },
-  ]);
-  rows.push([{ text: "К областям", callback_data: `${CONTROL_PREFIX}gr:${filterId}:0` }]);
-  return { inline_keyboard: rows };
-}
-
-function newFilterPrompt(): string {
-  return [
-    "Новый фильтр",
-    "Напиши одной строкой:",
-    "",
-    "BMW X5 2015-2020 10000-35000 Днепр",
-    "",
-    "Можно проще: Camry до 18000 Киев",
-    "Любая марка: до 50000 долларов Днепр",
-  ].join("\n");
-}
-
-function geoPrompt(filterName: string): string {
-  return [
-    `Гео для: ${shorten(filterName, 60)}`,
-    "Напиши город или область:",
-    "",
-    "Днепр",
-    "Днепропетровская область",
-    "вся Украина",
-  ].join("\n");
-}
-
-async function runFilterTextCommand(text: string): Promise<string | null> {
-  const normalized = text.trim().toLowerCase();
-  if (!normalized) return null;
-
-  const onIndex = extractIndexCommand(normalized, ["/filter_on", "/фильтр_вкл"]);
-  if (onIndex != null) {
-    const filter = await filterByIndex(onIndex);
-    if (!filter) return `Фильтр номер ${onIndex} не найден.\n\n${await formatFiltersPanel()}`;
-    await prisma.filter.update({ where: { id: filter.id }, data: { enabled: true } });
-    return `Фильтр включен: ${filter.name}\n\n${await formatFiltersPanel()}`;
-  }
-
-  const offIndex = extractIndexCommand(normalized, ["/filter_off", "/фильтр_выкл"]);
-  if (offIndex != null) {
-    const filter = await filterByIndex(offIndex);
-    if (!filter) return `Фильтр номер ${offIndex} не найден.\n\n${await formatFiltersPanel()}`;
-    await prisma.filter.update({ where: { id: filter.id }, data: { enabled: false } });
-    return `Фильтр выключен: ${filter.name}\n\n${await formatFiltersPanel()}`;
-  }
-
-  const deleteIndex = extractIndexCommand(normalized, ["/filter_delete", "/filter_del", "/фильтр_удалить"]);
-  if (deleteIndex != null) {
-    const filter = await filterByIndex(deleteIndex);
-    if (!filter) return `Фильтр номер ${deleteIndex} не найден.\n\n${await formatFiltersPanel()}`;
-    await prisma.filter.delete({ where: { id: filter.id } });
-    return `Фильтр удален: ${filter.name}\n\n${await formatFiltersPanel()}`;
-  }
-
-  const sourcesMatch = normalized.match(/^\/(?:filter_sources|фильтр_источники)\s+(\d+)\s+(.+)$/u);
-  if (sourcesMatch) {
-    const index = Number(sourcesMatch[1]);
-    const filter = await filterByIndex(index);
-    if (!filter) return `Фильтр номер ${index} не найден.\n\n${await formatFiltersPanel()}`;
-    const sources = parseSourceList(sourcesMatch[2] ?? "");
-    if (sources.length === 0) return `Не понял источники. Пример: /filter_sources ${index} all`;
-    const text = await updateFilterSources(filter, sources);
-    return `${text}\n\n${await formatFiltersPanel()}`;
-  }
-
-  return null;
-}
-
-async function toggleFilterById(id: string): Promise<void> {
-  const filter = await prisma.filter.findUnique({ where: { id } });
-  if (!filter) return;
-  await prisma.filter.update({ where: { id }, data: { enabled: !filter.enabled } });
-}
-
-async function deleteFilterById(id: string): Promise<boolean> {
-  const filter = await prisma.filter.findUnique({ where: { id }, select: { id: true } });
-  if (!filter) return false;
-  await prisma.filter.delete({ where: { id } });
-  return true;
-}
-
-async function setFilterGeo(id: string, value: string): Promise<string> {
-  const filter = await prisma.filter.findUnique({ where: { id } });
-  if (!filter) return "Фильтр не найден.";
-
-  const reset = isAllUkraineGeo(value);
-  const geo = reset ? { regions: [], cities: [] } : parseGeoSelection(value);
-  if (!reset && geo.regions.length === 0 && geo.cities.length === 0) {
-    return "Гео не понял. Напиши город или область: Днепр, Киевская область, Одесса. Для сброса: вся Украина.";
-  }
-
-  const updated = await prisma.filter.update({
-    where: { id },
-    data: {
-      regions: geo.regions,
-      cities: geo.cities,
-    },
-  });
-
-  return `Гео обновлено: ${formatGeo(updated)}`;
-}
-
-async function setFilterGeoByIds(id: string, regions: string[], cities: string[]): Promise<string> {
-  const filter = await prisma.filter.findUnique({ where: { id }, select: { id: true } });
-  if (!filter) return "Фильтр не найден.";
-  const normalizedRegions = normalizeRegionIds(regions);
-  const normalizedCities = normalizeCityIds(cities, normalizedRegions);
-  const updated = await prisma.filter.update({
-    where: { id },
-    data: { regions: normalizedRegions, cities: normalizedCities },
-  });
-  return `География обновлена: ${formatGeo(updated)}`;
-}
-
-function parseGeoSelection(value: string): { regions: string[]; cities: string[] } {
-  const geo = extractGeo(value);
-  const regions = normalizeRegionIds(geo.regions);
-  return {
-    regions,
-    cities: normalizeCityIds(geo.cities, regions),
-  };
-}
-
-async function runPendingAction(action: PendingAction, text: string): Promise<string> {
-  if (action.type === "create_filter") return createFilterFromTelegram(text);
-  return setFilterGeo(action.filterId, text);
-}
-
-function setPendingAction(chatId: number | string, action: PendingAction): void {
-  pendingActions.set(String(chatId), action);
-}
-
-function getPendingAction(chatId: number | string): PendingAction | null {
-  const key = String(chatId);
-  const action = pendingActions.get(key);
-  if (!action) return null;
-  if (action.expiresAt < Date.now()) {
-    pendingActions.delete(key);
-    return null;
-  }
-  return action;
-}
-
-function clearPendingAction(chatId: number | string): void {
-  pendingActions.delete(String(chatId));
-}
-
-async function setFilterAllSources(id: string): Promise<string> {
-  const filter = await prisma.filter.findUnique({ where: { id } });
-  if (!filter) return "Фильтр не найден.";
-  return updateFilterSources(filter, ["AUTO_RIA", ...REAL_FILTER_SOURCES]);
-}
-
-async function updateFilterSources(filter: Filter, requestedSources: ListingSource[]): Promise<string> {
-  let nextSources = uniqueSources(requestedSources);
-  let autoRiaMarkId = filter.autoRiaMarkId;
-  let autoRiaModelId = filter.autoRiaModelId;
-
-  if (nextSources.includes("AUTO_RIA")) {
-    if (!env.AUTO_RIA_API_KEY) {
-      nextSources = nextSources.filter((source) => source !== "AUTO_RIA");
-    } else if (!autoRiaMarkId) {
-      const taxonomy = await resolveAutoRiaIds(filter.brand, filter.model);
-      autoRiaMarkId = taxonomy.autoRiaMarkId;
-      autoRiaModelId = taxonomy.autoRiaModelId;
-      if (!autoRiaMarkId) nextSources = nextSources.filter((source) => source !== "AUTO_RIA");
-    }
-  }
-
-  await prisma.filter.update({
-    where: { id: filter.id },
-    data: {
-      sources: nextSources,
-      autoRiaCategoryId: nextSources.includes("AUTO_RIA") ? filter.autoRiaCategoryId ?? 1 : filter.autoRiaCategoryId,
-      autoRiaMarkId,
-      autoRiaModelId,
-    },
-  });
-
-  if (requestedSources.includes("AUTO_RIA") && !nextSources.includes("AUTO_RIA")) {
-    return `Источники обновлены для "${filter.name}", но AUTO.RIA пропущен: нужна точно распознанная марка.`;
-  }
-  return `Источники обновлены для "${filter.name}": ${formatList(nextSources.map(sourceLabel))}`;
-}
-
-async function addAutoRiaToCompatibleFilters(): Promise<string> {
-  if (!env.AUTO_RIA_API_KEY) return "AUTO.RIA API ключ не настроен.";
-
-  const filters = await prisma.filter.findMany({ where: { enabled: true }, orderBy: { createdAt: "desc" } });
-  let updated = 0;
-  let skipped = 0;
-
-  for (const filter of filters) {
-    if (filter.sources.includes("AUTO_RIA") && filter.autoRiaMarkId) continue;
-    const taxonomy = filter.autoRiaMarkId
-      ? { autoRiaMarkId: filter.autoRiaMarkId, autoRiaModelId: filter.autoRiaModelId }
-      : await resolveAutoRiaIds(filter.brand, filter.model);
-
-    if (!taxonomy.autoRiaMarkId) {
-      skipped++;
-      continue;
-    }
-
-    await prisma.filter.update({
-      where: { id: filter.id },
-      data: {
-        sources: uniqueSources(["AUTO_RIA", ...filter.sources]),
-        autoRiaCategoryId: filter.autoRiaCategoryId ?? 1,
-        autoRiaMarkId: taxonomy.autoRiaMarkId,
-        autoRiaModelId: taxonomy.autoRiaModelId,
-      },
-    });
-    updated++;
-  }
-
-  return `AUTO.RIA добавлен в совместимые фильтры: ${updated}. Пропущено без точной марки: ${skipped}.`;
-}
-
-async function resolveAutoRiaIds(
-  brand: string | null,
-  model: string | null,
-): Promise<{ autoRiaMarkId: number | null; autoRiaModelId: number | null }> {
-  if (!env.AUTO_RIA_API_KEY || !brand) return { autoRiaMarkId: null, autoRiaModelId: null };
-
-  const marks = await getMarks(1);
-  const mark = bestTaxonomyMatch(marks.options, brand);
-  if (!mark) return { autoRiaMarkId: null, autoRiaModelId: null };
-
-  if (!model) return { autoRiaMarkId: mark.value, autoRiaModelId: null };
-  const models = await getModels(1, mark.value);
-  const modelMatch = bestTaxonomyMatch(models.options, model);
-
-  return { autoRiaMarkId: mark.value, autoRiaModelId: modelMatch?.value ?? null };
-}
-
-function bestTaxonomyMatch(options: TaxonomyOption[], value: string): TaxonomyOption | undefined {
-  const expected = compactVehicleText(value);
-  return options.find((option) => compactVehicleText(option.name) === expected) ?? options.find((option) => compactVehicleText(option.name).includes(expected));
-}
-
-function compactVehicleText(value: string): string {
-  return normalizeVehicleText(value).replace(/\s+/gu, "");
-}
-
-async function filterByIndex(index: number): Promise<Filter | null> {
-  if (!Number.isInteger(index) || index < 1) return null;
-  const filters = await prisma.filter.findMany({ orderBy: { createdAt: "desc" }, skip: index - 1, take: 1 });
-  return filters[0] ?? null;
-}
-
-function defaultSourcesForFilter(autoRiaReady: boolean): ListingSource[] {
-  return uniqueSources([...(autoRiaReady && env.AUTO_RIA_API_KEY ? (["AUTO_RIA"] as ListingSource[]) : []), ...REAL_FILTER_SOURCES]);
-}
-
-function parseSourceList(value: string): ListingSource[] {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "all" || normalized === "все") return ["AUTO_RIA", ...REAL_FILTER_SOURCES];
-  const map: Record<string, ListingSource> = {
-    auto: "AUTO_RIA",
-    autoria: "AUTO_RIA",
-    auto_ria: "AUTO_RIA",
-    "auto.ria": "AUTO_RIA",
-    ria: "AUTO_RIA",
-    olx: "OLX",
-    rst: "RST",
-    cars: "CARS_UA",
-    carsua: "CARS_UA",
-    cars_ua: "CARS_UA",
-    automoto: "AUTOMOTO",
-    auto_moto: "AUTOMOTO",
-    риа: "AUTO_RIA",
-  };
-  return uniqueSources(
-    normalized
-      .split(/[,\s|]+/u)
-      .map((item) => map[item])
-      .filter((source): source is ListingSource => Boolean(source)),
-  );
-}
-
-function uniqueSources(sources: ListingSource[]): ListingSource[] {
-  return [...new Set(sources.filter((source) => source !== "MOCK"))];
-}
 
 function sendPanel(text: string): Promise<void> {
   return sendMessage(text, PANEL_KEYBOARD);
@@ -1115,55 +635,6 @@ async function sendFiltersPanel(text: string): Promise<void> {
   await sendMessage(text, await filtersKeyboard());
 }
 
-async function sendMessage(text: string, replyMarkup: ReplyMarkup): Promise<void> {
-  await telegramApi<unknown>("sendMessage", {
-    chat_id: env.TELEGRAM_CHAT_ID,
-    text: trimTelegramMessage(text),
-    reply_markup: replyMarkup,
-    disable_web_page_preview: true,
-  });
-}
-
-async function editMessage(chatId: number | string, messageId: number, text: string, replyMarkup: ReplyMarkup): Promise<void> {
-  await telegramApi<unknown>("editMessageText", {
-    chat_id: chatId,
-    message_id: messageId,
-    text: trimTelegramMessage(text),
-    reply_markup: replyMarkup,
-    disable_web_page_preview: true,
-  });
-}
-
-async function answerCallback(callbackQueryId: string, text: string): Promise<void> {
-  await telegramApi<unknown>("answerCallbackQuery", {
-    callback_query_id: callbackQueryId,
-    text,
-    show_alert: false,
-  }).catch(() => undefined);
-}
-
-async function telegramApi<T>(method: string, payload: Record<string, unknown>, timeoutMs = 10000): Promise<T> {
-  const controller = new AbortController();
-  currentAbortController = controller;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-    const body = (await response.json().catch(() => null)) as TelegramApiResponse<T> | null;
-    if (!response.ok || !body?.ok) {
-      const description = body && "description" in body ? body.description : undefined;
-      throw new Error(description || `Telegram API ${method} failed with HTTP ${response.status}`);
-    }
-    return body.result;
-  } finally {
-    clearTimeout(timeout);
-    if (currentAbortController === controller) currentAbortController = null;
-  }
-}
 
 function parseTextCommand(text: string | undefined): ControlCommand | null {
   const normalized = (text ?? "").trim().toLowerCase();
@@ -1210,27 +681,6 @@ function isFiltersCommand(text: string): boolean {
 
 function isFilterCreateCommand(text: string): boolean {
   return /^\/?(filter|фильтр)\s+/iu.test(text.trim());
-}
-
-function isAllUkraineGeo(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  return ["вся украина", "вся україна", "украина", "україна", "all", "all ukraine", "везде"].includes(normalized);
-}
-
-function extractIndexCommand(text: string, commands: string[]): number | null {
-  for (const command of commands) {
-    const match = text.match(new RegExp(`^${escapeRegex(command)}\\s+(\\d+)`, "u"));
-    if (match) return Number(match[1]);
-  }
-  return null;
-}
-
-function isAllowedChat(chatId: number | string): boolean {
-  return String(chatId) === String(env.TELEGRAM_CHAT_ID);
-}
-
-function trimTelegramMessage(text: string): string {
-  return text.length <= 3900 ? text : `${text.slice(0, 3890)}\n...`;
 }
 
 function sleep(ms: number): Promise<void> {

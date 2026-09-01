@@ -38,7 +38,7 @@ if ($Install) {
     $playwrightExitCode = $LASTEXITCODE
   } finally {
     if ($temporaryUsername) {
-      & node scripts/delete-dashboard-e2e-user.mjs $temporaryUsername | Out-Null
+      & node --conditions=production scripts/delete-dashboard-e2e-user.mjs $temporaryUsername | Out-Null
       if ($LASTEXITCODE -ne 0 -and $playwrightExitCode -eq 0) {
         $playwrightExitCode = $LASTEXITCODE
       }

@@ -1,11 +1,17 @@
 export type ListingSource = "AUTO_RIA" | "OLX" | "RST" | "CARS_UA" | "AUTOMOTO" | "MOCK";
 
 export type TimestampConfidence = "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
-export type ListingDiscoveryLane = "REALTIME" | "BACKFILL" | "MANUAL";
+export type ListingDiscoveryLane = "REALTIME" | "BACKFILL" | "COVERAGE" | "MANUAL";
+
+export function isBackgroundDiscoveryLane(lane: ListingDiscoveryLane): boolean {
+  return lane === "BACKFILL" || lane === "COVERAGE";
+}
 export type ListingObservationChannel =
   | "OLX_PUBLIC_API"
   | "OLX_REGIONAL_API"
   | "OLX_PRIVATE_API"
+  | "OLX_PUBLIC_HTML"
+  | "OLX_REGIONAL_HTML"
   | "OLX_HTML_COVERAGE"
   | "OLX_HTML_FALLBACK";
 
@@ -61,6 +67,12 @@ export type NormalizedListing = {
   freshnessFallback?: "FIRST_SEEN";
   skipReason?: ListingSkipReason;
   firstSeenAt: Date;
+  /** Wall-clock instant immediately before the source HTTP request is issued. */
+  requestStartedAt?: Date;
+  /** Wall-clock instant when fetch resolves with response headers (TTFB boundary). */
+  firstByteAt?: Date;
+  /** Instant a new OLX candidate is ready for the progressive hot handoff. */
+  hotCandidateAt?: Date;
   observationChannel?: ListingObservationChannel;
   observationTarget?: string;
 
@@ -179,7 +191,7 @@ export type MarketPriceEstimateDto = {
   updatedAt: string;
 };
 
-export type TelegramNotificationStatus = "PENDING" | "PROCESSING" | "RETRY_PENDING" | "SENT" | "UPDATED" | "FAILED";
+export type TelegramNotificationStatus = "PENDING" | "FLASH_PENDING" | "PROCESSING" | "RETRY_PENDING" | "SENT" | "UPDATED" | "FAILED";
 
 export type TelegramNotificationDto = {
   id: string;
@@ -195,5 +207,11 @@ export type TelegramNotificationDto = {
   lastErrorCode: string | null;
   lastErrorMessage: string | null;
   sentAt: string | null;
+  acceptedAt: string | null;
+  deleteAfter: string | null;
+  favoritedAt: string | null;
+  retainUntil: string | null;
+  retentionPolicyAppliedAt: string | null;
+  cleanupAttemptedAt: string | null;
   updatedAt: string;
 };

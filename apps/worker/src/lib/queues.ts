@@ -1,5 +1,5 @@
 import { Queue, type ConnectionOptions } from "bullmq";
-import { Redis } from "ioredis";
+import { Redis, type RedisOptions } from "ioredis";
 import { QUEUE_NAMES, QUEUE_PRIORITIES, type QueueName } from "@amb/shared";
 import { env } from "../env.js";
 
@@ -14,13 +14,22 @@ redisConnection.on("error", () => {
   // Individual processors fall back or fail fast depending on their queue semantics.
 });
 export const bullConnection: ConnectionOptions = redisOptionsFromUrl(env.REDIS_URL);
+const producerConnection: ConnectionOptions = redisOptionsFromUrl(env.REDIS_URL, {
+  maxRetriesPerRequest: 1,
+  enableOfflineQueue: false,
+  retryStrategy: () => null,
+});
 
 const queues = new Map<QueueName, Queue>();
 
 export function getQueue(name: QueueName): Queue {
   let queue = queues.get(name);
   if (!queue) {
-    queue = new Queue(name, { connection: bullConnection, skipVersionCheck: true });
+    // Observations are persisted in PostgreSQL before producer handoff. A
+    // producer must therefore reject promptly when Redis is unavailable so the
+    // caller can leave the observation in an explicit recovery state. Worker
+    // consumers keep the resilient, indefinitely reconnecting connection.
+    queue = new Queue(name, { connection: producerConnection, skipVersionCheck: true });
     queues.set(name, queue);
   }
   return queue;
@@ -52,7 +61,10 @@ export async function closeQueues(): Promise<void> {
 
 export { QUEUE_NAMES };
 
-function redisOptionsFromUrl(value: string): ConnectionOptions {
+function redisOptionsFromUrl(
+  value: string,
+  overrides: Partial<RedisOptions> = {},
+): RedisOptions {
   const url = new URL(value);
   const db = url.pathname && url.pathname !== "/" ? Number(url.pathname.slice(1)) : undefined;
   return {
@@ -66,5 +78,6 @@ function redisOptionsFromUrl(value: string): ConnectionOptions {
     connectTimeout: 1000,
     enableOfflineQueue: true,
     retryStrategy: (attempt) => Math.min(1000 + attempt * 100, 5000),
+    ...overrides,
   };
 }

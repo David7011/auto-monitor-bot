@@ -1,4 +1,4 @@
-import { prisma } from "@amb/db";
+import { closeDatabase, prisma } from "@amb/db";
 import { OlxCollector } from "../collectors/olx.js";
 import { buildSourceSearchPlan, loadSourceSearchState } from "../modules/source-search-plan.js";
 
@@ -49,7 +49,7 @@ try {
   console.log(`OLX parity passed: all ${observedIds.size} directly observed advert IDs exist in search state or the journal.`);
   console.log(JSON.stringify(metrics));
 } finally {
-  await prisma.$disconnect();
+  await closeDatabase();
 }
 
 async function missingDetectionIds(ids: string[], knownStateIds: Set<string>): Promise<string[]> {

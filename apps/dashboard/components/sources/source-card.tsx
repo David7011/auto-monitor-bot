@@ -43,6 +43,8 @@ export function SourceCard({
   const monogram = sourceLabel(source.source).slice(0, 2).toUpperCase()
   const newestOk = source.supportsNewestFirst && source.newestFirstVerified
   const live = source.enabled && source.status === "ACTIVE"
+  const protectedPause = ["RATE_LIMITED", "CAPTCHA_DETECTED", "PAUSED"].includes(source.status)
+    || Boolean(source.pausedUntil && new Date(source.pausedUntil).getTime() > Date.now())
 
   return (
     <div className="surface-card group relative overflow-hidden rounded-2xl p-4 transition-all duration-300 hover:border-line-strong hover:shadow-[var(--shadow-2)] sm:p-5">
@@ -68,7 +70,7 @@ export function SourceCard({
         <Gauge value={source.enabled ? source.healthScore : 0} size={78} sublabel="здоровье" />
         <div className="grid flex-1 grid-cols-2 gap-x-3 gap-y-2.5">
           <Stat icon={<Timer className="size-3.5" />} label="Отклик" value={formatMs(source.lastDurationMs)} />
-          <Stat icon={<Activity className="size-3.5" />} label="Найдено" value={String(foundToday)} />
+          <Stat icon={<Activity className="size-3.5" />} label="Сегодня" value={String(foundToday)} />
           <Stat icon={<Clock className="size-3.5" />} label="Проверка" value={formatRelative(source.lastCheckedAt)} />
           <Stat icon={<GaugeIcon className="size-3.5" />} label="Порядок" value={newestOk ? "новые" : "локально"} tone={newestOk ? "success" : "warning"} />
         </div>
@@ -87,7 +89,16 @@ export function SourceCard({
       ) : null}
 
       <div className="mt-4 grid gap-2 sm:grid-cols-2">
-        <GlowButton className="w-full" tone="neutral" loading={busy} onClick={onCheck}><RefreshCw /> Проверить</GlowButton>
+        <GlowButton
+          className="w-full"
+          tone="neutral"
+          loading={busy}
+          disabled={protectedPause}
+          onClick={onCheck}
+          title={protectedPause ? "Защитная пауза сохраняется до штатной проверки" : "Проверить источник сейчас"}
+        >
+          <RefreshCw /> {protectedPause ? "Защитная пауза" : "Проверить"}
+        </GlowButton>
         <GlowButton className="w-full" tone={source.enabled ? "danger" : "success"} loading={busy} onClick={onToggle}>
           <Power /> {source.enabled ? "Выключить" : "Включить"}
         </GlowButton>

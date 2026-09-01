@@ -12,6 +12,7 @@ $AutostartLauncher = Join-Path $ProjectRoot "scripts\autostart-run.cmd"
 $SupervisorScript = Join-Path $ProjectRoot "scripts\supervisor.ps1"
 $SupervisorLauncher = Join-Path $ProjectRoot "scripts\supervisor.cmd"
 $WatchdogScript = Join-Path $ProjectRoot "scripts\watchdog.ps1"
+$WatchdogAlertPolicy = Join-Path $ProjectRoot "scripts\watchdog-alert-policy.ps1"
 $WatchdogLauncher = Join-Path $ProjectRoot "scripts\watchdog.cmd"
 $WatchdogTaskName = "$TaskName Watchdog"
 $BackupLauncher = Join-Path $ProjectRoot "scripts\backup-database.cmd"
@@ -19,6 +20,8 @@ $BackupTaskName = "$TaskName Database Backup"
 $RestoreDrillLauncher = Join-Path $ProjectRoot "scripts\test-database-restore.cmd"
 $RestoreDrillTaskName = "$TaskName Database Restore Drill"
 $LogDir = Join-Path $ProjectRoot ".runtime\logs"
+$SecurityCheckScript = Join-Path $ProjectRoot "scripts\assert-runtime-security.ps1"
+$SecurityCheckLauncher = Join-Path $ProjectRoot "scripts\security-check.cmd"
 
 if (!(Test-Path $StartScript)) {
   throw "Start script not found: $StartScript"
@@ -38,6 +41,9 @@ if (!(Test-Path $SupervisorLauncher)) {
 if (!(Test-Path $WatchdogScript)) {
   throw "Watchdog script not found: $WatchdogScript"
 }
+if (!(Test-Path $WatchdogAlertPolicy)) {
+  throw "Watchdog alert policy not found: $WatchdogAlertPolicy"
+}
 if (!(Test-Path $WatchdogLauncher)) {
   throw "Watchdog launcher not found: $WatchdogLauncher"
 }
@@ -51,24 +57,12 @@ if (!(Test-Path $RestoreDrillLauncher)) {
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 function Assert-SecureProjectAcl {
-  $allowed = @(
-    "S-1-5-18",       # SYSTEM
-    "S-1-5-32-544",   # Administrators
-    [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-  )
-  $unsafe = foreach ($rule in (Get-Acl -LiteralPath $ProjectRoot).Access) {
-    if ($rule.AccessControlType -ne "Allow") { continue }
-    $writable = ($rule.FileSystemRights -band (
-      [Security.AccessControl.FileSystemRights]::Write -bor
-      [Security.AccessControl.FileSystemRights]::Modify -bor
-      [Security.AccessControl.FileSystemRights]::FullControl
-    )) -ne 0
-    if (!$writable) { continue }
-    $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-    if ($sid -notin $allowed) { $rule }
+  if (!(Test-Path -LiteralPath $SecurityCheckScript -PathType Leaf)) {
+    throw "Runtime security check is missing: $SecurityCheckScript"
   }
-  if ($unsafe) {
-    throw "Project ACL allows another identity to modify SYSTEM-executed files. Secure $ProjectRoot before installing autostart."
+  & $SecurityCheckLauncher -ProjectRoot $ProjectRoot -Quiet -SkipScheduledTasks
+  if ($LASTEXITCODE -ne 0) {
+    throw "Project ACL is not safe for SYSTEM tasks. Run '.\amb.cmd security:harden' from an elevated shell first."
   }
 }
 
@@ -109,7 +103,7 @@ try {
     -Trigger $triggers `
     -Principal $principal `
     -Settings $settings `
-    -Description "Keeps Auto Monitor Bot running from Windows startup until shutdown and recovers failed processes." `
+    -Description "Starts Auto Monitor Bot at Windows boot/logon and continuously supervises its API, isolated hot/background workers, and dashboard." `
     -Force | Out-Null
 
   $restoreDrillAction = New-ScheduledTaskAction `
@@ -156,7 +150,7 @@ try {
     -Trigger $watchdogTrigger `
     -Principal $principal `
     -Settings $settings `
-    -Description "Checks Auto Monitor Bot every minute and restarts it after a process or health failure." `
+    -Description "Checks and recovers an automatically started Auto Monitor Bot session while its run request is active." `
     -Force | Out-Null
 } catch {
   throw "Failed to install the SYSTEM startup task. Run this script from an elevated PowerShell window. Original error: $($_.Exception.Message)"

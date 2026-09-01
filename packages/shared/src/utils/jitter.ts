@@ -26,6 +26,7 @@ export function protectionPauseSeconds(input: {
   if (typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter > 0) {
     return Math.min(Math.max(Math.ceil(retryAfter), 30), maxSeconds);
   }
-  const multiplier = Math.min(2 ** Math.max(0, input.consecutiveErrors ?? 0), 8);
+  const requiredMultiplier = Math.max(1, Math.ceil(maxSeconds / Math.max(1, input.baseSeconds)));
+  const multiplier = Math.min(2 ** Math.max(0, input.consecutiveErrors ?? 0), requiredMultiplier);
   return Math.min(Math.max(1, input.baseSeconds) * multiplier, maxSeconds);
 }

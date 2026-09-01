@@ -28,7 +28,16 @@ export default function ListingsPage() {
     { key: "market", header: "Рынок", render: (l) => <StatusBadge status={l.marketPriceEstimate?.verdict ?? "UNKNOWN"} /> },
     { key: "city", header: "Город", render: (l) => <span className="text-muted">{l.city ?? "—"}</span> },
     { key: "check", header: "Проверка", render: (l) => <StatusBadge status={l.vehicleChecks?.[0]?.checkStatus ?? "NOT_STARTED"} /> },
-    { key: "tg", header: "Telegram", render: (l) => <StatusBadge status={l.telegramNotifications?.[0]?.status ?? "PENDING"} /> },
+    {
+      key: "tg",
+      header: "Telegram",
+      render: (l) => (
+        <span className="flex items-center gap-1.5">
+          <StatusBadge status={l.telegramNotifications?.[0]?.status ?? "PENDING"} />
+          {l.telegramNotifications?.[0]?.favoritedAt ? <span title="Сохранено на 10 дней">❤️</span> : null}
+        </span>
+      ),
+    },
     { key: "link", header: "", align: "right", render: (l) => <a className="text-accent-soft hover:underline" href={l.url} target="_blank" rel="noopener noreferrer">открыть</a> },
   ]
 

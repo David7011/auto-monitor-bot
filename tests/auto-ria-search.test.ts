@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { buildAutoRiaSearchUrl } from "../apps/worker/src/collectors/auto-ria.js";
+import {
+  buildAutoRiaSearchUrl,
+  selectAutoRiaCandidateIds,
+} from "../apps/worker/src/collectors/auto-ria.js";
 import type { SourceSearchContext } from "../apps/worker/src/collectors/base.js";
 
 describe("AUTO.RIA search URL", () => {
@@ -78,5 +81,24 @@ describe("AUTO.RIA search URL", () => {
 
     expect(url.searchParams.get("state[0]")).toBe("1");
     expect(url.searchParams.get("city[0]")).toBe("1");
+  });
+
+  it("looks past an isolated known ID but stops at a stable known tail", () => {
+    const known = new Set(["known-1", "known-2", "known-3"]);
+    expect(selectAutoRiaCandidateIds(
+      ["known-1", "new-between", "known-2", "known-3", "old-tail"],
+      known,
+      10,
+      2,
+    )).toEqual(["new-between"]);
+  });
+
+  it("strictly caps AUTO.RIA detail candidates even when normalization could fail", () => {
+    expect(selectAutoRiaCandidateIds(
+      ["new-1", "new-2", "new-3", "new-4"],
+      new Set(),
+      2,
+      10,
+    )).toEqual(["new-1", "new-2"]);
   });
 });
