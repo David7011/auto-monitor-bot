@@ -9,7 +9,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.0.0
           run_install: false
@@ -43,7 +43,7 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/auto_monitor_ci
     steps:
       - uses: actions/checkout@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.0.0
           run_install: false
@@ -95,7 +95,7 @@ jobs:
       API_REQUIRE_LOCAL_TOKEN_FOR_ALL: "true"
     steps:
       - uses: actions/checkout@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.0.0
           run_install: false
@@ -133,7 +133,7 @@ jobs:
       - uses: github/codeql-action/init@ddf5ce7296213f5548c91e2dd19df2d77d2b2d66 # v3
         with:
           languages: javascript-typescript
-      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.0.0
           run_install: false
