@@ -34,7 +34,7 @@
     "undici": "^6.28.0"
   },
   "devDependencies": {
-    "tsx": "^4.23.1",
-    "typescript": "5.7.3"
+    "tsx": "^4.23.12",
+    "typescript": "7.0.2"
   }
 }
