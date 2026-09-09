@@ -12,13 +12,13 @@ const config: OlxCadenceCanaryConfig = {
   qualificationRuns: 100,
   promotionRuns: 100,
   hotPathMinimumSamples: 30,
-  p95MinimumSamples: 10,
+  p95MinimumSamples: 30,
   qualificationMaximumP95Ms: 8_000,
   maximumP95Ms: 12_000,
   p95GrowthRatio: 1.25,
   baseIntervalSeconds: 20,
   baseJitterSeconds: 4,
-  canaryIntervalSeconds: 15,
+  canaryIntervalSeconds: 18,
   canaryJitterSeconds: 3,
 };
 
@@ -78,7 +78,7 @@ describe("OLX cadence canary policy", () => {
       transition: "ENTER_CANARY",
       cleanRunCount: 100,
       baselineP95Ms: 4_000,
-      intervalSeconds: 15,
+      intervalSeconds: 18,
       jitterSeconds: 3,
     });
   });
@@ -144,8 +144,8 @@ describe("OLX cadence canary policy", () => {
 
   it("uses a minimum sample before rolling back on p95 growth", () => {
     const current = state({ mode: "CANARY", canaryStartedAt: epoch, baselineP95Ms: 4_000 });
-    expect(decide({ current, runs: cleanRuns(9, 6_000) })).toMatchObject({ mode: "CANARY", transition: "NONE" });
-    expect(decide({ current, runs: cleanRuns(10, 6_000) })).toMatchObject({ mode: "ROLLED_BACK", transition: "ROLLBACK", currentP95Ms: 6_000 });
+    expect(decide({ current, runs: cleanRuns(29, 6_000) })).toMatchObject({ mode: "CANARY", transition: "NONE" });
+    expect(decide({ current, runs: cleanRuns(30, 6_000) })).toMatchObject({ mode: "ROLLED_BACK", transition: "ROLLBACK", currentP95Ms: 6_000 });
   });
 
   it("promotes after one hundred clean canary runs but keeps the rollback guard", () => {
@@ -153,7 +153,7 @@ describe("OLX cadence canary policy", () => {
     expect(decide({ current, runs: cleanRuns(100) })).toMatchObject({
       mode: "PROMOTED",
       transition: "PROMOTE",
-      intervalSeconds: 15,
+      intervalSeconds: 18,
       jitterSeconds: 3,
     });
     const promoted = state({ mode: "PROMOTED", canaryStartedAt: epoch, baselineP95Ms: 4_000 });

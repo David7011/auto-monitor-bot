@@ -288,6 +288,13 @@ export default function PlannerPage() {
               </span>. Baseline/current p95:{" "}
               <span className="font-mono text-foreground">{data?.olxCadenceCanary.baselineP95Ms ?? "—"}/{data?.olxCadenceCanary.currentP95Ms ?? "—"} мс</span>.
               {" "}Полные live hot-path: <span className="font-mono text-foreground">{data?.olxCadenceCanary.hotPathSamples ?? 0}/{data?.olxCadenceCanary.hotPathSamplesRequired ?? 30}</span>.
+              {" "}Решение p95: после <span className="font-mono text-foreground">{data?.olxCadenceCanary.p95MinimumSamples ?? 30}</span> canary-проходов; p99:{" "}
+              <span className="font-mono text-foreground">
+                {data?.olxCadenceCanary.hotPathSamples ?? 0}/{data?.olxCadenceCanary.p99SamplesRequired ?? 100} ({data?.olxCadenceCanary.p99Ready ? "готов" : "накапливается"})
+              </span>.
+              {" "}Эксперимент: <span className="font-mono text-foreground">{data?.olxCadenceCanary.experimentId ?? "ожидает запуска"}</span>, владелец{" "}
+              <span className="font-mono text-foreground">{data?.olxCadenceCanary.experimentOwner ?? "cadence"}</span>, revision{" "}
+              <span className="font-mono text-foreground">{data?.olxCadenceCanary.codeRevision?.slice(0, 12) ?? "—"}</span>.
               {data?.olxCadenceCanary.rollbackReason ? ` Rollback: ${data.olxCadenceCanary.rollbackReason}.` : ""}
             </div>
             <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">

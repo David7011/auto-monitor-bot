@@ -662,6 +662,11 @@ export function coordinatorCoverageMetrics(): Record<string, string | number | b
       ? Math.round(snapshot.totalWaitMs.REALTIME / snapshot.started.REALTIME)
       : 0,
     coordinatorQuietCanaryMode: snapshot.realtimeQuietCanary.mode,
+    coordinatorExperimentOwner: snapshot.realtimeQuietCanary.experimentOwner,
+    coordinatorQuietCanaryExperimentId: snapshot.realtimeQuietCanary.experimentId,
+    coordinatorQuietCanaryCodeRevision: snapshot.realtimeQuietCanary.codeRevision,
+    coordinatorQuietCanaryConfigHash: snapshot.realtimeQuietCanary.configHash,
+    coordinatorQuietCanaryEffectiveConfig: JSON.stringify(snapshot.realtimeQuietCanary.effectiveConfig),
     coordinatorQuietCanaryBaselineMs: snapshot.realtimeQuietCanary.baselineQuietMs,
     coordinatorQuietCanaryCandidateMs: snapshot.realtimeQuietCanary.candidateQuietMs,
     coordinatorQuietCanaryQualifyingSamples: snapshot.realtimeQuietCanary.qualifyingSamples,

@@ -791,6 +791,10 @@ model MonitoringState {
   olxCanaryRollbackReason String?
   olxCanaryLastEvaluatedRunId String?
   olxCanaryLastTransitionAt DateTime?
+  olxCanaryExperimentId String?
+  olxCanaryCodeRevision String?
+  olxCanaryConfigHash String?
+  olxCanaryConfigSnapshot Json?
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 

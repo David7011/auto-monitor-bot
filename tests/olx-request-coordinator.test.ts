@@ -367,6 +367,13 @@ describe("OLX request coordinator", () => {
       return { classification: "SUCCESS" as const };
     });
     expect(coordinator.snapshot().realtimeQuietCanary).toMatchObject({
+      mode: "CANARY",
+      canarySamples: 1,
+      rollbackReason: null,
+    });
+    await coordinator.run("REALTIME", async () => ({ classification: "SUCCESS" as const }));
+    await coordinator.run("REALTIME", async () => ({ classification: "SUCCESS" as const }));
+    expect(coordinator.snapshot().realtimeQuietCanary).toMatchObject({
       mode: "ROLLED_BACK",
       rollbackReason: expect.stringMatching(/^P95_GROWTH_/u),
     });

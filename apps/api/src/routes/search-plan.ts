@@ -111,7 +111,10 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
           telegramAcceptedAt: { not: null },
         },
         orderBy: { firstSeenAt: "desc" },
-        take: env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
+        take: Math.max(
+          env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
+          env.OLX_CADENCE_CANARY_P99_MIN_SAMPLES,
+        ),
         select: { id: true },
       })).length
       : 0;
@@ -123,6 +126,10 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       olxDiscovery,
       olxCadenceCanary: {
         configured: env.OLX_CADENCE_CANARY_ENABLED,
+        experimentOwner: env.OLX_EXPERIMENT_OWNER,
+        experimentId: monitoringState?.olxCanaryExperimentId ?? null,
+        codeRevision: monitoringState?.olxCanaryCodeRevision ?? null,
+        configHash: monitoringState?.olxCanaryConfigHash ?? null,
         mode: monitoringState?.olxCanaryMode ?? "BASELINE",
         baseIntervalSeconds: env.LIVE_OLX_INTERVAL_SECONDS,
         baseJitterSeconds: env.LIVE_OLX_JITTER_SECONDS,
@@ -132,6 +139,9 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
         qualificationRunsRequired: env.OLX_CADENCE_CANARY_QUALIFICATION_RUNS,
         hotPathSamples: olxHotPathSampleCount,
         hotPathSamplesRequired: env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
+        p95MinimumSamples: env.OLX_CADENCE_CANARY_P95_MIN_SAMPLES,
+        p99SamplesRequired: env.OLX_CADENCE_CANARY_P99_MIN_SAMPLES,
+        p99Ready: olxHotPathSampleCount >= env.OLX_CADENCE_CANARY_P99_MIN_SAMPLES,
         promotionRuns: monitoringState?.olxCanaryRunCount ?? 0,
         promotionRunsRequired: env.OLX_CADENCE_CANARY_PROMOTION_RUNS,
         qualificationMaximumP95Ms: env.OLX_CADENCE_CANARY_QUALIFICATION_MAX_P95_MS,

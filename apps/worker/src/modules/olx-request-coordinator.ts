@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { env } from "../env.js";
 
 export type OlxRequestClass = "REALTIME" | "COVERAGE" | "BACKFILL" | "RECOVERY" | "ENRICHMENT";
@@ -30,6 +31,19 @@ export type OlxRealtimeQuietCanaryMode =
   | "ROLLED_BACK";
 
 export type OlxRealtimeQuietCanarySnapshot = {
+  experimentOwner: "cadence" | "origin" | "none";
+  experimentId: string;
+  codeRevision: string;
+  configHash: string;
+  effectiveConfig: {
+    enabled: boolean;
+    baselineQuietMs: number;
+    candidateQuietMs: number;
+    qualificationRequests: number;
+    evaluationRequests: number;
+    p95GrowthPercent: number;
+    queueDepthLimit: number;
+  };
   mode: OlxRealtimeQuietCanaryMode;
   baselineQuietMs: number;
   candidateQuietMs: number;
@@ -62,6 +76,8 @@ type QueueEntry<T> = {
 
 type RealtimeQuietCanaryOptions = {
   enabled: boolean;
+  experimentOwner: "cadence" | "origin" | "none";
+  codeRevision: string;
   candidateQuietMs: number;
   qualificationRequests: number;
   evaluationRequests: number;
@@ -434,6 +450,11 @@ class RealtimeQuietCanary {
   private readonly baselineSamples: number[] = [];
   private readonly canarySamples: number[] = [];
   private rollbackReason: string | null = null;
+  private readonly experimentOwner: "cadence" | "origin" | "none";
+  private readonly experimentId: string;
+  private readonly codeRevision: string;
+  private readonly configHash: string;
+  private readonly effectiveConfig: OlxRealtimeQuietCanarySnapshot["effectiveConfig"];
 
   constructor(
     private readonly baselineQuietMs: number,
@@ -448,6 +469,24 @@ class RealtimeQuietCanary {
     this.evaluationRequests = Math.max(1, Math.trunc(options?.evaluationRequests ?? 30));
     this.p95GrowthRatio = Math.max(1, (options?.p95GrowthPercent ?? 120) / 100);
     this.queueDepthLimit = Math.max(1, Math.trunc(options?.queueDepthLimit ?? 25));
+    this.experimentOwner = options?.experimentOwner ?? "none";
+    this.codeRevision = options?.codeRevision?.trim() || "unknown";
+    this.effectiveConfig = {
+      enabled,
+      baselineQuietMs,
+      candidateQuietMs: this.candidateQuietMs,
+      qualificationRequests: this.qualificationRequests,
+      evaluationRequests: this.evaluationRequests,
+      p95GrowthPercent: Math.round(this.p95GrowthRatio * 100),
+      queueDepthLimit: this.queueDepthLimit,
+    };
+    const serializedConfig = JSON.stringify(this.effectiveConfig);
+    this.configHash = createHash("sha256").update(serializedConfig).digest("hex");
+    const identityHash = createHash("sha256")
+      .update(`${this.codeRevision}\n${serializedConfig}`)
+      .digest("hex")
+      .slice(0, 12);
+    this.experimentId = `olx-origin-${identityHash}`;
     this.mode = enabled && this.candidateQuietMs < baselineQuietMs ? "QUALIFYING" : "DISABLED";
   }
 
@@ -502,7 +541,12 @@ class RealtimeQuietCanary {
     trimToLast(this.canarySamples, this.evaluationRequests);
     const baselineP95 = percentile95(this.baselineSamples);
     const canaryP95 = percentile95(this.canarySamples);
-    if (baselineP95 !== null && canaryP95 !== null && canaryP95 > baselineP95 * this.p95GrowthRatio) {
+    if (
+      this.canarySamples.length >= this.evaluationRequests
+      && baselineP95 !== null
+      && canaryP95 !== null
+      && canaryP95 > baselineP95 * this.p95GrowthRatio
+    ) {
       this.rollback(`P95_GROWTH_${Math.round(canaryP95)}_VS_${Math.round(baselineP95)}`);
       return;
     }
@@ -516,6 +560,11 @@ class RealtimeQuietCanary {
 
   snapshot(): OlxRealtimeQuietCanarySnapshot {
     return {
+      experimentOwner: this.experimentOwner,
+      experimentId: this.experimentId,
+      codeRevision: this.codeRevision,
+      configHash: this.configHash,
+      effectiveConfig: this.effectiveConfig,
       mode: this.mode,
       baselineQuietMs: this.baselineQuietMs,
       candidateQuietMs: this.candidateQuietMs,
@@ -549,7 +598,10 @@ export const olxRequestCoordinator = new OlxRequestCoordinator({
   backgroundQuietAfterRealtimeMs: env.OLX_BACKGROUND_AFTER_REALTIME_QUIET_MS,
   postFinishQuietMs: OLX_REQUEST_POST_FINISH_QUIET_MS,
   realtimeQuietCanary: {
-    enabled: env.OLX_REALTIME_QUIET_CANARY_ENABLED,
+    enabled: env.OLX_REALTIME_QUIET_CANARY_ENABLED
+      && env.OLX_EXPERIMENT_OWNER === "origin",
+    experimentOwner: env.OLX_EXPERIMENT_OWNER,
+    codeRevision: process.env.AMB_CODE_REVISION ?? "unknown",
     candidateQuietMs: env.OLX_REALTIME_QUIET_CANARY_CANDIDATE_MS,
     qualificationRequests: env.OLX_REALTIME_QUIET_CANARY_QUALIFICATION_REQUESTS,
     evaluationRequests: env.OLX_REALTIME_QUIET_CANARY_EVALUATION_REQUESTS,

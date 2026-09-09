@@ -103,11 +103,13 @@ README и новые defaults говорят `18±3 с`, но production `.env` 
 
 Исправление выполнено: production override приведён к `18±3 с`, минимальная выборка явно установлена в `30`, описание перехода теперь вычисляется из проверенных значений, а генератор запрещает пропуск любого нового `OLX_CADENCE_CANARY_*` из безопасной документации. После изменения прошли полный quality-gate, 399 тестов, production build, dependency audit и extended resilience acceptance. Создана свежая зашифрованная копия БД, выполнен контролируемый SYSTEM-restart. Новый API-процесс подтвердил `20±4 → 18±3`, `24/30` samples и сохранённый безопасный режим `ROLLED_BACK`; OLX, PostgreSQL, Redis, два hot-worker и очереди после restart здоровы.
 
-### P1-2. Canary принял решение на слишком маленьком latency-tail sample
+### P1-2. Canary принял решение на слишком маленьком latency-tail sample — ИСПРАВЛЕНО 2026-09-09
 
 Canary правильно откатился: прежний `15±3 с` дал p95 `4974 ms`, что превысило лимит роста `4631 ms`. Но его `P95_MIN_SAMPLES=10` слишком мал для устойчивого сравнения хвоста. Ошибки/403/429/CAPTCHA должны по-прежнему откатывать немедленно; latency-регрессию разумнее оценивать после 30+ canary runs, а p99 — после 100–200 полных traces.
 
 Дополнительно одновременно существуют cadence-canary и origin quiet-canary (`350 → 150 ms`). Если оба меняют режим в одном окне, причинность ухудшения становится неясной. Эксперименты нужно сериализовать и маркировать `experimentId + commit + effective config`.
+
+Исправление выполнено: p95 cadence-canary теперь влияет на rollback только после 30 canary-проходов, p99 помечается готовым лишь после 100 полных `requestStartedAt → telegramAcceptedAt` трасс, а protection/403/429/CAPTCHA, грязный run, overflow, очередь и единичное превышение жёсткого latency-предела по-прежнему останавливают ускорение немедленно. Общий `OLX_EXPERIMENT_OWNER` разрешает только один эксперимент (`cadence`, `origin` или `none`); default и production принадлежат cadence, поэтому origin quiet-canary отключён. Смена owner, commit или эффективной конфигурации создаёт новый experiment ID, сбрасывает старую выборку и сохраняет в PostgreSQL commit, SHA-256 конфигурации и её безопасный snapshot. Метаданные origin-canary также входят в диагностику каждого OLX run. Такой подход следует правилу Google SRE запускать только один canary одновременно, чтобы не загрязнять сигнал, и модели OpenTelemetry, где deployment environment и версия ресурса являются отдельными атрибутами наблюдаемости.[^10][^11]
 
 ### P1-3. Критический glue-код недостаточно покрыт тестами
 
@@ -339,7 +341,7 @@ Rollback: один маленький commit на seam, легко revert без
 ## 11. Приоритет ближайших работ
 
 1. ~~**Исправить config/docs drift и вернуть полностью зелёный gate.**~~ Выполнено 2026-09-09.
-2. **Дособрать ≥100 complete traces и усилить методику canary.**
+2. ~~**Усилить методику canary и сериализовать эксперименты.**~~ Выполнено 2026-09-09; накопление ≥100 complete traces продолжается автоматически.
 3. **Провести canary только `18±3`, меняя одну переменную.**
 4. **Разобрать DB-tail application spans; не оптимизировать вслепую.**
 5. **Добавить crash/replay/worker E2E в CI.**
@@ -364,3 +366,5 @@ Rollback: один маленький commit на seam, легко revert без
 [^7]: PostgreSQL 18, “auto_explain”: предупреждение о значительном overhead `log_analyze` и per-node timing. https://www.postgresql.org/docs/18/auto-explain.html
 [^8]: BullMQ, “Idempotent jobs”: jobs должны быть идемпотентными и максимально атомарными для безопасных retries. https://docs.bullmq.io/patterns/idempotent-jobs
 [^9]: GitHub, “Secure use reference”: полный commit SHA — immutable способ закрепить Action. https://docs.github.com/en/actions/reference/security/secure-use
+[^10]: Google SRE Workbook, “Canarying Releases”: одновременные canary загрязняют метрики друг друга, поэтому эксперимент следует запускать по одному. https://sre.google/workbook/canarying-releases/
+[^11]: OpenTelemetry Semantic Conventions, “Deployment”: deployment environment и версия/ревизия ресурса должны быть явными атрибутами telemetry. https://opentelemetry.io/docs/specs/semconv/registry/attributes/deployment/

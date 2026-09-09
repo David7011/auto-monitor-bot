@@ -60,6 +60,7 @@ export const env = {
   // The coordinator applies this only to coverage/backfill/recovery/enrichment.
   OLX_BACKGROUND_REQUEST_MIN_INTERVAL_MS: numberEnv("OLX_BACKGROUND_REQUEST_MIN_INTERVAL_MS", 3_500),
   OLX_BACKGROUND_AFTER_REALTIME_QUIET_MS: numberEnv("OLX_BACKGROUND_AFTER_REALTIME_QUIET_MS", 1_000),
+  OLX_EXPERIMENT_OWNER: enumEnv("OLX_EXPERIMENT_OWNER", ["cadence", "origin", "none"] as const, "cadence"),
   // The origin remains serialized. Only consecutive realtime requests may
   // reduce the post-finish floor after a clean, measured qualification window.
   OLX_REALTIME_QUIET_CANARY_ENABLED: booleanEnv("OLX_REALTIME_QUIET_CANARY_ENABLED", true),

@@ -1,4 +1,4 @@
-import { prisma } from "@amb/db";
+import { Prisma, prisma } from "@amb/db";
 import { QUEUE_NAMES } from "@amb/shared";
 import { env } from "../../env.js";
 import { getQueue } from "../../lib/queues.js";
@@ -6,6 +6,10 @@ import {
   decideOlxCadenceCanary,
   type OlxCadenceCanaryDecision,
 } from "./olx-cadence-canary-policy.js";
+import {
+  buildOlxCadenceExperimentDescriptor,
+  isSameOlxCadenceExperiment,
+} from "./olx-cadence-experiment.js";
 
 const PRESSURE_QUEUES = [
   QUEUE_NAMES.COLLECTOR_RUN,
@@ -21,9 +25,54 @@ export async function evaluateOlxCadenceCanary(input: {
   now: Date;
 }): Promise<OlxCadenceCanaryDecision> {
   const state = await prisma.monitoringState.findUniqueOrThrow({ where: { id: "singleton" } });
-  const earliestEvidenceAt = state.olxCanaryStartedAt && state.olxCanaryStartedAt < state.olxCanaryQualificationStartedAt
-    ? state.olxCanaryStartedAt
-    : state.olxCanaryQualificationStartedAt;
+  const exactBaselineConfigured = input.baseIntervalSeconds === env.LIVE_OLX_INTERVAL_SECONDS
+    && input.baseJitterSeconds === env.LIVE_OLX_JITTER_SECONDS;
+  const experiment = buildOlxCadenceExperimentDescriptor({
+    codeRevision: process.env.AMB_CODE_REVISION,
+    startedAt: input.now,
+    config: {
+      owner: env.OLX_EXPERIMENT_OWNER,
+      enabled: env.OLX_CADENCE_CANARY_ENABLED
+        && env.OLX_EXPERIMENT_OWNER === "cadence"
+        && exactBaselineConfigured,
+      baseIntervalSeconds: input.baseIntervalSeconds,
+      baseJitterSeconds: input.baseJitterSeconds,
+      canaryIntervalSeconds: env.OLX_CADENCE_CANARY_INTERVAL_SECONDS,
+      canaryJitterSeconds: env.OLX_CADENCE_CANARY_JITTER_SECONDS,
+      qualificationRuns: env.OLX_CADENCE_CANARY_QUALIFICATION_RUNS,
+      promotionRuns: env.OLX_CADENCE_CANARY_PROMOTION_RUNS,
+      hotPathMinimumSamples: env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
+      p95MinimumSamples: env.OLX_CADENCE_CANARY_P95_MIN_SAMPLES,
+      p99MinimumSamples: env.OLX_CADENCE_CANARY_P99_MIN_SAMPLES,
+      qualificationMaximumP95Ms: env.OLX_CADENCE_CANARY_QUALIFICATION_MAX_P95_MS,
+      maximumP95Ms: env.OLX_CADENCE_CANARY_MAX_P95_MS,
+      p95GrowthPercent: env.OLX_CADENCE_CANARY_P95_GROWTH_PERCENT,
+      queueDepthLimit: env.OLX_CADENCE_CANARY_QUEUE_DEPTH_LIMIT,
+    },
+  });
+  const experimentChanged = !isSameOlxCadenceExperiment({
+    experimentId: state.olxCanaryExperimentId,
+    codeRevision: state.olxCanaryCodeRevision,
+    configHash: state.olxCanaryConfigHash,
+  }, experiment);
+  const policyState = experimentChanged
+    ? {
+        mode: "BASELINE" as const,
+        qualificationStartedAt: input.now,
+        canaryStartedAt: null,
+        baselineP95Ms: null,
+        rollbackReason: null,
+      }
+    : {
+        mode: state.olxCanaryMode,
+        qualificationStartedAt: state.olxCanaryQualificationStartedAt,
+        canaryStartedAt: state.olxCanaryStartedAt,
+        baselineP95Ms: state.olxCanaryBaselineP95Ms,
+        rollbackReason: state.olxCanaryRollbackReason,
+      };
+  const earliestEvidenceAt = policyState.canaryStartedAt && policyState.canaryStartedAt < policyState.qualificationStartedAt
+    ? policyState.canaryStartedAt
+    : policyState.qualificationStartedAt;
   const evidenceLimit = Math.max(
     env.OLX_CADENCE_CANARY_QUALIFICATION_RUNS,
     env.OLX_CADENCE_CANARY_PROMOTION_RUNS,
@@ -53,7 +102,7 @@ export async function evaluateOlxCadenceCanary(input: {
       where: {
         source: "OLX",
         discoveryLane: "REALTIME",
-        firstSeenAt: { gte: state.olxCanaryQualificationStartedAt },
+        firstSeenAt: { gte: policyState.qualificationStartedAt },
         requestStartedAt: { not: null },
         firstByteAt: { not: null },
         bodyReceivedAt: { not: null },
@@ -64,24 +113,21 @@ export async function evaluateOlxCadenceCanary(input: {
         telegramAcceptedAt: { not: null },
       },
       orderBy: { firstSeenAt: "desc" },
-      take: env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
+      take: Math.max(
+        env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
+        env.OLX_CADENCE_CANARY_P99_MIN_SAMPLES,
+      ),
       select: { id: true },
     }),
     hotPathQueueOverflow(env.OLX_CADENCE_CANARY_QUEUE_DEPTH_LIMIT),
   ]);
   const hotPathSampleCount = hotPathSamples.length;
-  const exactBaselineConfigured = input.baseIntervalSeconds === env.LIVE_OLX_INTERVAL_SECONDS
-    && input.baseJitterSeconds === env.LIVE_OLX_JITTER_SECONDS;
   const decision = decideOlxCadenceCanary({
-    state: {
-      mode: state.olxCanaryMode,
-      qualificationStartedAt: state.olxCanaryQualificationStartedAt,
-      canaryStartedAt: state.olxCanaryStartedAt,
-      baselineP95Ms: state.olxCanaryBaselineP95Ms,
-      rollbackReason: state.olxCanaryRollbackReason,
-    },
+    state: policyState,
     config: {
-      enabled: env.OLX_CADENCE_CANARY_ENABLED && exactBaselineConfigured,
+      enabled: env.OLX_CADENCE_CANARY_ENABLED
+        && env.OLX_EXPERIMENT_OWNER === "cadence"
+        && exactBaselineConfigured,
       qualificationRuns: env.OLX_CADENCE_CANARY_QUALIFICATION_RUNS,
       promotionRuns: env.OLX_CADENCE_CANARY_PROMOTION_RUNS,
       hotPathMinimumSamples: env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
@@ -102,7 +148,8 @@ export async function evaluateOlxCadenceCanary(input: {
   });
 
   if (
-    state.olxCanaryMode !== decision.mode
+    experimentChanged
+    || state.olxCanaryMode !== decision.mode
     || state.olxCanaryQualificationStartedAt.getTime() !== decision.qualificationStartedAt.getTime()
     || nullableDateMs(state.olxCanaryStartedAt) !== nullableDateMs(decision.canaryStartedAt)
     || state.olxCanaryBaselineP95Ms !== decision.baselineP95Ms
@@ -124,7 +171,11 @@ export async function evaluateOlxCadenceCanary(input: {
         olxCanaryRunCount: decision.canaryRunCount,
         olxCanaryRollbackReason: decision.rollbackReason,
         olxCanaryLastEvaluatedRunId: decision.lastEvaluatedRunId,
-        ...(decision.transition !== "NONE" ? { olxCanaryLastTransitionAt: input.now } : {}),
+        olxCanaryExperimentId: experimentChanged ? experiment.experimentId : state.olxCanaryExperimentId,
+        olxCanaryCodeRevision: experiment.codeRevision,
+        olxCanaryConfigHash: experiment.configHash,
+        olxCanaryConfigSnapshot: experiment.configSnapshot as Prisma.InputJsonValue,
+        ...(experimentChanged || decision.transition !== "NONE" ? { olxCanaryLastTransitionAt: input.now } : {}),
       },
     });
   }

@@ -380,6 +380,10 @@ export type SearchPlanResponse<DateValue = string> = {
   };
   olxCadenceCanary: {
     configured: boolean;
+    experimentOwner: "cadence" | "origin" | "none";
+    experimentId: string | null;
+    codeRevision: string | null;
+    configHash: string | null;
     mode: "BASELINE" | "CANARY" | "PROMOTED" | "ROLLED_BACK" | "DISABLED";
     baseIntervalSeconds: number;
     baseJitterSeconds: number;
@@ -389,6 +393,9 @@ export type SearchPlanResponse<DateValue = string> = {
     qualificationRunsRequired: number;
     hotPathSamples: number;
     hotPathSamplesRequired: number;
+    p95MinimumSamples: number;
+    p99SamplesRequired: number;
+    p99Ready: boolean;
     promotionRuns: number;
     promotionRunsRequired: number;
     qualificationMaximumP95Ms: number;

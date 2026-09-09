@@ -12,6 +12,7 @@ const endMarker = "<!-- runtime-config:end -->";
 const settings = [
   ["OLX realtime", "LIVE_OLX_INTERVAL_SECONDS", "Интервал быстрого OLX-прохода", [["apps/api/src/env.ts", "number"]]],
   ["OLX realtime", "LIVE_OLX_JITTER_SECONDS", "Случайный разброс быстрого прохода", [["apps/api/src/env.ts", "number"]]],
+  ["OLX experiment", "OLX_EXPERIMENT_OWNER", "Единственный активный OLX-эксперимент: cadence, origin или none", [["apps/api/src/env.ts", "enum"], ["apps/worker/src/env.ts", "enum"]]],
   [
     "OLX canary",
     "OLX_CADENCE_CANARY_ENABLED",
@@ -25,7 +26,8 @@ const settings = [
   ["OLX canary", "OLX_CADENCE_CANARY_JITTER_SECONDS", "Jitter экспериментального realtime", [["apps/api/src/env.ts", "number"]]],
   ["OLX canary", "OLX_CADENCE_CANARY_QUALIFICATION_MAX_P95_MS", "Максимальный baseline p95 для допуска", [["apps/api/src/env.ts", "number"]]],
   ["OLX canary", "OLX_CADENCE_CANARY_MAX_P95_MS", "Жёсткий latency rollback-порог", [["apps/api/src/env.ts", "number"]]],
-  ["OLX canary", "OLX_CADENCE_CANARY_P95_MIN_SAMPLES", "Минимальная canary-выборка для p95", [["apps/api/src/env.ts", "number"]]],
+  ["OLX canary", "OLX_CADENCE_CANARY_P95_MIN_SAMPLES", "Минимум canary-проходов до решения по p95", [["apps/api/src/env.ts", "number"]]],
+  ["OLX canary", "OLX_CADENCE_CANARY_P99_MIN_SAMPLES", "Полных live-трасс до публикации достоверного p99", [["apps/api/src/env.ts", "number"]]],
   ["OLX canary", "OLX_CADENCE_CANARY_P95_GROWTH_PERCENT", "Допустимый рост p95 к baseline, процентов", [["apps/api/src/env.ts", "number"]]],
   ["OLX canary", "OLX_CADENCE_CANARY_QUEUE_DEPTH_LIMIT", "Максимальная hot-queue глубина", [["apps/api/src/env.ts", "number"]]],
   ["OLX realtime", "OLX_REALTIME_RECOVERY_RAMP_SECONDS", "Плавный возврат скорости после защиты", [["apps/api/src/env.ts", "number"]]],
@@ -200,7 +202,9 @@ for (const [, key, , sources] of settings) {
       source = await readFile(path.join(root, relativeFile), "utf8");
       sourceCache.set(relativeFile, source);
     }
-    const fallback = sourceFallback(source, key, kind, relativeFile);
+    const fallback = kind === "enum"
+      ? enumFallback(source, key, relativeFile)
+      : sourceFallback(source, key, kind, relativeFile);
     if (fallback !== documented) {
       throw new Error(`${key} drift: .env.example=${documented}, ${relativeFile} fallback=${fallback}`);
     }
