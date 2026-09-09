@@ -128,6 +128,8 @@ Canary правильно откатился: прежний `15±3 с` дал p
 
 Windows quality job теперь устанавливает только закреплённые PostgreSQL `18.6` и Redis `8.8.0` с уже существующей SHA-256-проверкой и запускает `acceptance:extended`. Это переносит crash/replay pipeline acceptance из ручной проверки в обязательный CI. Тесты проверяют идемпотентность и короткие атомарные участки, поскольку BullMQ прямо требует идемпотентных jobs для безопасных retries, а Prisma рекомендует проектировать идемпотентные API и транзакции.[^8][^13] Внешние Telegram/OLX вызовы не помещались внутрь DB transaction.
 
+Первый GitHub-run выявил скрытый дефект: `actions/checkout` содержал валидный 40-символьный SHA, принадлежавший другому Action, поэтому все четыре job завершались до checkout. Pin исправлен на официальный immutable commit `actions/checkout` v4.2.2; локальная policy теперь проверяет не только форму SHA, но и точное соответствие каждого Action заранее рассмотренному репозиторию и revision.[^14]
+
 ### P1-4. Резервные копии имеют общую точку отказа с production
 
 Backup шифруется с authenticated AES-256-GCM, проверяется через `pg_restore --list`, хранится 14 дней, а отдельная задача выполняет restore drill. Это сильная реализация. Но `BACKUP_MIRROR_PATH` пуст: production БД и все автоматические копии находятся на одном SSD. Поломка/кража ноутбука или шифрование диска уничтожит обе стороны. CISA рекомендует offline/off-device encrypted backups и регулярные проверки восстановления.[^3]
@@ -374,3 +376,4 @@ Rollback: один маленький commit на seam, легко revert без
 [^11]: OpenTelemetry Semantic Conventions, “Deployment”: deployment environment и версия/ревизия ресурса должны быть явными атрибутами telemetry. https://opentelemetry.io/docs/specs/semconv/registry/attributes/deployment/
 [^12]: Vitest, “Coverage configuration”: глобальные и glob/file-specific coverage thresholds. https://vitest.dev/config/coverage.html
 [^13]: Prisma, “Transactions and batch queries”: рекомендации по коротким транзакциям и проектированию идемпотентных API. https://docs.prisma.io/docs/orm/prisma-client/queries/transactions
+[^14]: actions/checkout, release v4.2.2: официальный release/commit для закрепления checkout. https://github.com/actions/checkout/releases/tag/v4.2.2

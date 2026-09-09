@@ -20,8 +20,21 @@ assert.doesNotMatch(workflow, /android|gradle|mobile-android|\.apk|\.aab/i);
 
 const externalActions = [...workflow.matchAll(/^\s*-\s+uses:\s*([^\s#]+)/gm)].map((match) => match[1]);
 assert.ok(externalActions.length > 0, "CI workflow must contain external actions");
+const approvedActionPins = new Map([
+  ["actions/checkout", "11bd71901bbe5b1630ceea73d27597364c9af683"],
+  ["pnpm/action-setup", "f40ffcd9367d9f12939873eb1018b921a783ffaa"],
+  ["actions/setup-node", "49933ea5288caeca8642d1e84afbd3f7d6820020"],
+  ["github/codeql-action/init", "ddf5ce7296213f5548c91e2dd19df2d77d2b2d66"],
+  ["github/codeql-action/analyze", "ddf5ce7296213f5548c91e2dd19df2d77d2b2d66"],
+]);
 for (const action of externalActions) {
   assert.match(action, /^[^@]+@[0-9a-f]{40}$/, `Action must be pinned to a full commit SHA: ${action}`);
+  const [name, revision] = action.split("@");
+  assert.equal(
+    revision,
+    approvedActionPins.get(name),
+    `Action pin is not the reviewed revision for ${name}`,
+  );
 }
 
 assert.match(workflow, /^permissions:\s*\n\s+contents:\s*read\s*$/m);
