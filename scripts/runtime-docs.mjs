@@ -12,9 +12,15 @@ const endMarker = "<!-- runtime-config:end -->";
 const settings = [
   ["OLX realtime", "LIVE_OLX_INTERVAL_SECONDS", "Интервал быстрого OLX-прохода", [["apps/api/src/env.ts", "number"]]],
   ["OLX realtime", "LIVE_OLX_JITTER_SECONDS", "Случайный разброс быстрого прохода", [["apps/api/src/env.ts", "number"]]],
-  ["OLX canary", "OLX_CADENCE_CANARY_ENABLED", "Автоматический переход 20±4 → 15±3", [["apps/api/src/env.ts", "boolean"]]],
+  [
+    "OLX canary",
+    "OLX_CADENCE_CANARY_ENABLED",
+    (values) => `Автоматический осторожный переход ${values.get("LIVE_OLX_INTERVAL_SECONDS")}±${values.get("LIVE_OLX_JITTER_SECONDS")} → ${values.get("OLX_CADENCE_CANARY_INTERVAL_SECONDS")}±${values.get("OLX_CADENCE_CANARY_JITTER_SECONDS")}`,
+    [["apps/api/src/env.ts", "boolean"]],
+  ],
   ["OLX canary", "OLX_CADENCE_CANARY_QUALIFICATION_RUNS", "Чистых baseline-проходов до canary", [["apps/api/src/env.ts", "number"]]],
   ["OLX canary", "OLX_CADENCE_CANARY_PROMOTION_RUNS", "Чистых canary-проходов до promotion", [["apps/api/src/env.ts", "number"]]],
+  ["OLX canary", "OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES", "Полных live-путей до допуска к canary", [["apps/api/src/env.ts", "number"]]],
   ["OLX canary", "OLX_CADENCE_CANARY_INTERVAL_SECONDS", "Интервал экспериментального realtime", [["apps/api/src/env.ts", "number"]]],
   ["OLX canary", "OLX_CADENCE_CANARY_JITTER_SECONDS", "Jitter экспериментального realtime", [["apps/api/src/env.ts", "number"]]],
   ["OLX canary", "OLX_CADENCE_CANARY_QUALIFICATION_MAX_P95_MS", "Максимальный baseline p95 для допуска", [["apps/api/src/env.ts", "number"]]],
@@ -142,6 +148,23 @@ async function validateCompleteRuntimeEnv(exampleValues) {
   return seen;
 }
 
+function validateSettingsCoverage(completeRuntimeEnv) {
+  const documentedKeys = new Set();
+  for (const [, key] of settings) {
+    if (documentedKeys.has(key)) throw new Error(`Duplicate runtime documentation setting: ${key}`);
+    documentedKeys.add(key);
+  }
+
+  // Canary configuration directly changes production request cadence. Keep its
+  // complete effective surface visible so a new safety gate cannot silently be
+  // added to code while being omitted from operator documentation.
+  for (const key of completeRuntimeEnv.keys()) {
+    if (key.startsWith("OLX_CADENCE_CANARY_") && !documentedKeys.has(key)) {
+      throw new Error(`${key} is safety-critical but missing from runtime documentation settings`);
+    }
+  }
+}
+
 function render(values, heading) {
   const lines = [
     heading,
@@ -150,7 +173,8 @@ function render(values, heading) {
     "|---|---|---:|---|",
   ];
   for (const [group, key, description] of settings) {
-    lines.push(`| ${group} | \`${key}\` | \`${values.get(key) ?? "—"}\` | ${description} |`);
+    const renderedDescription = typeof description === "function" ? description(values) : description;
+    lines.push(`| ${group} | \`${key}\` | \`${values.get(key) ?? "—"}\` | ${renderedDescription} |`);
   }
   return lines.join("\n");
 }
@@ -165,6 +189,7 @@ function replaceGeneratedBlock(readme, generated) {
 const exampleText = await readFile(examplePath, "utf8");
 const exampleValues = parseEnv(exampleText);
 const completeRuntimeEnv = await validateCompleteRuntimeEnv(exampleValues);
+validateSettingsCoverage(completeRuntimeEnv);
 const sourceCache = new Map();
 for (const [, key, , sources] of settings) {
   const documented = exampleValues.get(key);
