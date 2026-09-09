@@ -172,7 +172,9 @@ All 81 unit/integration test files passed (397 tests), and workspace type checki
 
 ## Remaining risks and acceptance gates
 
-1. Fresh body/parse stage percentiles do not exist until the migration is deployed and new observations accumulate.
+The candidate was deployed on the HP at `2026-09-09T12:04:57Z` after creating encrypted backup `.runtime/backups/database-20260909-150411.ambbak`. Migration `20260909_hot_path_stage_timestamps` applied successfully. The first eight completed OLX realtime runs were all successful: duration p50 2,251 ms and p95/p99 3,444 ms, with zero challenge/rate-limit/access-denied responses and empty queues. This is encouraging but far below the sample needed for a production latency conclusion.
+
+1. No new OLX candidate appeared in the initial post-deployment window, so fresh body/parse and full Telegram stage percentiles do not yet exist. The isolated end-to-end test proves the code path, but the live production AFTER cohort still needs to accumulate naturally.
 2. The production publication timestamp can be coarse or delayed by OLX, so it must not be presented as pure scanner latency.
 3. The 20-second configured OLX interval plus 4-second jitter is currently conservative. A previous 15-second canary regressed p95; do not retry until the split HTTP/parse metrics and challenge counters are stable.
 4. RST remains externally challenged and must stay isolated. No CAPTCHA-solving or protection bypass belongs in this project.
