@@ -26,6 +26,14 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check:ci
+      - name: Install pinned PostgreSQL 18.6 test runtime
+        shell: powershell
+        run: ./scripts/install-postgresql-windows.ps1
+      - name: Install pinned Redis 8.8.0 test runtime
+        shell: powershell
+        run: ./scripts/install-redis-windows.ps1
+      - name: Crash/replay pipeline acceptance
+        run: pnpm acceptance:extended
       - run: pnpm audit --prod --audit-level high
 
   migration-smoke:

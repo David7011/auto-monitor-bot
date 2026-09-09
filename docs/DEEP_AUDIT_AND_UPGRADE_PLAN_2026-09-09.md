@@ -40,7 +40,7 @@ Rollback: tag `pre-hotpath-audit-20260909` и branch `rollback/pre-hotpath-audit
 | Дедупликация/exactly-once | 8,2/10 | Хорошая локальная защита, но остаётся неустранимое внешнее окно неоднозначного ответа Telegram |
 | Автовосстановление | 8,4/10 | Supervisor, watchdog, два hot-worker, задачи SYSTEM, свежие heartbeat |
 | Наблюдаемость | 7,2/10 | Стадии hot-path уже измеряются; p99 пока статистически слаб, а config truth разошёлся с README |
-| Тестирование/CI | 6,5/10 | 399 тестов проходят, но критический glue-код покрыт недостаточно и extended resilience не входит в CI |
+| Тестирование/CI | 8,2/10 | 430 тестов проходят; критические orchestration-модули имеют отдельные regression-пороги, а extended resilience входит в Windows CI |
 | Безопасность | 8,0/10 | Локальные bind, ACL, Defender, зашифрованные backups, pinned Actions; BitLocker не удалось подтвердить без elevation |
 | Резервирование/DR | 6,0/10 | Backup и restore drill есть, но зеркало не настроено — SSD остаётся общей точкой отказа |
 | Вторичные источники | 5,5/10 | CARS_UA здоров; AUTO.RIA/AUTOMOTO ограничены семантикой, RST остановлен CAPTCHA |
@@ -111,9 +111,9 @@ Canary правильно откатился: прежний `15±3 с` дал p
 
 Исправление выполнено: p95 cadence-canary теперь влияет на rollback только после 30 canary-проходов, p99 помечается готовым лишь после 100 полных `requestStartedAt → telegramAcceptedAt` трасс, а protection/403/429/CAPTCHA, грязный run, overflow, очередь и единичное превышение жёсткого latency-предела по-прежнему останавливают ускорение немедленно. Общий `OLX_EXPERIMENT_OWNER` разрешает только один эксперимент (`cadence`, `origin` или `none`); default и production принадлежат cadence, поэтому origin quiet-canary отключён. Смена owner, commit или эффективной конфигурации создаёт новый experiment ID, сбрасывает старую выборку и сохраняет в PostgreSQL commit, SHA-256 конфигурации и её безопасный snapshot. Метаданные origin-canary также входят в диагностику каждого OLX run. Такой подход следует правилу Google SRE запускать только один canary одновременно, чтобы не загрязнять сигнал, и модели OpenTelemetry, где deployment environment и версия ресурса являются отдельными атрибутами наблюдаемости.[^10][^11]
 
-### P1-3. Критический glue-код недостаточно покрыт тестами
+### P1-3. Критический glue-код недостаточно покрыт тестами — ИСПРАВЛЕНО 2026-09-09
 
-Все 399 unit-тестов проходят, production dependency audit чист. Однако суммарное statement/line coverage около `40,47%`, а самые опасные side-effect/orchestration-модули покрыты слабо:
+До исправления проходили 403 теста, однако суммарное statement/line coverage составляло около `40,57%`, а самые опасные side-effect/orchestration-модули покрывались слабо:
 
 - `collector-run.ts` — 0%;
 - `listing-detected.ts` — около 4,6%;
@@ -122,7 +122,11 @@ Canary правильно откатился: прежний `15±3 с` дал p
 - Telegram control bot/status и значительная часть API routes — низкое покрытие;
 - OLX collector — около 55%, при этом `olx-feed` и request coordinator покрыты заметно лучше.
 
-CI проверяет Windows quality, migrations, dashboard E2E и CodeQL, но не запускает полный `acceptance:extended`, worker pipeline E2E, failover hot-worker и crash/replay matrix. Риск здесь не в алгоритмах, а в соединяющем их коде.
+Исправление выполнено без архитектурного rewrite: добавлены 27 hermetic-тестов критического glue-кода, включая durable journal до Redis claim, receipt-aware exactly-once, освобождение lease после ошибок, replay после сбоя, cooling/lock-collision collector-run, optional enrichment isolation, API auth/CORS и reset/identity cadence-canary. Для API выделен минимальный testability seam `buildApiApp()`; production entrypoint сохранён отдельно и проверяется build/runtime gate.
+
+Теперь проходят **430 тестов в 89 файлах**. Общее statement/line coverage выросло до `45,19%`; отдельно зафиксированы: `listing-detected` `75,57%`, `observation-replay` `90,69%`, `listing-enrich` `100%`, API `server` `78,94%`, `collector-run` `22,24%`, cadence-canary orchestration `92,39%`. Для этих файлов введены собственные минимальные thresholds, а общий floor поднят с `25%` до `40%` по statements/lines и с `40%` до `50%` по functions. Порог не подгоняется к 100%: он оставляет небольшой запас, но не позволит незаметно потерять доказанные сценарии. Vitest поддерживает glob/file-specific thresholds именно для такого контроля.[^12]
+
+Windows quality job теперь устанавливает только закреплённые PostgreSQL `18.6` и Redis `8.8.0` с уже существующей SHA-256-проверкой и запускает `acceptance:extended`. Это переносит crash/replay pipeline acceptance из ручной проверки в обязательный CI. Тесты проверяют идемпотентность и короткие атомарные участки, поскольку BullMQ прямо требует идемпотентных jobs для безопасных retries, а Prisma рекомендует проектировать идемпотентные API и транзакции.[^8][^13] Внешние Telegram/OLX вызовы не помещались внутрь DB transaction.
 
 ### P1-4. Резервные копии имеют общую точку отказа с production
 
@@ -344,7 +348,7 @@ Rollback: один маленький commit на seam, легко revert без
 2. ~~**Усилить методику canary и сериализовать эксперименты.**~~ Выполнено 2026-09-09; накопление ≥100 complete traces продолжается автоматически.
 3. **Провести canary только `18±3`, меняя одну переменную.**
 4. **Разобрать DB-tail application spans; не оптимизировать вслепую.**
-5. **Добавить crash/replay/worker E2E в CI.**
+5. ~~**Добавить crash/replay/worker E2E в CI.**~~ Выполнено 2026-09-09: critical glue matrix, file-specific coverage gates и `acceptance:extended` в Windows CI.
 6. **Создать независимую encrypted backup-копию и внешний dead-man monitor.**
 7. **Уточнить listing-vs-vehicle dedup semantics.**
 8. Затем — retention capacity, log caps, seam extraction и вторичные источники.
@@ -368,3 +372,5 @@ Rollback: один маленький commit на seam, легко revert без
 [^9]: GitHub, “Secure use reference”: полный commit SHA — immutable способ закрепить Action. https://docs.github.com/en/actions/reference/security/secure-use
 [^10]: Google SRE Workbook, “Canarying Releases”: одновременные canary загрязняют метрики друг друга, поэтому эксперимент следует запускать по одному. https://sre.google/workbook/canarying-releases/
 [^11]: OpenTelemetry Semantic Conventions, “Deployment”: deployment environment и версия/ревизия ресурса должны быть явными атрибутами telemetry. https://opentelemetry.io/docs/specs/semconv/registry/attributes/deployment/
+[^12]: Vitest, “Coverage configuration”: глобальные и glob/file-specific coverage thresholds. https://vitest.dev/config/coverage.html
+[^13]: Prisma, “Transactions and batch queries”: рекомендации по коротким транзакциям и проектированию идемпотентных API. https://docs.prisma.io/docs/orm/prisma-client/queries/transactions

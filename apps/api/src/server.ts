@@ -1,6 +1,8 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { timingSafeEqual } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { env } from "./env.js";
 import { monitoringRoutes } from "./routes/monitoring.js";
 import { sourcesRoutes } from "./routes/sources.js";
@@ -15,60 +17,75 @@ import { orchestrator } from "./modules/monitoring/orchestrator.js";
 import { startTelegramControlBot, stopTelegramControlBot } from "./modules/telegram-control-bot.js";
 import { closeQueues } from "./lib/queues.js";
 
-const app = Fastify({ logger: { level: "info" } });
+export async function buildApiApp(options: { logger?: boolean } = {}) {
+  const app = Fastify({ logger: options.logger === false ? false : { level: "info" } });
+  const allowedOrigins = new Set([env.DASHBOARD_ORIGIN]);
 
-const allowedOrigins = new Set([env.DASHBOARD_ORIGIN]);
+  await app.register(cors, {
+    origin: (origin, callback) => {
+      callback(null, !origin || allowedOrigins.has(origin));
+    },
+    allowedHeaders: ["content-type", "authorization", "x-local-api-token"],
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+  });
 
-await app.register(cors, {
-  origin: (origin, callback) => {
-    callback(null, !origin || allowedOrigins.has(origin));
-  },
-  allowedHeaders: ["content-type", "authorization", "x-local-api-token"],
-  methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
-});
+  app.addHook("preHandler", async (req, reply) => {
+    if (!isProtectedLocalRoute(req.method, req.url)) return;
+    if (!env.LOCAL_API_TOKEN) {
+      return reply.code(503).send({ error: "LOCAL_API_TOKEN is not configured" });
+    }
+    const token = bearerToken(req.headers.authorization) ?? stringHeader(req.headers["x-local-api-token"]);
+    if (!safeEqual(token, env.LOCAL_API_TOKEN)) {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+  });
 
-app.addHook("preHandler", async (req, reply) => {
-  if (!isProtectedLocalRoute(req.method, req.url)) return;
-  if (!env.LOCAL_API_TOKEN) {
-    return reply.code(503).send({ error: "LOCAL_API_TOKEN is not configured" });
-  }
-  const token = bearerToken(req.headers.authorization) ?? stringHeader(req.headers["x-local-api-token"]);
-  if (!safeEqual(token, env.LOCAL_API_TOKEN)) {
-    return reply.code(401).send({ error: "Unauthorized" });
-  }
-});
+  await app.register(monitoringRoutes);
+  await app.register(sourcesRoutes);
+  await app.register(filtersRoutes);
+  await app.register(listingsRoutes);
+  await app.register(vehicleTaxonomyRoutes);
+  await app.register(systemRoutes);
+  await app.register(searchPlanRoutes);
+  await app.register(dashboardAuthRoutes);
+  await app.register(observationsRoutes);
+  return app;
+}
 
-await app.register(monitoringRoutes);
-await app.register(sourcesRoutes);
-await app.register(filtersRoutes);
-await app.register(listingsRoutes);
-await app.register(vehicleTaxonomyRoutes);
-await app.register(systemRoutes);
-await app.register(searchPlanRoutes);
-await app.register(dashboardAuthRoutes);
-await app.register(observationsRoutes);
+export async function startApiServer(): Promise<void> {
+  const app = await buildApiApp();
+  const shutdown = async (): Promise<void> => {
+    try {
+      stopTelegramControlBot();
+      await closeQueues();
+      await app.close();
+    } finally {
+      process.exit(0);
+    }
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 
-async function shutdown(): Promise<void> {
   try {
-    stopTelegramControlBot();
-    await closeQueues();
-    await app.close();
-  } finally {
-    process.exit(0);
+    await app.listen({ port: env.API_PORT, host: env.API_HOST });
+    console.log(`[api] listening on http://${env.API_HOST}:${env.API_PORT}`);
+    await orchestrator.resumeIfRunning();
+    startTelegramControlBot();
+  } catch (err) {
+    app.log.error(err);
+    process.exit(1);
   }
 }
 
-process.on("SIGINT", () => void shutdown());
-process.on("SIGTERM", () => void shutdown());
+if (isDirectExecution()) await startApiServer();
 
-try {
-  await app.listen({ port: env.API_PORT, host: env.API_HOST });
-  console.log(`[api] listening on http://${env.API_HOST}:${env.API_PORT}`);
-  await orchestrator.resumeIfRunning();
-  startTelegramControlBot();
-} catch (err) {
-  app.log.error(err);
-  process.exit(1);
+function isDirectExecution(): boolean {
+  if (!process.argv[1]) return false;
+  const entry = path.resolve(process.argv[1]);
+  const current = path.resolve(fileURLToPath(import.meta.url));
+  return process.platform === "win32"
+    ? entry.toLowerCase() === current.toLowerCase()
+    : entry === current;
 }
 
 function isProtectedLocalRoute(method: string, url: string): boolean {
