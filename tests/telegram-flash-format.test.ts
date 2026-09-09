@@ -29,6 +29,13 @@ function renderedLength(value: string): number {
 }
 
 describe("Telegram flash bundle formatting", () => {
+  it("keeps electronics original currency and provisional warning in the first flash", () => {
+    const text = telegramFlashBundleText([{ ...listing(1), categoryKey: "electronics.laptop",
+      priceNormalized: 450, priceOriginal: 18000, currencyOriginal: "UAH", provisionalReasons: ["RAM unknown"] }]);
+    expect(text).toContain("18000 UAH");
+    expect(text).not.toContain("450 $");
+    expect(text).toContain("характеристики не подтверждены");
+  });
   it("puts all twenty links into one compact Telegram-safe HTML message", () => {
     const text = telegramFlashBundleText(Array.from({ length: 20 }, (_, index) => listing(index + 1)));
 

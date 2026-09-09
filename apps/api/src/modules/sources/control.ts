@@ -245,5 +245,5 @@ function manualCollectorJobId(source: string, dedupSeconds: number): string {
 }
 
 function configuredBulkRealSources(): ListingSource[] {
-  return env.AUTO_RIA_API_KEY ? ["AUTO_RIA", ...BULK_REAL_SOURCES] : [...BULK_REAL_SOURCES];
+  return [...BULK_REAL_SOURCES, "AUTO_RIA"];
 }

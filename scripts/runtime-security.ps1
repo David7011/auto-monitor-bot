@@ -160,7 +160,10 @@ function Get-AmbTaskSecurityFindings {
   )
 
   $findings = [Collections.Generic.List[string]]::new()
-  if (!(Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return $findings }
+  if (!(Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) {
+    $findings.Add("ScheduledTasks module is unavailable; SYSTEM task definitions cannot be verified")
+    return $findings
+  }
 
   $expected = [ordered]@{
     "Auto Monitor Bot" = "scripts\supervisor.cmd"
@@ -171,10 +174,77 @@ function Get-AmbTaskSecurityFindings {
   $expectedCmd = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot "System32\cmd.exe"))
 
   foreach ($entry in $expected.GetEnumerator()) {
-    $task = Get-ScheduledTask -TaskName $entry.Key -ErrorAction SilentlyContinue
-    if (!$task) { continue }
+    try {
+      $task = Get-ScheduledTask -TaskName $entry.Key -ErrorAction Stop
+    } catch {
+      $findings.Add("scheduled task '$($entry.Key)' cannot be inspected: $($_.Exception.Message)")
+      continue
+    }
+    if (!$task) {
+      $findings.Add("required scheduled task is missing: '$($entry.Key)'")
+      continue
+    }
+    if ($task.TaskPath -ne "\") {
+      $findings.Add("scheduled task '$($entry.Key)' is registered outside the root task folder")
+    }
+    if ($task.State -eq "Disabled") {
+      $findings.Add("scheduled task '$($entry.Key)' is disabled")
+    }
     if ($task.Principal.UserId -notin @("SYSTEM", "S-1-5-18")) {
       $findings.Add("scheduled task '$($entry.Key)' no longer runs as SYSTEM")
+    }
+    if ([string]$task.Principal.LogonType -ne "ServiceAccount") {
+      $findings.Add("scheduled task '$($entry.Key)' does not use ServiceAccount logon")
+    }
+    if ([string]$task.Principal.RunLevel -ne "Highest") {
+      $findings.Add("scheduled task '$($entry.Key)' does not request the highest run level")
+    }
+    if ([string]$task.Settings.MultipleInstances -ne "IgnoreNew") {
+      $findings.Add("scheduled task '$($entry.Key)' does not reject duplicate instances")
+    }
+    if ([string]$task.Settings.ExecutionTimeLimit -ne "PT0S") {
+      $findings.Add("scheduled task '$($entry.Key)' has an unexpected execution time limit")
+    }
+    if ($task.Settings.DisallowStartIfOnBatteries -or $task.Settings.StopIfGoingOnBatteries) {
+      $findings.Add("scheduled task '$($entry.Key)' is not configured for uninterrupted battery operation")
+    }
+    if (!$task.Settings.StartWhenAvailable -or [int]$task.Settings.RestartCount -lt 3 -or
+        [string]$task.Settings.RestartInterval -ne "PT1M") {
+      $findings.Add("scheduled task '$($entry.Key)' recovery settings are weaker than required")
+    }
+
+    $triggers = @($task.Triggers)
+    if ($triggers.Count -eq 0 -or @($triggers | Where-Object { !$_.Enabled }).Count -gt 0) {
+      $findings.Add("scheduled task '$($entry.Key)' has missing or disabled triggers")
+    } else {
+      $triggerTypes = @($triggers | ForEach-Object { $_.CimClass.CimClassName })
+      switch ($entry.Key) {
+        "Auto Monitor Bot" {
+          if ("MSFT_TaskBootTrigger" -notin $triggerTypes -or "MSFT_TaskLogonTrigger" -notin $triggerTypes) {
+            $findings.Add("scheduled task '$($entry.Key)' must start at boot and logon")
+          }
+        }
+        "Auto Monitor Bot Watchdog" {
+          $trigger = @($triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskTimeTrigger" })[0]
+          if (!$trigger -or [string]$trigger.Repetition.Interval -ne "PT1M") {
+            $findings.Add("scheduled task '$($entry.Key)' must run every minute")
+          }
+        }
+        "Auto Monitor Bot Database Backup" {
+          $trigger = @($triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskDailyTrigger" })[0]
+          if (!$trigger -or [int]$trigger.DaysInterval -ne 1 -or ([datetime]$trigger.StartBoundary).Hour -ne 3 -or
+              ([datetime]$trigger.StartBoundary).Minute -ne 15) {
+            $findings.Add("scheduled task '$($entry.Key)' must run daily at 03:15")
+          }
+        }
+        "Auto Monitor Bot Database Restore Drill" {
+          $trigger = @($triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskWeeklyTrigger" })[0]
+          if (!$trigger -or [int]$trigger.WeeksInterval -ne 1 -or ([int]$trigger.DaysOfWeek -band 1) -eq 0 -or
+              ([datetime]$trigger.StartBoundary).Hour -ne 4 -or ([datetime]$trigger.StartBoundary).Minute -ne 0) {
+            $findings.Add("scheduled task '$($entry.Key)' must run every Sunday at 04:00")
+          }
+        }
+      }
     }
     if (@($task.Actions).Count -ne 1) {
       $findings.Add("scheduled task '$($entry.Key)' has an unexpected action count")
@@ -195,10 +265,12 @@ function Get-AmbTaskSecurityFindings {
     }
 
     $taskFile = Join-Path "$env:SystemRoot\System32\Tasks" $entry.Key
-    if (Test-Path -LiteralPath $taskFile) {
-      foreach ($finding in (Get-AmbAclFindings -Path $taskFile -AllowedWriterSids @("S-1-5-18", "S-1-5-32-544"))) {
-        $findings.Add("task file: $finding")
-      }
+    if (!(Test-Path -LiteralPath $taskFile -PathType Leaf)) {
+      $findings.Add("scheduled task file is missing or unreadable: $taskFile")
+      continue
+    }
+    foreach ($finding in (Get-AmbAclFindings -Path $taskFile -AllowedWriterSids @("S-1-5-18", "S-1-5-32-544") -RequireProtected)) {
+      $findings.Add("task file: $finding")
     }
   }
   return $findings

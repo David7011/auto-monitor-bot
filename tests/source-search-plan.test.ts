@@ -3,12 +3,42 @@ import type { Filter } from "@amb/db";
 import {
   buildSearchContextFromFilter,
   contextForCoverageRecovery,
+  coverageVerificationHasDurableEvidence,
   mergeOlxFilterGeography,
   planCoverageRecovery,
   rotateKnownExternalIds,
+  sameDiscoveryScope,
 } from "../apps/worker/src/modules/source-search-plan.js";
 
 describe("source search plan", () => {
+  it("inherits only an equivalent legacy car scope, never a different category or AUTO.RIA mark", () => {
+    const car = buildSearchContextFromFilter("OLX", testFilter({}));
+    const legacy = { source: "OLX", regions: car.regions, cities: car.cities };
+    expect(sameDiscoveryScope(legacy, car)).toBe(true);
+    expect(sameDiscoveryScope(legacy, { ...car, categoryKey: "electronics.laptop", sourceCategoryId: undefined, sourceCategoryPath: "/uk/elektronika/" })).toBe(false);
+    const ria = buildSearchContextFromFilter("AUTO_RIA", testFilter({ autoRiaMarkId: 9 }));
+    const riaQuery = JSON.parse(JSON.stringify(ria));
+    expect(sameDiscoveryScope(riaQuery, ria)).toBe(true);
+    expect(sameDiscoveryScope({ ...riaQuery, autoRiaMarkId: 79 }, ria)).toBe(false);
+  });
+  it("accepts cutoff recovery only when a durable observed timestamp reaches the boundary", () => {
+    const cutoff = new Date("2026-09-01T08:00:00.000Z");
+
+    expect(coverageVerificationHasDurableEvidence(
+      "CUTOFF",
+      new Date("2026-09-01T07:59:59.000Z"),
+      cutoff,
+    )).toBe(true);
+    expect(coverageVerificationHasDurableEvidence(
+      "CUTOFF",
+      new Date("2026-09-01T08:00:01.000Z"),
+      cutoff,
+    )).toBe(false);
+    expect(coverageVerificationHasDurableEvidence("CUTOFF", undefined, cutoff)).toBe(false);
+    expect(coverageVerificationHasDurableEvidence("KNOWN_TAIL", undefined, cutoff)).toBe(true);
+    expect(coverageVerificationHasDurableEvidence("EXHAUSTED", undefined, cutoff)).toBe(false);
+  });
+
   it("keeps context fingerprint stable while freshness cursor moves", () => {
     const filter = testFilter({
       autoRiaMarkId: 9,
@@ -25,6 +55,37 @@ describe("source search plan", () => {
     expect(first.publishedAfter?.toISOString()).not.toBe(second.publishedAfter?.toISOString());
     expect(first.filterIds).toEqual(["filter-1"]);
     expect(first.models).toEqual(["Camry"]);
+  });
+
+  it("does not close a historical pending window from a recent realtime overlap", () => {
+    const cutoff = new Date("2026-09-01T08:00:00.000Z");
+    expect(coverageVerificationHasDurableEvidence("KNOWN_TAIL", undefined, cutoff, {
+      lane: "REALTIME", existingRecoveryPending: true,
+    })).toBe(false);
+    expect(coverageVerificationHasDurableEvidence("KNOWN_TAIL", undefined, cutoff, {
+      lane: "BACKFILL", existingRecoveryPending: true,
+    })).toBe(true);
+    expect(coverageVerificationHasDurableEvidence("KNOWN_TAIL", undefined, cutoff, {
+      lane: "REALTIME", existingRecoveryPending: false,
+    })).toBe(true);
+  });
+
+  it("does not reopen the full freshness history after every known-ID rotation", () => {
+    const options = {
+      source: "OLX" as const, lane: "REALTIME" as const,
+      now: new Date("2026-09-01T10:00:00.000Z"),
+      lastSuccessfulScanAt: new Date("2026-09-01T09:59:30.000Z"),
+      currentPending: false, coverageGap: false, knownIdsReset: true,
+      contextCutoffAt: new Date("2026-08-31T10:00:00.000Z"),
+      outageDetectionSeconds: 120, lookbackHours: 24, safetyOverlapSeconds: 300,
+    };
+    expect(planCoverageRecovery(options).requiredCutoffAt)
+      .toEqual(new Date("2026-09-01T09:54:30.000Z"));
+    expect(planCoverageRecovery({ ...options, currentPending: true,
+      currentCutoffAt: new Date("2026-08-31T09:00:00.000Z"),
+    }).requiredCutoffAt).toEqual(new Date("2026-08-31T09:00:00.000Z"));
+    expect(planCoverageRecovery({ ...options, lastSuccessfulScanAt: undefined }).requiredCutoffAt)
+      .toEqual(options.contextCutoffAt);
   });
 
   it("keeps OLX geography in the public feed fingerprint", () => {

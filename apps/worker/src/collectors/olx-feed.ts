@@ -31,6 +31,7 @@ type OlxFeedMetadata = {
   observationTarget: string;
   requestStartedAt?: Date;
   firstByteAt?: Date;
+  cacheAgeSeconds?: number;
   coordinatorWaitMs?: number;
   coordinatorPostFinishQuietMs?: number;
 };
@@ -41,8 +42,43 @@ export type OlxFeedResult = (
   | { error: Error }
 ) & OlxFeedMetadata;
 
-const OLX_CATEGORY_ID = 108;
-const OLX_FEED_REFERER = "https://www.olx.ua/uk/transport/legkovye-avtomobili/";
+export type OlxParserHealthAssessment = {
+  status: "HEALTHY" | "DEGRADED" | "UNKNOWN";
+  structuralMarkerPresent: boolean;
+  renderedCardMarkers: number;
+  validCards: number;
+  validCardRatio: number;
+  reason?: string;
+};
+
+const OLX_DEFAULT_FEED_REFERER = "https://www.olx.ua/uk/transport/legkovye-avtomobili/";
+const pendingFeedRequests = new Map<string, Promise<OlxFeedResult>>();
+let sharedFeedRequests = 0;
+
+async function sharePendingFeedRequest(
+  key: string,
+  metadata: Pick<OlxFeedMetadata, "primary" | "channel" | "observationTarget">,
+  fetchFeed: () => Promise<OlxFeedResult>,
+): Promise<OlxFeedResult> {
+  const existing = pendingFeedRequests.get(key);
+  const pending = existing ?? fetchFeed();
+  if (existing) sharedFeedRequests += 1;
+  else pendingFeedRequests.set(key, pending);
+  try {
+    const result = await pending;
+    // Only equivalent concurrent requests share a response. There is no TTL
+    // cache: the next monitoring cycle must always observe a fresh response.
+    // Each subscriber owns its mutable result (coverage hydration replaces ads).
+    return {
+      ...result,
+      ...(isAdsResult(result) ? { ads: structuredClone(result.ads) } : {}),
+      ...metadata,
+      requestCount: existing ? 0 : result.requestCount,
+    };
+  } finally {
+    if (!existing && pendingFeedRequests.get(key) === pending) pendingFeedRequests.delete(key);
+  }
+}
 
 export function olxApiPageSize(): number {
   const configured = Math.trunc(env.OLX_API_PAGE_SIZE);
@@ -73,10 +109,10 @@ export async function fetchOlxDetailAd(
   const response = await fetchHtml(url, {
     source: "OLX",
     timeoutMs: env.OLX_REQUEST_TIMEOUT_MS,
-    headers: { referer: OLX_FEED_REFERER },
+    headers: { referer: OLX_DEFAULT_FEED_REFERER },
     requestClass,
   });
-  const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds);
+  const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds, response);
   if (blocked.rateLimited || blocked.captchaDetected || response.status < 200 || response.status >= 300) {
     return undefined;
   }
@@ -107,6 +143,7 @@ export async function fetchOlxFeed(
     requestClass,
   );
   if ("ads" in htmlResult || "blocked" in htmlResult) return htmlResult;
+  if (!new URL(apiUrl).searchParams.has("category_id")) return htmlResult;
 
   const apiResult = await fetchOlxApiFeed(
     apiUrl,
@@ -148,10 +185,25 @@ export async function fetchOlxApiFeed(
   observationTarget = olxObservationTargetFromUrl(url),
   requestClass: OlxRequestClass = "ENRICHMENT",
 ): Promise<OlxFeedResult> {
+  return sharePendingFeedRequest(
+    JSON.stringify(["json", requestClass, timeoutMs, url]),
+    { primary, channel, observationTarget },
+    () => requestOlxApiFeed(url, primary, timeoutMs, channel, observationTarget, requestClass),
+  );
+}
+
+async function requestOlxApiFeed(
+  url: string,
+  primary: boolean,
+  timeoutMs: number,
+  channel: ListingObservationChannel,
+  observationTarget: string,
+  requestClass: OlxRequestClass,
+): Promise<OlxFeedResult> {
   const response = await sourceHttpClient.json<OlxApiResponse>(url, {
     source: "OLX",
     timeoutMs,
-    headers: { referer: OLX_FEED_REFERER },
+    headers: { referer: OLX_DEFAULT_FEED_REFERER },
     requestClass,
   });
   const metadata: OlxFeedMetadata = {
@@ -162,6 +214,7 @@ export async function fetchOlxApiFeed(
     observationTarget,
     requestStartedAt: response.requestStartedAt,
     firstByteAt: response.firstByteAt,
+    cacheAgeSeconds: response.cacheAgeSeconds,
     coordinatorWaitMs: response.coordinatorWaitMs,
     coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
   };
@@ -224,11 +277,27 @@ export async function fetchOlxHtmlFeed(
   observationTarget = olxObservationTargetFromUrl(url),
   requestClass: OlxRequestClass = "COVERAGE",
 ): Promise<OlxFeedResult> {
+  // Keep priorities in the key: realtime must never join a background request
+  // that can be queued or preempted by the OLX lane coordinator.
+  return sharePendingFeedRequest(
+    JSON.stringify(["html", requestClass, env.OLX_REQUEST_TIMEOUT_MS, url]),
+    { primary, channel, observationTarget },
+    () => requestOlxHtmlFeed(url, primary, channel, observationTarget, requestClass),
+  );
+}
+
+async function requestOlxHtmlFeed(
+  url: string,
+  primary: boolean,
+  channel: ListingObservationChannel,
+  observationTarget: string,
+  requestClass: OlxRequestClass,
+): Promise<OlxFeedResult> {
   try {
     const response = await fetchHtml(url, {
       source: "OLX",
       timeoutMs: env.OLX_REQUEST_TIMEOUT_MS,
-      headers: { referer: OLX_FEED_REFERER },
+      headers: { referer: OLX_DEFAULT_FEED_REFERER },
       requestClass,
     });
     const metadata: OlxFeedMetadata = {
@@ -239,10 +308,11 @@ export async function fetchOlxHtmlFeed(
       observationTarget,
       requestStartedAt: response.requestStartedAt,
       firstByteAt: response.firstByteAt,
+      cacheAgeSeconds: response.cacheAgeSeconds,
       coordinatorWaitMs: response.coordinatorWaitMs,
       coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
     };
-    const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds);
+    const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds, response);
     if (blocked.rateLimited || blocked.captchaDetected) return { blocked, ...metadata };
     if (response.status < 200 || response.status >= 300) {
       return { error: new Error(`HTTP ${response.status}`), ...metadata };
@@ -256,8 +326,12 @@ export async function fetchOlxHtmlFeed(
     } catch (error) {
       structuredStateError = error instanceof Error ? error : new Error(String(error));
     }
-    for (const card of extractRenderedOlxCards(response.body)) {
-      if (!ads.has(String(card.id))) ads.set(String(card.id), card);
+    for (const card of extractRenderedOlxCards(response.body, new Date(), new Set(ads.keys()))) {
+      ads.set(String(card.id), card);
+    }
+    const parserHealth = assessOlxParserHealth(response.body, [...ads.values()]);
+    if (parserHealth.status === "DEGRADED") {
+      return { error: new Error(`PARSER_DEGRADED: ${parserHealth.reason ?? "semantic structure mismatch"}`), ...metadata };
     }
     if (ads.size === 0 && structuredStateError) {
       return { error: structuredStateError, ...metadata };
@@ -273,6 +347,33 @@ export async function fetchOlxHtmlFeed(
       observationTarget,
     };
   }
+}
+
+export function assessOlxParserHealth(html: string, ads: readonly OlxAd[]): OlxParserHealthAssessment {
+  const structuralMarkerPresent = html.includes("window.__PRERENDERED_STATE__=");
+  const renderedCardMarkers = [...html.matchAll(/\bdata-cy="l-card"/gu)].length;
+  const validCards = ads.filter((ad) => String(ad.id ?? "").length > 0 && Boolean(ad.url)).length;
+  const denominator = Math.max(renderedCardMarkers, ads.length);
+  const validCardRatio = denominator > 0 ? validCards / denominator : 1;
+  if (!structuralMarkerPresent && renderedCardMarkers === 0) {
+    return {
+      status: "DEGRADED", structuralMarkerPresent, renderedCardMarkers, validCards, validCardRatio,
+      reason: "expected OLX listing markers are absent",
+    };
+  }
+  if (renderedCardMarkers > 0 && validCardRatio < 0.7) {
+    return {
+      status: "DEGRADED", structuralMarkerPresent, renderedCardMarkers, validCards, validCardRatio,
+      reason: "valid listing ID/URL ratio collapsed below 70%",
+    };
+  }
+  return {
+    status: denominator === 0 ? "UNKNOWN" : "HEALTHY",
+    structuralMarkerPresent,
+    renderedCardMarkers,
+    validCards,
+    validCardRatio,
+  };
 }
 
 export async function hydrateHtmlCardOnlyAds(
@@ -321,13 +422,20 @@ export async function hydrateHtmlCardOnlyAds(
   return { requestCount, failedCount: Math.max(0, candidates.size - hydrated.size) };
 }
 
-export function extractRenderedOlxCards(html: string, now = new Date()): OlxAd[] {
+export function extractRenderedOlxCards(
+  html: string,
+  now = new Date(),
+  structuredExternalIds: ReadonlySet<string> = new Set(),
+): OlxAd[] {
   const starts = [...html.matchAll(/<div\b[^>]*\bdata-cy="l-card"[^>]*>/gu)];
   const cards: OlxAd[] = [];
   for (let index = 0; index < starts.length; index += 1) {
     const openingTag = starts[index]?.[0] ?? "";
     const id = openingTag.match(/\bid="(\d+)"/u)?.[1];
-    if (!id) continue;
+    // Structured entries already contain richer data. Only parse extra HTML
+    // cards; their date, attribute and image extraction otherwise duplicates
+    // work for every known card on every realtime poll.
+    if (!id || structuredExternalIds.has(id)) continue;
     const start = starts[index]?.index ?? 0;
     const end = starts[index + 1]?.index ?? html.length;
     const block = html.slice(start, end);
@@ -359,6 +467,7 @@ export function extractRenderedOlxCards(html: string, now = new Date()): OlxAd[]
           ? decodeHtmlText(titleHtml.replace(/<[^>]+>/gu, " ")).replace(/\s+/gu, " ").trim()
           : undefined,
         createdTime: locationAndDate.createdTime,
+        timestampConfidence: locationAndDate.timestampConfidence,
         price,
         location: locationAndDate.city ? { cityName: locationAndDate.city } : undefined,
         photos: photo ? [decodeHtmlText(photo)] : [],
@@ -395,14 +504,17 @@ function parseRenderedCardPrice(text: string | undefined): OlxAd["price"] | unde
 function parseRenderedCardLocationDate(
   text: string | undefined,
   now: Date,
-): { city?: string; createdTime?: string } {
+): { city?: string; createdTime?: string; timestampConfidence?: OlxAd["timestampConfidence"] } {
   if (!text) return {};
   const separator = text.lastIndexOf(" - ");
   const location = separator >= 0 ? text.slice(0, separator).trim() : text.trim();
   const dateText = separator >= 0 ? text.slice(separator + 3).trim() : "";
+  const createdAt = parseRenderedCardDate(dateText, now);
   return {
     city: location.split(",")[0]?.trim() || undefined,
-    createdTime: parseRenderedCardDate(dateText, now)?.toISOString(),
+    createdTime: createdAt?.toISOString(),
+    timestampConfidence: !createdAt ? "UNKNOWN"
+      : /(?:о|в)\s*\d{1,2}:\d{2}/iu.test(dateText) ? "MEDIUM" : "LOW",
   };
 }
 
@@ -422,7 +534,7 @@ export function parseRenderedCardDate(value: string, now = new Date()): Date | u
   if (!absolute) return undefined;
   const month = OLX_MONTHS[absolute[2] ?? ""];
   if (!month) return undefined;
-  return kyivLocalDate(Number(absolute[3]), month, Number(absolute[1]), 12, 0);
+  return kyivLocalDate(Number(absolute[3]), month, Number(absolute[1]), time ? Number(time[1]) : 12, time ? Number(time[2]) : 0);
 }
 
 const OLX_MONTHS: Record<string, number> = {
@@ -452,6 +564,11 @@ function kyivCalendarParts(value: Date): { year: number; month: number; day: num
 }
 
 function kyivLocalDate(year: number, month: number, day: number, hour: number, minute: number): Date | undefined {
+  const calendarDate = new Date(Date.UTC(year, month - 1, day));
+  if (
+    calendarDate.getUTCFullYear() !== year || calendarDate.getUTCMonth() !== month - 1 || calendarDate.getUTCDate() !== day
+    || hour < 0 || hour > 23 || minute < 0 || minute > 59
+  ) return undefined;
   const middayUtc = new Date(Date.UTC(year, month - 1, day, 12));
   const zoneName = new Intl.DateTimeFormat("en-US", {
     timeZone: "Europe/Kyiv",
@@ -490,7 +607,7 @@ export function buildOlxFeedTargets(
       const api = new URL("https://www.olx.ua/api/v1/offers");
       api.searchParams.set("offset", String(Math.max(0, page - 1) * pageSize));
       api.searchParams.set("limit", String(pageSize));
-      api.searchParams.set("category_id", String(OLX_CATEGORY_ID));
+      if (context.sourceCategoryId) api.searchParams.set("category_id", String(context.sourceCategoryId));
       if (scope.regionId) api.searchParams.set("region_id", String(scope.regionId));
       if (scope.cityId) api.searchParams.set("city_id", String(scope.cityId));
       if (privateOnly) api.searchParams.set("owner_type", "private");
@@ -498,7 +615,8 @@ export function buildOlxFeedTargets(
       api.searchParams.set("sort_by", "created_at:desc");
 
       const path = scope.htmlPath ? `${scope.htmlPath}/` : "";
-      const html = new URL(`https://www.olx.ua/uk/transport/legkovye-avtomobili/${path}`);
+      const categoryPath = safeOlxCategoryPath(context.sourceCategoryPath);
+      const html = new URL(`${categoryPath}${path}`, "https://www.olx.ua");
       html.searchParams.set("search[order]", "created_at:desc");
       if (privateOnly) html.searchParams.set("search[private_business]", "private");
       if (query) html.searchParams.set("search[q]", query);
@@ -507,7 +625,7 @@ export function buildOlxFeedTargets(
         apiUrl: api.toString(),
         htmlUrl,
         privateOnly,
-        observationTarget: olxObservationTarget(scope, page, privateOnly),
+        observationTarget: olxObservationTarget(context, scope, page, privateOnly),
       };
     }),
   );
@@ -516,6 +634,7 @@ export function buildOlxFeedTargets(
 export function coordinatorCoverageMetrics(): Record<string, string | number | boolean | null> {
   const snapshot = olxRequestCoordinator.snapshot();
   return {
+    sharedFeedRequests,
     coordinatorRealtimeRequests: snapshot.started.REALTIME,
     coordinatorCoverageRequests: snapshot.started.COVERAGE,
     coordinatorBackfillRequests: snapshot.started.BACKFILL,
@@ -569,8 +688,9 @@ export function isErrorResult(
   return "error" in result;
 }
 
-function olxObservationTarget(scope: OlxLocationScope, page: number, privateOnly: boolean): string {
+function olxObservationTarget(context: SourceSearchContext, scope: OlxLocationScope, page: number, privateOnly: boolean): string {
   return [
+    `category:${context.categoryKey}`,
     `region:${scope.regionId ?? "all"}`,
     `city:${scope.cityId ?? "all"}`,
     `page:${Math.max(1, page)}`,
@@ -595,10 +715,18 @@ function olxObservationTargetFromUrl(value: string): string {
 }
 
 function olxSearchQuery(context: SourceSearchContext): string | undefined {
-  const terms = [context.brand, ...context.models]
+  const terms = [context.sourceCategoryQuery, context.brand, ...context.models]
     .map((value) => value?.trim())
     .filter((value): value is string => Boolean(value));
   return [...new Set(terms)].join(" ").trim() || undefined;
+}
+
+function safeOlxCategoryPath(value: string | undefined): string {
+  const path = value?.trim() || "/uk/transport/legkovye-avtomobili/";
+  if (!path.startsWith("/uk/") || path.includes("..") || path.includes(":") || path.includes("\\")) {
+    throw new Error("Unsafe OLX category path");
+  }
+  return path.endsWith("/") ? path : `${path}/`;
 }
 
 function decodeHtmlText(value: string): string {

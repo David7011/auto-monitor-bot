@@ -139,8 +139,18 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
   lockRenewal.unref();
 
   const startedAt = new Date();
+  const runCategoryKey = contexts.length === 1 ? contexts[0]!.categoryKey : "mixed";
+  const runFingerprint = contexts.length === 1 ? contexts[0]!.fingerprint : null;
   const run = await prisma.collectorRun.create({
-    data: { source, lane, trigger, status: "RUNNING", startedAt },
+    data: {
+      source,
+      categoryKey: runCategoryKey,
+      searchFingerprint: runFingerprint,
+      lane,
+      trigger,
+      status: "RUNNING",
+      startedAt,
+    },
   });
   if (recoveringFromChallenge) await markChallengeProbePending(sourceRecord.id);
 
@@ -187,6 +197,10 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
 
     for (const context of contexts) {
       const state = await loadSourceSearchState(context);
+      // A recovery job is scoped to durable pending windows. This prevents a
+      // capability retry for one context from deep-scanning other contexts
+      // that are already VERIFIED or UNRESOLVED.
+      if (job.trigger === "RECOVERY" && !state.coverageRecoveryPending) continue;
       const scanContext = job.trigger === "COVERAGE"
         ? context
         : contextForCoverageRecovery(context, state, lane);
@@ -247,7 +261,13 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       requestCount += result.requestCount ?? 0;
       observedCount += result.observedCount ?? collectedListings.length;
       for (const warning of result.semanticWarnings ?? []) semanticWarnings.add(warning);
-      if (result.coverageMetrics) coverageMetrics.push(result.coverageMetrics);
+      if (result.coverageMetrics) {
+        coverageMetrics.push({
+          categoryKey: context.categoryKey,
+          fingerprint: context.fingerprint,
+          ...result.coverageMetrics,
+        });
+      }
 
       // Execution lag is only meaningful before a job starts. Re-check only
       // monitoring status/generation here so a valid long backfill is not
@@ -389,10 +409,20 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         coverageVerified: result.coverageVerified,
         coverageGap: result.coverageGap,
         coverageVerificationMethod: result.coverageVerificationMethod,
+        coverageUnresolvedReason: result.coverageUnresolvedReason,
+        coverageAttemptGeneration: result.coverageAttemptGeneration,
         lane: job.trigger === "COVERAGE" ? "COVERAGE" : lane,
         pageCount: result.pageCount,
         requestCount: result.requestCount,
         observedCount: result.observedCount,
+        oldestObservedAt: result.oldestObservedAt,
+        backfillResumePage: result.backfillResumePage,
+        advanceSuccessBoundary: !(
+          source === "OLX"
+          && (result.parserHealth === "DEGRADED" || (result.limited && (result.observedCount ?? 0) === 0))
+        ),
+        parserHealth: result.parserHealth,
+        parserHealthDetails: result.parserHealthDetails,
         runId: run.id,
         scannedExternalIds: result.scannedExternalIds,
         coverageStateUpdate: result.coverageStateUpdate,
@@ -403,9 +433,19 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
           windowId: stateUpdate.recoveryWindowId,
           opened: stateUpdate.recoveryWindowOpened,
           verified: stateUpdate.recoveryVerified,
+          unresolved: stateUpdate.recoveryUnresolved,
+          unresolvedReason: stateUpdate.recoveryUnresolvedReason,
           requiredCutoffAt: stateUpdate.requiredCutoffAt?.toISOString() ?? null,
           verificationMethod: result.coverageVerificationMethod ?? null,
         });
+      }
+      if (stateUpdate.recoveryUnresolved && stateUpdate.recoveryWindowId) {
+        await safeSystemAlert([
+          "OLX: историческое окно не может быть доказано публичным источником.",
+          `Причина: ${stateUpdate.recoveryUnresolvedReason ?? "UNKNOWN"}.`,
+          `Граница: ${stateUpdate.requiredCutoffAt?.toISOString() ?? "unknown"}.`,
+          "Realtime продолжает работать; повторный глубокий проход отключён до изменения возможностей источника или ручного retry.",
+        ].join("\n"));
       }
       const immediateRecoveryRequired = (
         lane === "REALTIME" && stateUpdate.recoveryRequired
@@ -434,6 +474,12 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
               Math.floor(recoveryEpoch / 60_000),
               Math.floor(Date.now() / 60_000),
             ].join("-"),
+            deduplicationId: [
+              "coverage-recovery",
+              source,
+              job.monitoringGeneration ?? "unknown-generation",
+              stateUpdate.recoveryWindowId ?? "legacy-window",
+            ].join("-"),
           },
         );
       }
@@ -447,26 +493,39 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
     }
     const healthScore = calculateHealthScore({ limited, emptyStreak, warnings: semanticWarnings.size });
 
+    const reliableSuccessBoundary = !(source === "OLX" && limited && observedCount === 0);
+    const inconclusiveProtectionProbe = recoveringFromChallenge && !reliableSuccessBoundary;
+    const probeRetryAt = inconclusiveProtectionProbe
+      ? new Date(Date.now() + env.OLX_PROTECTION_COOLING_SECONDS * 1_000)
+      : null;
     if (laneOwnsSourceHealth(lane)) {
       // Background depth work must never clear a CAPTCHA/rate-limit pause that
       // a concurrent realtime request has just installed.
       await prisma.source.update({
         where: { source },
         data: {
-          status: limited ? "LIMITED" : "ACTIVE",
+          status: inconclusiveProtectionProbe ? sourceRecord.status : limited ? "LIMITED" : "ACTIVE",
           lastCheckedAt: finishedAt,
-          lastSuccessfulAt: finishedAt,
+          lastSuccessfulAt: reliableSuccessBoundary ? finishedAt : sourceRecord.lastSuccessfulAt,
           lastNonEmptyAt: observedCount > 0 ? finishedAt : sourceRecord.lastNonEmptyAt,
           lastDurationMs: elapsedMs(startedAt, finishedAt),
-          lastError: limited ? limitedReason : semanticWarnings.size > 0 ? [...semanticWarnings].join("; ") : null,
-          consecutiveErrors: 0,
+          lastError: inconclusiveProtectionProbe
+            ? `Безопасная проверка OLX вернула недостаточно данных; защитная пауза сохранена до ${formatKyivDate(probeRetryAt!)}.`
+            : limited
+              ? limitedReason
+              : semanticWarnings.size > 0
+                ? [...semanticWarnings].join("; ")
+                : null,
+          consecutiveErrors: inconclusiveProtectionProbe ? sourceRecord.consecutiveErrors : 0,
           consecutiveEmptyResults: emptyStreak,
-          healthScore,
-          pausedUntil: null,
+          healthScore: inconclusiveProtectionProbe ? sourceRecord.healthScore : healthScore,
+          pausedUntil: probeRetryAt,
           supportsNewestFirst: collector.supportsNewestFirst ?? true,
           newestFirstVerified: Boolean(collector.supportsNewestFirst && collector.newestFirstVerified),
           newestFirstVerifiedAt: collector.supportsNewestFirst && collector.newestFirstVerified ? finishedAt : null,
-          initialSyncCompletedAt: sourceRecord.initialSyncCompletedAt ?? finishedAt,
+          initialSyncCompletedAt: reliableSuccessBoundary
+            ? sourceRecord.initialSyncCompletedAt ?? finishedAt
+            : sourceRecord.initialSyncCompletedAt,
         },
       });
     }
@@ -488,12 +547,12 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       errorMessage: limited ? limitedReason : null,
     });
 
-    if (lane === "REALTIME") {
+    if (lane === "REALTIME" && reliableSuccessBoundary) {
       // A successful hot-path probe is the authoritative recovery signal,
       // including incidents raised only by a deep backfill page.
       await resolveChallengeIncidents(sourceRecord.id);
     }
-    if (recoveringFromChallenge && lane === "REALTIME") {
+    if (recoveringFromChallenge && lane === "REALTIME" && reliableSuccessBoundary) {
       await safeSystemAlert(`Источник восстановлен: ${sourceDisplayName(source)}\nЗащитная страница исчезла, обычный мониторинг продолжен.`);
     }
     if (skippedInitialSync > 0) {

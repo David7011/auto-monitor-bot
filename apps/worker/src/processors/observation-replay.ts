@@ -57,7 +57,10 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
         // Complete rows have a real snapshot; incomplete ones are SQL NULL
         // (hydrate selects them via equals: DbNull), so the complement is DbNull.
         normalizedData: { not: Prisma.DbNull },
-        listingId: null,
+        OR: [
+          { listingId: null },
+          { evaluationNotes: { has: "SHADOW_MODE: production notification suppressed" }, filterRevision: { not: filterRevision } },
+        ],
         decision: { not: "NOTIFIED" },
         AND: [
           { OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }] },
@@ -132,14 +135,16 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
     const pendingCount = await prisma.sourceSeenListing.count({
       where: {
         normalizedData: { not: Prisma.DbNull },
-        listingId: null,
-        decision: { not: "NOTIFIED" },
         OR: [
+          { listingId: null },
+          { evaluationNotes: { has: "SHADOW_MODE: production notification suppressed" }, filterRevision: { not: filterRevision } },
+        ],
+        decision: { not: "NOTIFIED" },
+        AND: [{ OR: [
           { filterRevision: null },
           { filterRevision: { not: filterRevision } },
           { decision: { in: ["PENDING", "FAILED", "MATCHED"] } },
-        ],
-        AND: [{ OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }] }],
+        ] }, { OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }] }],
       },
     });
 

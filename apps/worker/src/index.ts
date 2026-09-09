@@ -470,6 +470,7 @@ async function recoverInterruptedPipeline(closeStaleRuns = true): Promise<void> 
 
   const incompleteEnrichment = await prisma.listing.findMany({
     where: {
+      categoryKey: "vehicle.car",
       telegramNotifications: {
         some: {
           status: { in: ["SENT", "UPDATED"] },

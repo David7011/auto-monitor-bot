@@ -1,5 +1,6 @@
 import {
   normalizeVehicleText,
+  olxRecoveryAttemptGeneration,
   sortListingsNewestFirst,
   type ListingObservationChannel,
   type NormalizedListing,
@@ -27,6 +28,7 @@ import { collectProgressively } from "../modules/progressive-results.js";
 import {
   buildOlxFeedTargets,
   coordinatorCoverageMetrics,
+  fetchOlxApiFeed,
   fetchOlxDetailAd,
   fetchOlxFeed,
   fetchOlxHtmlFeed,
@@ -41,9 +43,14 @@ import {
 } from "./olx-feed.js";
 import {
   normalizeOlxAd,
+  olxPublicationBeforeCutoff,
   olxPublishedAt,
   type OlxAd,
 } from "./olx-normalization.js";
+import {
+  newestOlxVisibilityAt,
+  planOlxFreshnessHedge,
+} from "./olx-freshness-hedge.js";
 
 export {
   buildOlxFeedTargets,
@@ -55,10 +62,81 @@ export type { OlxFeedTargetOptions } from "./olx-feed.js";
 export { normalizeOlxAd } from "./olx-normalization.js";
 export type { OlxAd } from "./olx-normalization.js";
 
+const OLX_RECOVERY_PAGE_OVERLAP = 2;
+
+export function olxBackfillPageWindow(input: {
+  pageBudget: number;
+  maxOffsetPages: number;
+  recovery: boolean;
+  persistedResumePage?: number;
+}): { startPage: number; endPage: number } {
+  const maxOffsetPages = Math.max(1, Math.trunc(input.maxOffsetPages));
+  const pageBudget = Math.max(1, Math.trunc(input.pageBudget));
+  const startPage = input.recovery
+    ? Math.min(maxOffsetPages, Math.max(1, Math.trunc(input.persistedResumePage ?? 1)))
+    : 1;
+  return {
+    startPage,
+    endPage: Math.min(maxOffsetPages, startPage + pageBudget - 1),
+  };
+}
+
+export function nextOlxRecoveryResumePage(
+  startPage: number,
+  lastPageScanned: number,
+  overlapPages = OLX_RECOVERY_PAGE_OVERLAP,
+): number {
+  if (lastPageScanned < startPage) return Math.max(1, startPage);
+  return Math.max(1, lastPageScanned - Math.max(0, Math.trunc(overlapPages) - 1));
+}
+
+export function olxEmptyPageProvesExhaustion(input: {
+  startPage: number;
+  currentPage: number;
+  observedBeforeEmptyPage: number;
+}): boolean {
+  // An empty mutable offset page proves only that this request returned no
+  // rows. It does not prove that the required historical timestamp or a frozen
+  // continuity anchor was reached. Keep the arguments for diagnostic callers.
+  void input;
+  return false;
+}
+
+export function olxRecoveryUnresolvedReason(input: {
+  recovery: boolean;
+  pending: boolean;
+  anchored: boolean;
+  cutoffReached: boolean;
+  lastPageScanned: number;
+  maxOffsetPages: number;
+}): "PUBLIC_OFFSET_CAP" | undefined {
+  return input.recovery
+    && input.pending
+    && !input.anchored
+    && !input.cutoffReached
+    && input.lastPageScanned >= input.maxOffsetPages
+    ? "PUBLIC_OFFSET_CAP"
+    : undefined;
+}
+
+export function olxEmptyRecoveryUnresolvedReason(input: {
+  recovery: boolean;
+  pending: boolean;
+  observedBeforeEmptyPage: number;
+  priorAttemptCount: number;
+}): "SOURCE_EXHAUSTED_BEFORE_BOUNDARY" | undefined {
+  if (!input.recovery || !input.pending) return undefined;
+  return input.observedBeforeEmptyPage > 0 || input.priorAttemptCount >= 2
+    ? "SOURCE_EXHAUSTED_BEFORE_BOUNDARY"
+    : undefined;
+}
+
 export class OlxCollector implements SourceCollector {
   readonly source = "OLX" as const;
   readonly supportsNewestFirst = true;
   readonly newestFirstVerified = true;
+  private lastFreshnessHedgeAt?: Date;
+  private freshnessHedgeSuppressedUntil?: Date;
 
   async collect(
     context: SourceSearchContext,
@@ -99,18 +177,34 @@ export class OlxCollector implements SourceCollector {
     const regionalObservedIds = new Set<string>();
     const htmlObservedIds = new Set<string>();
     const privateObservedIds = new Set<string>();
-    // While recovery is pending, only the anchors frozen before the gap may
-    // prove continuity. IDs learned by newer realtime runs must not close an
-    // older offline window by merely overlapping each other.
+    // Historical backfill must reach anchors frozen before its gap. Realtime
+    // uses the current known tail; the state writer keeps that recent overlap
+    // separate from proof that can close a pending historical recovery window.
     const continuityKnownExternalIds = new Set(
-      state.coverageRecoveryPending && (state.coverageAnchorExternalIds?.size ?? 0) > 0
-        ? state.coverageAnchorExternalIds
+      isBackfill && state.coverageRecoveryPending
+        ? state.coverageAnchorExternalIds ?? []
         : state.knownExternalIds,
+    );
+    // Realtime overlaps the most recent scan even while an older offline gap
+    // is unresolved. Historical recovery uses its frozen anchors separately;
+    // already journaled realtime adverts must not be normalized and dispatched
+    // again on every recovery attempt.
+    const candidateKnownExternalIds = new Set([
+      ...state.knownExternalIds,
+      ...state.coverageAnchorExternalIds ?? [],
+    ]);
+    const cutoffNeutralExternalIds = new Set(
+      [...state.knownExternalIds].filter((externalId) => !continuityKnownExternalIds.has(externalId)),
     );
     let fastFeedRequests = 0;
     let regionalFeedRequests = 0;
     let htmlFeedRequests = 0;
     let privateFeedRequests = 0;
+    let freshnessHedgeRequests = 0;
+    let freshnessHedgeObserved = 0;
+    let freshnessHedgeOnlyObserved = 0;
+    let freshnessHedgeOutcome = env.OLX_FRESHNESS_HEDGE_ENABLED ? "NOT_EVALUATED" : "DISABLED";
+    let freshnessHedgePrimaryAgeSeconds: number | null = null;
     const activeScopes = isBackfill || coverageDue
       ? uniqueLocationScopes([...resolvedLocations.scopes, ...regionalCoverageScopes(context)])
       : resolvedLocations.scopes;
@@ -118,7 +212,7 @@ export class OlxCollector implements SourceCollector {
     // The public API rejects offsets above OLX_API_MAX_OFFSET, so deeper pages
     // would only burn requests on 400 responses and HTML fallbacks.
     const maxOffsetPages = Math.max(1, Math.floor(Math.max(0, env.OLX_API_MAX_OFFSET) / olxApiPageSize()) + 1);
-    const maxPages = suppressBackground
+    const pageBudget = suppressBackground
       ? 1
       : Math.min(
       maxOffsetPages,
@@ -128,13 +222,29 @@ export class OlxCollector implements SourceCollector {
           : Math.max(1, scan.maxPages, env.OLX_BACKFILL_MAX_PAGES)
         : Math.max(1, scan.maxPages, env.OLX_REALTIME_MAX_PAGES),
       );
+    const pageWindow = olxBackfillPageWindow({
+      pageBudget,
+      maxOffsetPages,
+      recovery: isBackfill && Boolean(scan.recovery) && Boolean(state.coverageRecoveryPending),
+      persistedResumePage: state.lastPage,
+    });
     let pageCount = 0;
+    let lastPageScanned = pageWindow.startPage - 1;
     let requestCount = 0;
     let observedCount = 0;
+    let oldestObservedAt: Date | undefined;
     const scannedExternalIds = new Set<string>();
     let cutoffReached = false;
     let degradedReason: string | undefined;
-    const depthRequestClass: OlxRequestClass = scan.recovery ? "RECOVERY" : "BACKFILL";
+    let parserDegraded = false;
+    let coverageUnresolvedReason: "PUBLIC_OFFSET_CAP" | "SOURCE_EXHAUSTED_BEFORE_BOUNDARY" | undefined;
+    const recoveryAttemptGeneration = olxRecoveryAttemptGeneration({
+      pageSize: olxApiPageSize(),
+      maxOffset: env.OLX_API_MAX_OFFSET,
+    });
+    const depthRequestClass: OlxRequestClass = scan.recovery && state.coverageRecoveryPending
+      ? "RECOVERY"
+      : "BACKFILL";
     // A fast scan is "anchored" once it overlaps listings from the previous
     // scan (or the freshness cutoff): that proves nothing was skipped between
     // the two scans, so pagination can stop.
@@ -170,12 +280,17 @@ export class OlxCollector implements SourceCollector {
           htmlOnlyObserved: 0,
           privateObserved: 0,
           privateOnlyObserved: 0,
+          freshnessHedgeRequests: 0,
+          freshnessHedgeObserved: 0,
+          freshnessHedgeOnlyObserved: 0,
+          freshnessHedgeOutcome,
+          freshnessHedgePrimaryAgeSeconds,
           ...coordinatorCoverageMetrics(),
         },
       };
     }
 
-    for (let page = 1; page <= maxPages; page += 1) {
+    for (let page = pageWindow.startPage; page <= pageWindow.endPage; page += 1) {
       if (
         isBackfill
         && !await olxLaneArbiter.waitForBackfillWindow(
@@ -206,6 +321,32 @@ export class OlxCollector implements SourceCollector {
         coverageOnly,
       );
       const directRequestClass: OlxRequestClass = isBackfill ? depthRequestClass : "REALTIME";
+      const dispatchHotFeedResult = async (result: OlxFeedResult) => {
+        if (!scan.onHotCandidates || !isAdsResult(result)) return;
+        const uncommittedHotCandidates = [...hotDispatchedExternalIds]
+          .filter((externalId) => !seenExternalIds.has(externalId))
+          .length;
+        const hotCandidates = selectHotOlxCandidates([result], {
+          now,
+          categoryKey: context.categoryKey,
+          publishedAfter: context.publishedAfter,
+          knownExternalIds: candidateKnownExternalIds,
+          seenExternalIds: new Set([
+            ...seenExternalIds,
+            ...hotDispatchedExternalIds,
+          ]),
+          maxCandidates: Math.max(
+            0,
+            maxCandidates - listings.length - uncommittedHotCandidates,
+          ),
+        });
+        const hotCandidateAt = new Date();
+        for (const listing of hotCandidates) {
+          listing.hotCandidateAt = hotCandidateAt;
+          hotDispatchedExternalIds.add(listing.externalId);
+        }
+        if (hotCandidates.length > 0) await scan.onHotCandidates(hotCandidates);
+      };
       const directResults: OlxFeedResult[] = isBackfill
         ? await fetchOlxTargetsSequentially(directTargets, (target, index) => fetchOlxFeed(
             target.apiUrl,
@@ -233,37 +374,77 @@ export class OlxCollector implements SourceCollector {
                   target.observationTarget,
                   directRequestClass,
                 ),
-            async (result) => {
-              if (!scan.onHotCandidates || !isAdsResult(result)) return;
-              const uncommittedHotCandidates = [...hotDispatchedExternalIds]
-                .filter((externalId) => !seenExternalIds.has(externalId))
-                .length;
-              const hotCandidates = selectHotOlxCandidates([result], {
-                now,
-                publishedAfter: context.publishedAfter,
-                knownExternalIds: continuityKnownExternalIds,
-                seenExternalIds: new Set([
-                  ...seenExternalIds,
-                  ...hotDispatchedExternalIds,
-                ]),
-                maxCandidates: Math.max(
-                  0,
-                  maxCandidates - listings.length - uncommittedHotCandidates,
-                ),
-              });
-              const hotCandidateAt = new Date();
-              for (const listing of hotCandidates) {
-                listing.hotCandidateAt = hotCandidateAt;
-                hotDispatchedExternalIds.add(listing.externalId);
-              }
-              if (hotCandidates.length > 0) await scan.onHotCandidates(hotCandidates);
-            },
+            dispatchHotFeedResult,
           );
-      fastFeedRequests += directTargets.length;
+      const directRequestCount = directResults.reduce((total, result) => total + result.requestCount, 0);
+      const primaryIds = new Set(
+        directResults.filter(isAdsResult).flatMap((result) => result.ads.map((ad) => String(ad.id))),
+      );
+      const primaryAds = directResults.filter(isAdsResult).flatMap((result) => result.ads);
+      const hedgeTarget = directTargets.find((target) => !target.privateOnly);
+      const hedgeNow = new Date();
+      let hedgeRequestCountThisPage = 0;
+      const hedgeDecision = planOlxFreshnessHedge({
+        enabled: env.OLX_FRESHNESS_HEDGE_ENABLED && Boolean(hedgeTarget) && Boolean(context.sourceCategoryId),
+        lane: scan.lane,
+        page,
+        protectionCooling: suppressBackground,
+        primaryAvailable: primaryAds.length > 0,
+        now: hedgeNow,
+        deadlineAt: scan.deadlineAt,
+        minimumRemainingMs: Math.min(env.OLX_REQUEST_TIMEOUT_MS, 2_000),
+        newestPrimaryVisibleAt: newestOlxVisibilityAt(primaryAds),
+        primaryCacheAgeSeconds: directResults.find((result) =>
+          result.observationTarget === hedgeTarget?.observationTarget
+          && result.channel === "OLX_PUBLIC_HTML" && isAdsResult(result))?.cacheAgeSeconds,
+        staleAfterSeconds: env.OLX_FRESHNESS_STALE_AFTER_SECONDS,
+        intervalSeconds: env.OLX_FRESHNESS_HEDGE_INTERVAL_SECONDS,
+        lastAttemptAt: this.lastFreshnessHedgeAt,
+        suppressedUntil: this.freshnessHedgeSuppressedUntil,
+      });
+      if (page === 1) {
+        freshnessHedgeOutcome = hedgeDecision.reason;
+        freshnessHedgePrimaryAgeSeconds = hedgeDecision.primaryAgeSeconds;
+      }
+      if (hedgeDecision.run && hedgeTarget) {
+        this.lastFreshnessHedgeAt = hedgeNow;
+        const hedgeResult = await fetchOlxApiFeed(
+          hedgeTarget.apiUrl,
+          false,
+          Math.min(env.OLX_REQUEST_TIMEOUT_MS, Math.max(1_000, scan.deadlineAt.getTime() - Date.now())),
+          "OLX_PUBLIC_API",
+          `${hedgeTarget.observationTarget}:freshness-hedge`,
+          "REALTIME",
+        );
+        hedgeRequestCountThisPage = hedgeResult.requestCount;
+        freshnessHedgeRequests += hedgeResult.requestCount;
+        if (isAdsResult(hedgeResult)) {
+          this.freshnessHedgeSuppressedUntil = undefined;
+          const hedgeIds = new Set(hedgeResult.ads.map((ad) => String(ad.id)));
+          freshnessHedgeObserved = hedgeIds.size;
+          freshnessHedgeOnlyObserved = [...hedgeIds].filter((id) => !primaryIds.has(id)).length;
+          freshnessHedgeOutcome = freshnessHedgeOnlyObserved > 0 ? "SUCCESS_NEW_IDS" : "SUCCESS_NO_DELTA";
+          await dispatchHotFeedResult(hedgeResult);
+          directResults.push(hedgeResult);
+        } else if (isBlockedResult(hedgeResult)) {
+          const pauseSeconds = Math.max(
+            hedgeResult.blocked.retryAfterSeconds ?? 0,
+            env.OLX_PROTECTION_COOLING_SECONDS,
+          );
+          this.freshnessHedgeSuppressedUntil = new Date(hedgeNow.getTime() + pauseSeconds * 1_000);
+          freshnessHedgeOutcome = "BLOCKED_BACKOFF";
+        } else {
+          this.freshnessHedgeSuppressedUntil = new Date(
+            hedgeNow.getTime() + env.OLX_FRESHNESS_HEDGE_ERROR_BACKOFF_SECONDS * 1_000,
+          );
+          freshnessHedgeOutcome = "ERROR_BACKOFF";
+        }
+      }
+      fastFeedRequests += directRequestCount + hedgeRequestCountThisPage;
       for (const result of directResults) {
         if (isAdsResult(result)) for (const ad of result.ads) fastObservedIds.add(String(ad.id));
       }
-      requestCount += directResults.reduce((total, result) => total + result.requestCount, 0);
+      requestCount += directRequestCount + hedgeRequestCountThisPage;
       const primaryBlocked = directResults.find(isPrimaryBlockedResult);
       if (primaryBlocked) {
         return {
@@ -298,7 +479,7 @@ export class OlxCollector implements SourceCollector {
             target.observationTarget,
             regionalRequestClass,
           )));
-      regionalFeedRequests += regionalTargets.length;
+      regionalFeedRequests += regionalResults.reduce((total, result) => total + result.requestCount, 0);
       if (coverageOnly && coverageDue && page === 1) lastRegionalCoverageAt = now;
       requestCount += regionalResults.reduce((total, result) => total + result.requestCount, 0);
       for (const result of regionalResults) {
@@ -313,7 +494,7 @@ export class OlxCollector implements SourceCollector {
           lastHtmlCoverageAt = now;
           htmlCoveragePausedUntil = null;
         }
-        htmlFeedRequests += primaryHtmlResults.length;
+        htmlFeedRequests += primaryHtmlResults.reduce((total, result) => total + result.requestCount, 0);
         for (const result of primaryHtmlResults) {
           if (isAdsResult(result)) for (const ad of result.ads) htmlObservedIds.add(String(ad.id));
         }
@@ -336,7 +517,7 @@ export class OlxCollector implements SourceCollector {
           )),
         );
         requestCount += htmlResults.reduce((total, result) => total + result.requestCount, 0);
-        htmlFeedRequests += htmlTargets.length;
+        htmlFeedRequests += htmlResults.reduce((total, result) => total + result.requestCount, 0);
         for (const result of htmlResults) {
           if (isAdsResult(result)) for (const ad of result.ads) htmlObservedIds.add(String(ad.id));
         }
@@ -354,7 +535,7 @@ export class OlxCollector implements SourceCollector {
         }
         const hydration = await hydrateHtmlCardOnlyAds(
           htmlResults,
-          continuityKnownExternalIds,
+          candidateKnownExternalIds,
           scan.deadlineAt,
         );
         requestCount += hydration.requestCount;
@@ -384,7 +565,7 @@ export class OlxCollector implements SourceCollector {
             "COVERAGE",
           )),
         );
-        privateFeedRequests += privateTargets.length;
+        privateFeedRequests += privateResults.reduce((total, result) => total + result.requestCount, 0);
         requestCount += privateResults.reduce((total, result) => total + result.requestCount, 0);
         for (const result of privateResults) {
           if (isAdsResult(result)) for (const ad of result.ads) privateObservedIds.add(String(ad.id));
@@ -435,6 +616,11 @@ export class OlxCollector implements SourceCollector {
               htmlOnlyObserved: [...htmlObservedIds].filter((id) => !fastObservedIds.has(id)).length,
               privateObserved: privateObservedIds.size,
               privateOnlyObserved: [...privateObservedIds].filter((id) => !fastObservedIds.has(id)).length,
+              freshnessHedgeRequests,
+              freshnessHedgeObserved,
+              freshnessHedgeOnlyObserved,
+              freshnessHedgeOutcome,
+              freshnessHedgePrimaryAgeSeconds,
               ...coordinatorCoverageMetrics(),
             },
           };
@@ -467,20 +653,31 @@ export class OlxCollector implements SourceCollector {
       }
 
       if (page === 1 && successfulFeeds.every((feed) => feed.ads.length < env.OLX_MIN_EXPECTED_PAGE_ITEMS)) {
+        parserDegraded = true;
         degradedReason = `OLX вернул подозрительно короткую первую страницу: ${successfulFeeds.map((feed) => feed.ads.length).join(", ")}`;
         semanticWarnings.push(degradedReason);
       }
 
       pageCount += 1;
+      lastPageScanned = page;
       let observedOnPage = 0;
       let pageAnchored = true;
       let pageCutoff = Boolean(context.publishedAfter);
+      const continuityIgnoredExternalIds = isBackfill && Boolean(scan.recovery)
+        ? new Set([
+          ...cutoffNeutralExternalIds,
+          ...seenExternalIds,
+        ])
+        : undefined;
       for (const feed of successfulFeeds) {
         const selection = selectOlxCandidates(feed.ads, {
           now,
+          categoryKey: context.categoryKey,
           publishedAfter: context.publishedAfter,
-          knownExternalIds: continuityKnownExternalIds,
+          knownExternalIds: candidateKnownExternalIds,
+          continuityKnownExternalIds,
           seenExternalIds,
+          continuityIgnoreExternalIds: continuityIgnoredExternalIds,
           maxCandidates: Math.max(0, maxCandidates - listings.length),
           observationChannel: feed.channel,
           observationTarget: feed.observationTarget,
@@ -491,6 +688,12 @@ export class OlxCollector implements SourceCollector {
         for (const externalId of selection.scannedExternalIds) scannedExternalIds.add(externalId);
         observedCount += selection.observedCount;
         observedOnPage += selection.observedCount;
+        if (
+          selection.oldestObservedAt
+          && (!oldestObservedAt || selection.oldestObservedAt < oldestObservedAt)
+        ) {
+          oldestObservedAt = selection.oldestObservedAt;
+        }
         const exhausted = feed.ads.length === 0;
         const knownTailAnchored = selection.identifiableCount > 0 &&
           (selection.allKnown || selection.knownTailStreak >= Math.max(1, env.KNOWN_LISTING_STOP_THRESHOLD));
@@ -512,9 +715,14 @@ export class OlxCollector implements SourceCollector {
       }
       const feedsExhausted = successfulFeeds.every((feed) => feed.ads.length === 0);
       if (feedsExhausted) {
-        cutoffReached = Boolean(context.publishedAfter);
-        anchored = true;
-        coverageVerificationMethod = "EXHAUSTED";
+        degradedReason = `OLX returned an empty page ${page}; continuity remains unverified`;
+        semanticWarnings.push(degradedReason);
+        coverageUnresolvedReason = olxEmptyRecoveryUnresolvedReason({
+          recovery: Boolean(scan.recovery),
+          pending: Boolean(state.coverageRecoveryPending),
+          observedBeforeEmptyPage: observedCount,
+          priorAttemptCount: state.coverageRecoveryAttemptCount ?? 0,
+        });
         break;
       }
       if (observedOnPage === 0) {
@@ -546,10 +754,28 @@ export class OlxCollector implements SourceCollector {
         coverageVerificationMethod = "KNOWN_TAIL";
         break;
       }
-      if (isBackfill && page < maxPages) {
+      if (isBackfill && page < pageWindow.endPage) {
         const baseDelay = Math.max(0, env.OLX_BACKFILL_PAGE_DELAY_MS);
         await delay(baseDelay + Math.floor(Math.random() * Math.max(1, Math.round(baseDelay * 0.35))));
       }
+    }
+
+    if (
+      isBackfill
+      && !anchored
+      && !cutoffReached
+      && lastPageScanned >= maxOffsetPages
+    ) {
+      degradedReason = `OLX recovery reached the public offset ceiling at page ${maxOffsetPages} before proving continuity`;
+      semanticWarnings.push(degradedReason);
+      coverageUnresolvedReason = olxRecoveryUnresolvedReason({
+        recovery: Boolean(scan.recovery),
+        pending: Boolean(state.coverageRecoveryPending),
+        anchored,
+        cutoffReached,
+        lastPageScanned,
+        maxOffsetPages,
+      });
     }
 
     const hasContinuityEvidence = continuityKnownExternalIds.size > 0 || state.coverageRecoveryPending;
@@ -563,6 +789,7 @@ export class OlxCollector implements SourceCollector {
       listings: sortListingsNewestFirst(listings),
       scannedExternalIds: [...scannedExternalIds],
       observedCount,
+      oldestObservedAt,
       pageCount,
       requestCount,
       cutoffReached,
@@ -570,9 +797,14 @@ export class OlxCollector implements SourceCollector {
       limited: Boolean(degradedReason),
       limitedReason: degradedReason,
       coverageGap: !coverageOnly && !isBackfill && !anchored && hasContinuityEvidence && observedCount > 0,
-      coverageVerified: !coverageOnly && (anchored || cutoffReached),
-      coverageVerificationMethod: !coverageOnly && (anchored || cutoffReached)
+      coverageVerified: !parserDegraded && !coverageOnly && (anchored || cutoffReached),
+      coverageVerificationMethod: !parserDegraded && !coverageOnly && (anchored || cutoffReached)
         ? coverageVerificationMethod ?? (cutoffReached ? "CUTOFF" : "KNOWN_TAIL")
+        : undefined,
+      coverageUnresolvedReason,
+      coverageAttemptGeneration: coverageUnresolvedReason ? recoveryAttemptGeneration : undefined,
+      backfillResumePage: isBackfill && !anchored && !cutoffReached
+        ? nextOlxRecoveryResumePage(pageWindow.startPage, lastPageScanned)
         : undefined,
       coverageStateUpdate: {
         lastRegionalCoverageAt,
@@ -597,7 +829,20 @@ export class OlxCollector implements SourceCollector {
         htmlOnlyObserved: [...htmlObservedIds].filter((id) => !fastObservedIds.has(id)).length,
         privateObserved: privateObservedIds.size,
         privateOnlyObserved: [...privateObservedIds].filter((id) => !fastObservedIds.has(id)).length,
+        freshnessHedgeRequests,
+        freshnessHedgeObserved,
+        freshnessHedgeOnlyObserved,
+        freshnessHedgeOutcome,
+        freshnessHedgePrimaryAgeSeconds,
+        recoveryTermination: coverageUnresolvedReason ?? null,
+        recoveryAttemptGeneration: coverageUnresolvedReason ? recoveryAttemptGeneration : null,
+        effectiveOffsetCap: env.OLX_API_MAX_OFFSET,
         ...coordinatorCoverageMetrics(),
+      },
+      parserHealth: parserDegraded ? "DEGRADED" : "HEALTHY",
+      parserHealthDetails: {
+        firstPageExpectedMinimum: env.OLX_MIN_EXPECTED_PAGE_ITEMS,
+        parserDegraded,
       },
     };
   }
@@ -632,6 +877,7 @@ function selectHotOlxCandidates(
   feeds: readonly Extract<OlxFeedResult, { ads: OlxAd[] }>[],
   options: {
     now: Date;
+    categoryKey?: import("@amb/shared").MarketplaceCategoryKey;
     publishedAfter?: Date;
     knownExternalIds: ReadonlySet<string>;
     seenExternalIds: ReadonlySet<string>;
@@ -645,6 +891,7 @@ function selectHotOlxCandidates(
   for (const feed of feeds) {
     const selection = selectOlxCandidates(feed.ads, {
       now: options.now,
+      categoryKey: options.categoryKey,
       publishedAfter: options.publishedAfter,
       knownExternalIds: options.knownExternalIds,
       seenExternalIds: previewSeen,
@@ -671,6 +918,14 @@ export type OlxMarketResearchQuery = {
 export async function fetchOlxMarketComparables(query: OlxMarketResearchQuery): Promise<NormalizedListing[]> {
   const context: SourceSearchContext = {
     source: "OLX",
+    categoryKey: "vehicle.car",
+    categorySchemaVersion: 1,
+    sourceCategoryId: 108,
+    sourceCategoryPath: "/uk/transport/legkovye-avtomobili/",
+    plannerVersion: 6,
+    categoryCriteria: {},
+    unknownPolicy: "MAX_COVERAGE",
+    shadowMode: false,
     fingerprint: "market-research",
     filterIds: [],
     brand: query.brand,
@@ -757,12 +1012,17 @@ export function selectOlxCandidates(
     publishedAfter?: Date;
     knownExternalIds: ReadonlySet<string>;
     seenExternalIds?: Set<string>;
+    /** Frozen historical anchors can differ from IDs already journaled. */
+    continuityKnownExternalIds?: ReadonlySet<string>;
+    /** Listings already observed on an earlier page are neutral sticky placements. */
+    continuityIgnoreExternalIds?: ReadonlySet<string>;
     maxCandidates: number;
     observationChannel?: ListingObservationChannel;
     observationTarget?: string;
     requestStartedAt?: Date;
     firstByteAt?: Date;
     hotCandidateAt?: Date;
+    categoryKey?: import("@amb/shared").MarketplaceCategoryKey;
   },
 ): {
   listings: NormalizedListing[];
@@ -774,6 +1034,7 @@ export function selectOlxCandidates(
   allKnown: boolean;
   fullyBeforeCutoff: boolean;
   candidateLimitReached: boolean;
+  oldestObservedAt?: Date;
   scannedExternalIds: string[];
 } {
   const listings: NormalizedListing[] = [];
@@ -785,6 +1046,7 @@ export function selectOlxCandidates(
   let allKnown = true;
   let fullyBeforeCutoff = Boolean(options.publishedAfter);
   let candidateLimitReached = false;
+  let oldestObservedAt: Date | undefined;
   const scannedExternalIds: string[] = [];
   const orderingSignals: Array<{ known: boolean }> = [];
 
@@ -796,14 +1058,27 @@ export function selectOlxCandidates(
       continue;
     }
 
+    const publishedAt = olxPublishedAt(ad);
+    const beforeCutoff = Boolean(options.publishedAfter && olxPublicationBeforeCutoff(ad, options.publishedAfter));
+    // A fresh sticky placement already journaled on an earlier page or attempt
+    // is not evidence against reaching the older cutoff tail. Old and
+    // timestamp-less entries are still evaluated, so this cannot fabricate a
+    // cutoff from a page containing no dated older advert.
+    if (options.continuityIgnoreExternalIds?.has(externalId) && publishedAt && !beforeCutoff) {
+      continue;
+    }
+
+    if (publishedAt && (!oldestObservedAt || publishedAt < oldestObservedAt)) {
+      oldestObservedAt = publishedAt;
+    }
+
     identifiableCount += 1;
     const known = options.knownExternalIds.has(externalId);
-    orderingSignals.push({ known });
-    knownEncountered ||= known;
-    allKnown &&= known;
+    const continuityKnown = (options.continuityKnownExternalIds ?? options.knownExternalIds).has(externalId);
+    orderingSignals.push({ known: continuityKnown });
+    knownEncountered ||= continuityKnown;
+    allKnown &&= continuityKnown;
 
-    const publishedAt = olxPublishedAt(ad);
-    const beforeCutoff = Boolean(options.publishedAfter && publishedAt && publishedAt < options.publishedAfter);
     cutoffEncountered ||= beforeCutoff;
     if (!beforeCutoff) fullyBeforeCutoff = false;
 
@@ -816,7 +1091,7 @@ export function selectOlxCandidates(
     // normalization until an advert is actually new for this search context.
     if (known) continue;
 
-    const listing = normalizeOlxAd(ad, options.now);
+    const listing = normalizeOlxAd(ad, options.now, options.categoryKey ?? "vehicle.car");
     if (!listing) continue;
     listing.observationChannel = options.observationChannel;
     listing.observationTarget = options.observationTarget;
@@ -851,6 +1126,7 @@ export function selectOlxCandidates(
     allKnown: identifiableCount > 0 && allKnown,
     fullyBeforeCutoff: identifiableCount > 0 && fullyBeforeCutoff,
     candidateLimitReached,
+    oldestObservedAt,
     scannedExternalIds,
   };
 }

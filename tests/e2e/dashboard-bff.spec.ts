@@ -76,7 +76,7 @@ const authenticatedScreens: Array<{ path: string; heading: RegExp }> = [
 ];
 
 const authenticatedViewports = [
-  { width: 360, height: 800, name: "android-360" },
+  { width: 360, height: 800, name: "mobile-360" },
   { width: 430, height: 932, name: "iphone-430" },
 ];
 

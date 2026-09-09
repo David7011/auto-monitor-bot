@@ -55,7 +55,7 @@ export class RstCollector implements SourceCollector {
       const pageUrl = withPageNumber(env.RST_SEARCH_URL, page);
       const response = await fetchHtml(pageUrl, { source: "RST", encoding: "windows-1251" });
       requestCount += 1;
-      const blocked = isBlockedHtml(response.status, response.body);
+      const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds, response);
       if (blocked.rateLimited || blocked.captchaDetected) {
         return { listings, ...blocked, responseStatus: response.status, affectedUrl: pageUrl, pageCount, requestCount, observedCount, semanticWarnings };
       }

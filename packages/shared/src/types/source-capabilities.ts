@@ -1,4 +1,5 @@
 import type { ListingSource } from "./listing.js";
+import { MARKETPLACE_CATEGORY_KEYS, type MarketplaceCategoryKey } from "./category.js";
 
 export type SourceMode = "OFFICIAL_API" | "PUBLIC_HTTP" | "EVENT" | "MANUAL_ONLY" | "DISCOVERY_AGGREGATOR";
 
@@ -31,6 +32,7 @@ export type SourceCapabilities = {
   supportsServerSideFiltering: boolean;
   supportsRegionFilter: boolean;
   supportsCityFilter: boolean;
+  supportedCategories: readonly MarketplaceCategoryKey[];
 };
 
 export const SOURCE_CAPABILITIES: Record<ListingSource, SourceCapabilities> = {
@@ -48,6 +50,7 @@ export const SOURCE_CAPABILITIES: Record<ListingSource, SourceCapabilities> = {
     supportsServerSideFiltering: true,
     supportsRegionFilter: true,
     supportsCityFilter: true,
+    supportedCategories: ["vehicle.car"],
   },
   OLX: {
     accessMode: "PUBLIC_HTTP",
@@ -63,6 +66,7 @@ export const SOURCE_CAPABILITIES: Record<ListingSource, SourceCapabilities> = {
     supportsServerSideFiltering: false,
     supportsRegionFilter: false,
     supportsCityFilter: false,
+    supportedCategories: MARKETPLACE_CATEGORY_KEYS,
   },
   RST: {
     accessMode: "PUBLIC_HTTP",
@@ -78,6 +82,7 @@ export const SOURCE_CAPABILITIES: Record<ListingSource, SourceCapabilities> = {
     supportsServerSideFiltering: false,
     supportsRegionFilter: false,
     supportsCityFilter: false,
+    supportedCategories: ["vehicle.car"],
   },
   CARS_UA: {
     accessMode: "PUBLIC_HTTP",
@@ -93,6 +98,7 @@ export const SOURCE_CAPABILITIES: Record<ListingSource, SourceCapabilities> = {
     supportsServerSideFiltering: false,
     supportsRegionFilter: false,
     supportsCityFilter: false,
+    supportedCategories: ["vehicle.car"],
   },
   AUTOMOTO: {
     accessMode: "DISCOVERY_AGGREGATOR",
@@ -108,6 +114,7 @@ export const SOURCE_CAPABILITIES: Record<ListingSource, SourceCapabilities> = {
     supportsServerSideFiltering: false,
     supportsRegionFilter: false,
     supportsCityFilter: false,
+    supportedCategories: ["vehicle.car"],
   },
   MOCK: {
     accessMode: "MANUAL_ONLY",
@@ -123,5 +130,6 @@ export const SOURCE_CAPABILITIES: Record<ListingSource, SourceCapabilities> = {
     supportsServerSideFiltering: false,
     supportsRegionFilter: false,
     supportsCityFilter: false,
+    supportedCategories: MARKETPLACE_CATEGORY_KEYS,
   },
 };

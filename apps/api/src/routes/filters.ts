@@ -1,8 +1,11 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
-import { prisma } from "@amb/db";
+import { Prisma, prisma } from "@amb/db";
 import {
   analyzeFilterHygiene,
+  MARKETPLACE_CATEGORY_KEYS,
+  sourceSupportsCategory,
+  validateCategoryFilterCriteria,
   findExactActiveFilter,
   normalizeCityIds,
   normalizeRegionIds,
@@ -14,6 +17,8 @@ import { compactFilterSearchStates } from "../modules/filter-state-hygiene.js";
 
 const sourceEnum = z.enum(["AUTO_RIA", "OLX", "RST", "CARS_UA", "AUTOMOTO", "MOCK"]);
 const freshnessModeEnum = z.enum(["LAST_HOUR", "TODAY", "LAST_24_HOURS", "LAST_3_DAYS", "LAST_7_DAYS", "ALL_TIME"]);
+const categoryEnum = z.enum(MARKETPLACE_CATEGORY_KEYS);
+const unknownPolicyEnum = z.enum(["MAX_COVERAGE", "STRICT"]);
 const nullableText = z
   .string()
   .trim()
@@ -24,6 +29,11 @@ const nullableText = z
 const filterShape = z.object({
   name: z.string().trim().min(1).max(120),
   enabled: z.boolean().default(true),
+  categoryKey: categoryEnum.default("vehicle.car"),
+  categorySchemaVersion: z.number().int().min(1).max(1).default(1),
+  categoryCriteria: z.record(z.string(), z.unknown()).nullable().default(null),
+  unknownPolicy: unknownPolicyEnum.default("MAX_COVERAGE"),
+  shadowMode: z.boolean().default(false),
   sources: z.array(sourceEnum).default([]),
   autoRiaCategoryId: z.number().int().min(1).nullable().optional(),
   autoRiaMarkId: z.number().int().min(1).nullable().optional(),
@@ -85,6 +95,21 @@ function validateFilterRanges(data: Partial<z.infer<typeof filterShape>>, ctx: z
   validateRange(ctx, data.enginePowerFrom, data.enginePowerTo, "enginePowerFrom", "enginePowerTo");
   validateRange(ctx, data.doorsFrom, data.doorsTo, "doorsFrom", "doorsTo");
   validateRange(ctx, data.seatsFrom, data.seatsTo, "seatsFrom", "seatsTo");
+  const categoryCriteria = validateCategoryFilterCriteria(data.categoryCriteria);
+  for (const error of categoryCriteria.errors) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: error, path: ["categoryCriteria"] });
+  }
+  if (data.categoryKey && data.sources) {
+    for (const source of data.sources) {
+      if (!sourceSupportsCategory(source, data.categoryKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${source} does not support ${data.categoryKey}`,
+          path: ["sources"],
+        });
+      }
+    }
+  }
 }
 
 const filterInputSchema = filterShape.superRefine(validateFilterRanges);
@@ -111,8 +136,10 @@ export async function filtersRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
 
     const data = normalizeFilterGeo(parsed.data);
+    const normalizedCriteria = validateCategoryFilterCriteria(data.categoryCriteria).criteria;
     const createData = {
       ...data,
+      categoryCriteria: normalizedCriteria,
       autoRiaCategoryId: data.autoRiaCategoryId ?? null,
       autoRiaMarkId: data.autoRiaMarkId ?? null,
       autoRiaModelId: data.autoRiaModelId ?? null,
@@ -167,13 +194,22 @@ export async function filtersRoutes(app: FastifyInstance): Promise<void> {
       const existing = await tx.filter.findUnique({ where: { id: req.params.id } });
       if (!existing) return { notFound: true as const, duplicate: null, filter: null };
 
+      const { categoryCriteria, ...safePatch } = data;
       const nextRegions = data.regions ?? existing.regions;
       const nextCities = data.cities ?? (data.regions ? normalizeCityIds(existing.cities, nextRegions) : existing.cities);
       const updateData = {
-        ...data,
+        ...safePatch,
+        ...(categoryCriteria !== undefined
+          ? { categoryCriteria: validateCategoryFilterCriteria(categoryCriteria).criteria as Prisma.InputJsonObject }
+          : {}),
         ...(data.regions ? { regions: nextRegions, cities: nextCities } : {}),
       };
       const nextFilter = { ...existing, ...updateData };
+      const nextCategory = nextFilter.categoryKey;
+      const unsupportedSource = nextFilter.sources.find((source) => !sourceSupportsCategory(source, nextCategory as import("@amb/shared").MarketplaceCategoryKey));
+      if (unsupportedSource) {
+        return { notFound: false as const, duplicate: null, filter: null, validationError: `${unsupportedSource} does not support ${nextCategory}` };
+      }
       const activeFilters = await tx.filter.findMany({ where: { enabled: true } });
       const currentDuplicate = existing.enabled
         ? findExactActiveFilter(existing, activeFilters, existing.id)
@@ -182,13 +218,14 @@ export async function filtersRoutes(app: FastifyInstance): Promise<void> {
         ? findExactActiveFilter(nextFilter, activeFilters, existing.id)
         : undefined;
       if (nextDuplicate && nextDuplicate.id !== currentDuplicate?.id) {
-        return { notFound: false as const, duplicate: nextDuplicate, filter: null };
+        return { notFound: false as const, duplicate: nextDuplicate, filter: null, validationError: null };
       }
 
       const filter = await tx.filter.update({ where: { id: req.params.id }, data: updateData });
-      return { notFound: false as const, duplicate: null, filter };
+      return { notFound: false as const, duplicate: null, filter, validationError: null };
     });
     if (result.notFound) return reply.code(404).send({ error: "Filter not found" });
+    if (result.validationError) return reply.code(400).send({ error: result.validationError });
     if (result.duplicate) return exactDuplicateReply(reply, result.duplicate);
 
     const filter = result.filter;

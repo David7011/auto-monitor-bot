@@ -1,3 +1,5 @@
+import type { MarketplaceCategoryKey } from "./category.js";
+
 export type ListingSource = "AUTO_RIA" | "OLX" | "RST" | "CARS_UA" | "AUTOMOTO" | "MOCK";
 
 export type TimestampConfidence = "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN";
@@ -25,6 +27,9 @@ export type ListingSkipReason =
 export type NormalizedListing = {
   source: ListingSource;
   externalId: string;
+  categoryKey?: MarketplaceCategoryKey;
+  categorySchemaVersion?: number;
+  categoryAttributes?: Record<string, string | number | string[]>;
   url: string;
   canonicalUrl: string;
 
@@ -85,6 +90,9 @@ export type ListingDto = {
   id: string;
   source: ListingSource;
   externalId: string;
+  categoryKey: MarketplaceCategoryKey;
+  categorySchemaVersion: number;
+  categoryAttributes: unknown;
   url: string;
   canonicalUrl: string;
   title: string | null;

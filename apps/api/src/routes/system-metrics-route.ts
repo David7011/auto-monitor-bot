@@ -2,6 +2,8 @@ import type { FastifyInstance } from "fastify";
 import { Prisma, prisma } from "@amb/db";
 import {
   groupCount,
+  marketplaceCategoryKey,
+  isMarketplaceCategoryKey,
   startOfTodayInKyiv,
   STARTUP_CATCH_UP_WINDOW_MS,
   splitSessionJournalLatencies,
@@ -11,6 +13,11 @@ import {
   type MetricsResponse,
 } from "@amb/shared";
 import { apiStartedAt } from "../lib/runtime-lifecycle.js";
+import {
+  COLLECTOR_DURATION_MIN_SAMPLE_SIZE,
+  buildCollectorDurationBreakdown,
+  type CollectorDurationAggregateRow,
+} from "../lib/collector-duration-metrics.js";
 
 export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
   app.get("/metrics", async () => {
@@ -18,7 +25,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
     const latencyWindowStartedAt = new Date(generatedAt.getTime() - 24 * 60 * 60 * 1000);
     const todayStartedAt = startOfTodayInKyiv();
     const [
-      runs,
+      collectorDurationRows,
       latencyObservations,
       dailyListings,
       dailyNotifications,
@@ -27,29 +34,35 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
       dailyObservations,
       latestAudit,
       firstOlxSuccessThisSession,
+      categoryDurationRows,
+      categoryStates,
     ] = await Promise.all([
-      prisma.collectorRun.findMany({
-        where: { finishedAt: { not: null } },
-        orderBy: { startedAt: "desc" },
-        take: 100,
-        select: {
-          source: true,
-          lane: true,
-          startedAt: true,
-          finishedAt: true,
-          foundCount: true,
-          newCount: true,
-          recoveredCount: true,
-          pageCount: true,
-          requestCount: true,
-          observedCount: true,
-          matchedCount: true,
-          rejectedCount: true,
-          duplicateCount: true,
-          dispatchedCount: true,
-          status: true,
-        },
-      }),
+      prisma.$queryRaw<CollectorDurationAggregateRow[]>(Prisma.sql`
+        WITH durations AS (
+          SELECT
+            "source",
+            "lane",
+            EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000 AS duration_ms
+          FROM "collector_runs"
+          WHERE "finishedAt" IS NOT NULL
+            AND "startedAt" >= ${latencyWindowStartedAt}
+            AND "startedAt" <= ${generatedAt}
+            AND "status"::text IN ('SUCCESS', 'LIMITED')
+            AND "finishedAt" >= "startedAt"
+        )
+        SELECT
+          CASE WHEN GROUPING("source") = 1 THEN NULL ELSE "source"::text END AS "source",
+          "lane"::text AS "lane",
+          COUNT(*)::integer AS "sampleCount",
+          ROUND(AVG(duration_ms))::integer AS "averageMs",
+          ROUND(MIN(duration_ms))::integer AS "minimumMs",
+          ROUND(MAX(duration_ms))::integer AS "maximumMs",
+          ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms))::integer AS "p50Ms",
+          ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms))::integer AS "p95Ms"
+        FROM durations
+        GROUP BY GROUPING SETS (("lane"), ("source", "lane"))
+        ORDER BY "lane", "source" NULLS FIRST
+      `),
       prisma.sourceSeenListing.findMany({
         where: {
           discoveryLane: "REALTIME",
@@ -58,6 +71,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         orderBy: { firstSeenAt: "asc" },
         select: {
           source: true,
+          categoryKey: true,
           publishedAt: true,
           firstSeenAt: true,
           notifiedAt: true,
@@ -130,13 +144,43 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         orderBy: { finishedAt: "asc" },
         select: { startedAt: true, finishedAt: true },
       }),
+      prisma.$queryRaw<Array<{
+        categoryKey: string;
+        sampleCount: number;
+        averageMs: number;
+        minimumMs: number;
+        maximumMs: number;
+        p50Ms: number;
+        p95Ms: number;
+      }>>(Prisma.sql`
+        SELECT
+          "categoryKey" AS "categoryKey",
+          COUNT(*)::integer AS "sampleCount",
+          ROUND(AVG(EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000))::integer AS "averageMs",
+          ROUND(MIN(EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000))::integer AS "minimumMs",
+          ROUND(MAX(EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000))::integer AS "maximumMs",
+          ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000))::integer AS "p50Ms",
+          ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000))::integer AS "p95Ms"
+        FROM "collector_runs"
+        WHERE "lane" = 'REALTIME'::"CollectorLane"
+          AND "finishedAt" IS NOT NULL
+          AND "finishedAt" >= "startedAt"
+          AND "startedAt" BETWEEN ${latencyWindowStartedAt} AND ${generatedAt}
+          AND "status"::text IN ('SUCCESS', 'LIMITED')
+        GROUP BY "categoryKey"
+        ORDER BY "categoryKey"
+      `),
+      prisma.sourceSearchState.findMany({
+        select: {
+          categoryKey: true,
+          parserHealth: true,
+          coverageRecoveryPending: true,
+          lastSuccessfulScanAt: true,
+        },
+      }),
     ]);
 
-    const collectorDurations = runs
-      .map((run) => (run.finishedAt ? run.finishedAt.getTime() - run.startedAt.getTime() : null))
-      .filter((value): value is number => value != null && value >= 0);
-
-    const collectorDurationSummary = summarizeMetric(collectorDurations);
+    const collectorDurations = buildCollectorDurationBreakdown(collectorDurationRows);
     const latencySummary = summarizeJournalLatencies(latencyObservations.map((observation) => ({
       ...observation,
       notifiedAt: observation.notifiedAt && observation.notifiedAt <= generatedAt
@@ -153,7 +197,9 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
       apiStartedAt,
     );
     const latencyBySource = sourceHealth.map((source) => {
-      const sourceRuns = runs.filter((run) => run.source === source.source);
+      const realtimeCollectorDuration = collectorDurations.bySourceLane.find((row) =>
+        row.source === source.source && row.lane === "REALTIME")?.durationMs
+        ?? summarizeMetric([]);
       const sourceLatency = summarizeJournalLatencies(latencyObservations
         .filter((observation) => observation.source === source.source)
         .map((observation) => ({
@@ -164,18 +210,51 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         })));
       return {
         source: source.source,
-        collectorDurationMs: summarizeMetric(sourceRuns
-          .map((run) => run.finishedAt ? run.finishedAt.getTime() - run.startedAt.getTime() : null)
-          .filter((value): value is number => value != null && value >= 0)),
+        collectorDurationMs: realtimeCollectorDuration,
         ...sourceLatency,
         publicationToDetectionMs: sourceLatency.publicationTimestampToFirstSeenMs,
         detectionToTelegramMs: sourceLatency.firstSeenToTelegramMs,
       };
     });
     const exactTelegramLatency = latencySummary.durableJournalToTelegramAcceptanceMs;
+    const categoryKeys = [...new Set([
+      ...categoryDurationRows.map((row) => row.categoryKey).filter(isMarketplaceCategoryKey),
+      ...categoryStates.map((state) => marketplaceCategoryKey(state.categoryKey)),
+      ...latencyObservations.map((observation) => marketplaceCategoryKey(observation.categoryKey)),
+    ])].sort();
+    const categoryHealth = categoryKeys.map((categoryKey) => {
+      const duration = categoryDurationRows.find((row) => row.categoryKey === categoryKey);
+      const states = categoryStates.filter((state) => marketplaceCategoryKey(state.categoryKey) === categoryKey);
+      const observations = latencyObservations.filter((observation) => marketplaceCategoryKey(observation.categoryKey) === categoryKey);
+      const categoryLatency = summarizeJournalLatencies(observations.map((observation) => ({
+        ...observation,
+        notifiedAt: observation.notifiedAt && observation.notifiedAt <= generatedAt ? observation.notifiedAt : null,
+      })));
+      return {
+        categoryKey,
+        realtimeDurationMs: duration ? {
+          count: duration.sampleCount,
+          avg: duration.averageMs,
+          min: duration.minimumMs,
+          max: duration.maximumMs,
+          p50: duration.p50Ms,
+          p95: duration.p95Ms,
+        } : summarizeMetric([]),
+        durableJournalToTelegramAcceptanceMs: categoryLatency.durableJournalToTelegramAcceptanceMs,
+        observations: observations.length,
+        discoveryShards: states.length,
+        parserDegradedShards: states.filter((state) => state.parserHealth === "DEGRADED").length,
+        recoveryPendingShards: states.filter((state) => state.coverageRecoveryPending).length,
+        lastSuccessfulScanAt: states.map((state) => state.lastSuccessfulScanAt).filter((date): date is Date => Boolean(date)).sort((left, right) => right.getTime() - left.getTime())[0] ?? null,
+      };
+    });
     const telegramSloReady = exactTelegramLatency.count >= TELEGRAM_LATENCY_MIN_SAMPLE_SIZE;
     const telegramSloPassed = telegramSloReady && exactTelegramLatency.p95 != null
       ? exactTelegramLatency.p95 <= 3_000
+      : null;
+    const collectorSloReady = collectorDurations.realtimeDurationMs.count >= COLLECTOR_DURATION_MIN_SAMPLE_SIZE;
+    const collectorSloPassed = collectorSloReady && collectorDurations.realtimeDurationMs.p95 != null
+      ? collectorDurations.realtimeDurationMs.p95 <= 2_000
       : null;
 
     return {
@@ -187,12 +266,16 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         basis: "SourceSeenListing.firstSeenAt" as const,
       },
       sampleSize: {
-        collectorRuns: runs.length,
+        collectorRuns: collectorDurations.totalCount,
         realtimeObservations: latencyObservations.length,
         publicationTimestamps: latencySummary.publicationTimestampToFirstSeenMs.count,
         telegramNotifications: exactTelegramLatency.count,
       },
-      collectorDurationMs: collectorDurationSummary,
+      collectorDurationMs: collectorDurations.realtimeDurationMs,
+      collectorRealtimeDurationMs: collectorDurations.realtimeDurationMs,
+      collectorDurationByLane: collectorDurations.byLane,
+      collectorDurationBySourceLane: collectorDurations.bySourceLane,
+      categoryHealth,
       ...latencySummary,
       publicationToDetectionMs: latencySummary.publicationTimestampToFirstSeenMs,
       detectionToTelegramMs: latencySummary.firstSeenToTelegramMs,
@@ -258,8 +341,14 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
       })),
       latestCompletenessAudit: latestAudit,
       slo: {
-        collectorP95Under2Seconds: collectorDurationSummary.p95 != null
-          && collectorDurationSummary.p95 <= 2_000,
+        collectorP95Under2Seconds: collectorSloPassed,
+        collectorP95Metric: "REALTIME_SUCCESS_OR_LIMITED_24H" as const,
+        collectorP95Status: collectorSloPassed == null
+          ? "LOW_SAMPLE"
+          : collectorSloPassed
+            ? "PASS"
+            : "FAIL",
+        collectorMinimumSampleSize: COLLECTOR_DURATION_MIN_SAMPLE_SIZE,
         telegramP95Under3Seconds: telegramSloPassed,
         telegramP95Metric: "DURABLE_JOURNAL_TO_TELEGRAM_ACCEPTANCE" as const,
         telegramP95Status: telegramSloPassed == null

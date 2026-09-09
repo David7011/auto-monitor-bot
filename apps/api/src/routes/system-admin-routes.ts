@@ -122,12 +122,12 @@ export async function systemAdminRoutes(app: FastifyInstance): Promise<void> {
 
     checks.push({
       name: "AUTO.RIA",
-      status: env.AUTO_RIA_API_KEY ? "OK" : "WARN",
+      status: "OK",
       message: env.AUTO_RIA_API_KEY
         ? `API-ключ настроен, часовой лимит: ${env.AUTO_RIA_HOURLY_REQUEST_LIMIT}, платные методы: ${
           env.AUTO_RIA_PAID_ENRICHMENT_ENABLED ? "включены" : "выключены"
         }`
-        : "API-ключ AUTO.RIA не настроен",
+        : "Публичная выдача AUTO.RIA доступна без обязательного API-ключа; состояние источника проверяется отдельно",
     });
 
     const [realSourceRows, activeRealFilters, monitoringState] = await Promise.all([

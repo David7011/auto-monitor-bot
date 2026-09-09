@@ -5,6 +5,7 @@ import useSWR from "swr"
 import { AlertTriangle, CarFront, Database, Fuel, Gauge, GitBranch, Pencil, Plus, Power, SlidersHorizontal, Trash2, X } from "lucide-react"
 import { clientApi as api, dashboardErrorMessage } from "@/lib/client-api"
 import type { FilterRow, SourceKind } from "@/lib/types"
+import type { MarketplaceCategoryKey, UnknownFilterPolicy } from "@amb/shared"
 import { GlowButton } from "@/components/hud/glow-button"
 import { HudPanel } from "@/components/hud/hud-panel"
 import { StatusBadge } from "@/components/hud/status-badge"
@@ -40,6 +41,17 @@ import {
 
 const fetcher = <T,>(path: string) => api.get<T>(path)
 
+const CATEGORY_OPTIONS: Array<{ value: MarketplaceCategoryKey; label: string }> = [
+  { value: "vehicle.car", label: "Автомобиль" },
+  { value: "electronics.laptop", label: "Ноутбук" },
+  { value: "electronics.phone", label: "Телефон" },
+  { value: "electronics.desktop", label: "Настольный ПК" },
+  { value: "electronics.component.gpu", label: "Видеокарта" },
+  { value: "gaming.console", label: "Игровая консоль" },
+  { value: "transport.escooter", label: "Электросамокат" },
+  { value: "generic", label: "Другое" },
+]
+
 export default function FiltersPage() {
   const { data, mutate } = useSWR<FiltersResponse>("/filters", fetcher)
   const { data: marksData } = useSWR<TaxonomyResponse>(`/vehicle-taxonomy/marks?categoryId=${CATEGORY_ID}`, fetcher)
@@ -47,6 +59,18 @@ export default function FiltersPage() {
   const { data: geoData } = useSWR<RegionsResponse>("/vehicle-taxonomy/regions", fetcher)
 
   const [name, setName] = useState("OLX/RST боевой фильтр")
+  const [categoryKey, setCategoryKey] = useState<MarketplaceCategoryKey>("vehicle.car")
+  const [unknownPolicy, setUnknownPolicy] = useState<UnknownFilterPolicy>("MAX_COVERAGE")
+  const [shadowMode, setShadowMode] = useState(false)
+  const [cpuIncludes, setCpuIncludes] = useState("")
+  const [gpuIncludes, setGpuIncludes] = useState("")
+  const [platformIncludes, setPlatformIncludes] = useState("")
+  const [minRamGb, setMinRamGb] = useState("")
+  const [minStorageGb, setMinStorageGb] = useState("")
+  const [minBatteryHealthPercent, setMinBatteryHealthPercent] = useState("")
+  const [minVramGb, setMinVramGb] = useState("")
+  const [minPowerW, setMinPowerW] = useState("")
+  const [minRangeKm, setMinRangeKm] = useState("")
   const [autoRiaMarkId, setAutoRiaMarkId] = useState("")
   const [autoRiaModelId, setAutoRiaModelId] = useState("")
   const [brand, setBrand] = useState("")
@@ -155,12 +179,67 @@ export default function FiltersPage() {
     setCitySearch("")
   }
 
+  function handleCategoryChange(nextCategory: MarketplaceCategoryKey) {
+    setCategoryKey(nextCategory)
+    setBrand("")
+    setModel("")
+    setModelNames("")
+    setAutoRiaMarkId("")
+    setAutoRiaModelId("")
+    setGeneration("")
+    setCpuIncludes("")
+    setGpuIncludes("")
+    setPlatformIncludes("")
+    setMinRamGb("")
+    setMinStorageGb("")
+    setMinBatteryHealthPercent("")
+    setMinVramGb("")
+    setMinPowerW("")
+    setMinRangeKm("")
+    setPriceFrom("")
+    setConditions("")
+    setKeywords("")
+    setUnknownPolicy("MAX_COVERAGE")
+    if (nextCategory === "vehicle.car") {
+      setSources(["OLX", "RST", "CARS_UA", "AUTOMOTO"])
+      setYearFrom("2015")
+      setPriceTo("15000")
+      setMileageTo("220000")
+      setExcludeKeywords("биток, нерастаможен, после ДТП")
+      setShadowMode(false)
+    } else {
+      setShadowMode(true)
+      setSources(["OLX"])
+      setYearFrom("")
+      setYearTo("")
+      setMileageFrom("")
+      setMileageTo("")
+      setPriceTo("")
+      setExcludeKeywords("")
+    }
+  }
+
   function filterPayload() {
     return {
       name,
       enabled: true,
       sources,
-      autoRiaCategoryId: CATEGORY_ID,
+      categoryKey,
+      categorySchemaVersion: 1,
+      categoryCriteria: {
+        cpuIncludes: toList(cpuIncludes),
+        gpuIncludes: toList(gpuIncludes),
+        platformIncludes: toList(platformIncludes),
+        minRamGb: numberOrNull(minRamGb),
+        minStorageGb: numberOrNull(minStorageGb),
+        minBatteryHealthPercent: numberOrNull(minBatteryHealthPercent),
+        minVramGb: numberOrNull(minVramGb),
+        minPowerW: numberOrNull(minPowerW),
+        minRangeKm: numberOrNull(minRangeKm),
+      },
+      unknownPolicy,
+      shadowMode,
+      autoRiaCategoryId: categoryKey === "vehicle.car" ? CATEGORY_ID : null,
       autoRiaMarkId: marksData?.source === "AUTO_RIA_API" ? numberOrNull(autoRiaMarkId) : null,
       autoRiaModelId: modelsData?.source === "AUTO_RIA_API" ? numberOrNull(autoRiaModelId) : null,
       brand: brand || null,
@@ -218,6 +297,18 @@ export default function FiltersPage() {
   function editFilter(filter: FilterRow) {
     setEditingId(filter.id)
     setName(filter.name)
+    setCategoryKey(filter.categoryKey ?? "vehicle.car")
+    setUnknownPolicy(filter.unknownPolicy ?? "MAX_COVERAGE")
+    setShadowMode(filter.shadowMode ?? false)
+    setCpuIncludes((filter.categoryCriteria?.cpuIncludes ?? []).join(", "))
+    setGpuIncludes((filter.categoryCriteria?.gpuIncludes ?? []).join(", "))
+    setPlatformIncludes((filter.categoryCriteria?.platformIncludes ?? []).join(", "))
+    setMinRamGb(filter.categoryCriteria?.minRamGb?.toString() ?? "")
+    setMinStorageGb(filter.categoryCriteria?.minStorageGb?.toString() ?? "")
+    setMinBatteryHealthPercent(filter.categoryCriteria?.minBatteryHealthPercent?.toString() ?? "")
+    setMinVramGb(filter.categoryCriteria?.minVramGb?.toString() ?? "")
+    setMinPowerW(filter.categoryCriteria?.minPowerW?.toString() ?? "")
+    setMinRangeKm(filter.categoryCriteria?.minRangeKm?.toString() ?? "")
     setAutoRiaMarkId(filter.autoRiaMarkId?.toString() ?? "")
     setAutoRiaModelId(filter.autoRiaModelId?.toString() ?? "")
     setBrand(filter.brand ?? "")
@@ -257,6 +348,18 @@ export default function FiltersPage() {
   function resetForm() {
     setEditingId(null)
     setName("OLX/RST боевой фильтр")
+    setCategoryKey("vehicle.car")
+    setUnknownPolicy("MAX_COVERAGE")
+    setShadowMode(false)
+    setCpuIncludes("")
+    setGpuIncludes("")
+    setPlatformIncludes("")
+    setMinRamGb("")
+    setMinStorageGb("")
+    setMinBatteryHealthPercent("")
+    setMinVramGb("")
+    setMinPowerW("")
+    setMinRangeKm("")
     setAutoRiaMarkId("")
     setAutoRiaModelId("")
     setBrand("")
@@ -341,7 +444,19 @@ export default function FiltersPage() {
                 ) : null}
               </Field>
 
-              <Field label="Марка">
+              <Field label="Категория" className="md:col-span-3">
+                <select
+                  className={inputClass}
+                  value={categoryKey}
+                  onChange={(event) => handleCategoryChange(event.target.value as MarketplaceCategoryKey)}
+                >
+                  {CATEGORY_OPTIONS.map((category) => (
+                    <option key={category.value} value={category.value}>{category.label}</option>
+                  ))}
+                </select>
+              </Field>
+
+              {categoryKey === "vehicle.car" ? <><Field label="Марка">
                 <select
                   className={inputClass}
                   value={autoRiaMarkId}
@@ -391,9 +506,22 @@ export default function FiltersPage() {
                   ))}
                 </select>
               </Field>
+              </> : <>
+                <Field label="Бренд">
+                  <input className={inputClass} value={brand} onChange={(event) => setBrand(event.target.value)} placeholder="HP, Apple, NVIDIA" />
+                </Field>
+                <Field label="Модель">
+                  <input className={inputClass} value={model} onChange={(event) => setModel(event.target.value)} placeholder="EliteBook 845 G9" />
+                </Field>
+                <Field label="Свежесть">
+                  <select className={inputClass} value={freshnessMode} onChange={(event) => setFreshnessMode(event.target.value as FreshnessMode)}>
+                    {FRESHNESS_MODES.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
+                  </select>
+                </Field>
+              </>}
             </div>
 
-            <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+            {categoryKey === "vehicle.car" ? <><div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
               <Field label="Год от">
                 <input className={inputClass} inputMode="numeric" value={yearFrom} onChange={(event) => setYearFrom(event.target.value)} />
               </Field>
@@ -463,6 +591,46 @@ export default function FiltersPage() {
                 </select>
               </Field>
             </div>
+            </> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <Field label="Цена от, грн">
+                <input className={inputClass} inputMode="numeric" value={priceFrom} onChange={(event) => setPriceFrom(event.target.value)} />
+              </Field>
+              <Field label="Цена до, грн">
+                <input className={inputClass} inputMode="numeric" value={priceTo} onChange={(event) => setPriceTo(event.target.value)} />
+              </Field>
+              {(categoryKey === "electronics.laptop" || categoryKey === "electronics.desktop") ? <Field label="RAM от, ГБ">
+                <input className={inputClass} inputMode="numeric" value={minRamGb} onChange={(event) => setMinRamGb(event.target.value)} />
+              </Field> : null}
+              {(categoryKey === "electronics.laptop" || categoryKey === "electronics.desktop" || categoryKey === "electronics.phone" || categoryKey === "gaming.console") ? <Field label="Накопитель от, ГБ">
+                <input className={inputClass} inputMode="numeric" value={minStorageGb} onChange={(event) => setMinStorageGb(event.target.value)} />
+              </Field> : null}
+              {(categoryKey === "electronics.laptop" || categoryKey === "electronics.desktop") ? <>
+                <Field label="CPU содержит"><input className={inputClass} value={cpuIncludes} onChange={(event) => setCpuIncludes(event.target.value)} placeholder="Ryzen 5, i7" /></Field>
+                <Field label="GPU содержит"><input className={inputClass} value={gpuIncludes} onChange={(event) => setGpuIncludes(event.target.value)} placeholder="RTX 3060" /></Field>
+              </> : null}
+              {categoryKey === "electronics.phone" ? <Field label="Батарея от, %"><input className={inputClass} inputMode="numeric" value={minBatteryHealthPercent} onChange={(event) => setMinBatteryHealthPercent(event.target.value)} /></Field> : null}
+              {categoryKey === "electronics.component.gpu" ? <>
+                <Field label="GPU содержит"><input className={inputClass} value={gpuIncludes} onChange={(event) => setGpuIncludes(event.target.value)} placeholder="RTX 4070" /></Field>
+                <Field label="VRAM от, ГБ"><input className={inputClass} inputMode="numeric" value={minVramGb} onChange={(event) => setMinVramGb(event.target.value)} /></Field>
+              </> : null}
+              {categoryKey === "gaming.console" ? <Field label="Платформа"><input className={inputClass} value={platformIncludes} onChange={(event) => setPlatformIncludes(event.target.value)} placeholder="PlayStation 5, Xbox Series" /></Field> : null}
+              {categoryKey === "transport.escooter" ? <>
+                <Field label="Мощность от, Вт"><input className={inputClass} inputMode="numeric" value={minPowerW} onChange={(event) => setMinPowerW(event.target.value)} /></Field>
+                <Field label="Запас хода от, км"><input className={inputClass} inputMode="numeric" value={minRangeKm} onChange={(event) => setMinRangeKm(event.target.value)} /></Field>
+              </> : null}
+              <Field label="Если характеристика неизвестна">
+                <select className={inputClass} value={unknownPolicy} onChange={(event) => setUnknownPolicy(event.target.value as UnknownFilterPolicy)}>
+                  <option value="MAX_COVERAGE">Сразу показать как возможное совпадение</option>
+                  <option value="STRICT">Пометить для строгого уточнения</option>
+                </select>
+              </Field>
+              <Field label="Режим отправки">
+                <select className={inputClass} value={shadowMode ? "shadow" : "live"} onChange={(event) => setShadowMode(event.target.value === "shadow")}>
+                  <option value="live">Telegram включён</option>
+                  <option value="shadow">Теневой: считать без Telegram</option>
+                </select>
+              </Field>
+            </div>}
 
             <div className="grid gap-3 md:grid-cols-2">
               <div className="md:col-span-2">
@@ -495,7 +663,7 @@ export default function FiltersPage() {
 
           <div className="space-y-4">
             <ToggleGroup icon={<Database />} label="Источники">
-              {SOURCES.map((source) => {
+              {SOURCES.filter((source) => categoryKey === "vehicle.car" || source === "OLX").map((source) => {
                 const active = sources.includes(source)
                 return (
                   <TogglePill
@@ -508,7 +676,7 @@ export default function FiltersPage() {
               })}
             </ToggleGroup>
 
-            <ToggleGroup icon={<CarFront />} label="Кузов">
+            {categoryKey === "vehicle.car" ? <><ToggleGroup icon={<CarFront />} label="Кузов">
               {(groups?.bodyTypes ?? []).map((option) => (
                 <TogglePill
                   key={option.value}
@@ -551,12 +719,13 @@ export default function FiltersPage() {
                 />
               ))}
             </ToggleGroup>
+            </> : null}
           </div>
         </div>
 
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
           <div className="text-xs text-muted">
-            Марка: <span className="text-foreground">{brand || "любая"}</span> · Модель:{" "}
+            Категория: <span className="text-foreground">{CATEGORY_OPTIONS.find((item) => item.value === categoryKey)?.label}</span> · Бренд: <span className="text-foreground">{brand || "любой"}</span> · Модель:{" "}
             <span className="text-foreground">{model || modelNames || "любая"}</span> · Свежесть:{" "}
             <span className="text-foreground">{FRESHNESS_MODES.find((mode) => mode.value === freshnessMode)?.label}</span> · Источники:{" "}
             <span className="text-foreground">{sourceText || "не выбраны"}</span> · Гео:{" "}
@@ -598,19 +767,23 @@ export default function FiltersPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-semibold">{filter.name}</span>
                   <StatusBadge status={filter.enabled ? "ACTIVE" : "DISABLED"} />
+                  <span className="rounded-md border border-border px-2 py-0.5 text-xs text-accent-soft">{CATEGORY_OPTIONS.find((item) => item.value === filter.categoryKey)?.label ?? "Автомобиль"}</span>
+                  {filter.shadowMode ? <span className="rounded-md border border-warning/40 px-2 py-0.5 text-xs text-warning">SHADOW</span> : null}
                 </div>
                 <div className="mt-2 grid gap-x-4 gap-y-1 text-sm text-muted md:grid-cols-2 xl:grid-cols-4">
                   <span>{filter.brand ?? "Любая марка"} {filter.model ?? (filter.modelNames ?? []).join(", ")}</span>
                   <span>Свежесть: {FRESHNESS_MODES.find((mode) => mode.value === filter.freshnessMode)?.label ?? filter.freshnessMode}</span>
-                  <span>Год: {rangeText(filter.yearFrom, filter.yearTo)}</span>
-                  <span>Цена: {rangeText(filter.priceFrom, filter.priceTo, "$")}</span>
-                  <span>Пробег: {rangeText(filter.mileageFrom, filter.mileageTo, " км")}</span>
-                  <span>Объем: {rangeText(filter.engineVolumeFrom, filter.engineVolumeTo, " л")}</span>
-                  <span>Мощность: {rangeText(filter.enginePowerFrom, filter.enginePowerTo, " л.с.")}</span>
-                  <span>Кузов: {labelsFor(filter.bodyTypes, groups?.bodyTypes)}</span>
-                  <span>Топливо: {labelsFor(filter.fuelTypes, groups?.fuelTypes)}</span>
-                  <span>Коробка: {labelsFor(filter.gearboxes, groups?.gearboxes)}</span>
-                  <span>Привод: {labelsFor(filter.driveTypes, groups?.driveTypes)}</span>
+                  <span>Цена: {rangeText(filter.priceFrom, filter.priceTo, filter.categoryKey === "vehicle.car" ? "$" : " грн")}</span>
+                  {filter.categoryKey === "vehicle.car" ? <>
+                    <span>Год: {rangeText(filter.yearFrom, filter.yearTo)}</span>
+                    <span>Пробег: {rangeText(filter.mileageFrom, filter.mileageTo, " км")}</span>
+                    <span>Объем: {rangeText(filter.engineVolumeFrom, filter.engineVolumeTo, " л")}</span>
+                    <span>Мощность: {rangeText(filter.enginePowerFrom, filter.enginePowerTo, " л.с.")}</span>
+                    <span>Кузов: {labelsFor(filter.bodyTypes, groups?.bodyTypes)}</span>
+                    <span>Топливо: {labelsFor(filter.fuelTypes, groups?.fuelTypes)}</span>
+                    <span>Коробка: {labelsFor(filter.gearboxes, groups?.gearboxes)}</span>
+                    <span>Привод: {labelsFor(filter.driveTypes, groups?.driveTypes)}</span>
+                  </> : null}
                   <span>Гео: {formatGeoSummary(filter, geoRegions)}</span>
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-2 font-mono text-xs text-muted">

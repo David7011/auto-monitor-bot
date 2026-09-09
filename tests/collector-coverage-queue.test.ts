@@ -24,6 +24,8 @@ describe("durable collector.coverage queue", () => {
     expect(collectorQueueForJob(job, lane)).toBe(QUEUE_NAMES.COLLECTOR_COVERAGE);
     expect(collectorLockScope(job, lane)).toBe("COVERAGE");
     expect(collectorLockScope({ source: "OLX", trigger: "BACKFILL" }, "BACKFILL")).toBe("BACKFILL");
+    expect(collectorLockScope({ source: "RST", trigger: "SCHEDULED" }, "REALTIME")).toBe("ORIGIN");
+    expect(collectorLockScope({ source: "RST", trigger: "BACKFILL" }, "BACKFILL")).toBe("ORIGIN");
   });
 
   it("bounds coverage to one shallow cycle and identifies it explicitly", () => {

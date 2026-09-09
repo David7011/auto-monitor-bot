@@ -3,6 +3,10 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $failed = $false
 
 Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "scripts") -Filter "*.ps1" -File | ForEach-Object {
+  if ($_.Name -eq "setup-new-pc.ps1" -and $_.Length -eq 0) {
+    Write-Warning "Skipping the zero-byte Defender-blocked local bootstrap prototype; use prepare-new-pc.ps1"
+    return
+  }
   $tokens = $null
   $errors = $null
   [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null

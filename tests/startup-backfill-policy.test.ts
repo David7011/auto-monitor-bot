@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFERRED_BACKFILL_RETRY_SECONDS,
-  deferOlxBackfillAfterRealtime,
+  deferOriginSensitiveBackfillAfterRealtime,
   MIN_STARTUP_BACKFILL_DELAY_SECONDS,
   nextBackfillTickAfterAttempt,
   startupBackfillDeadline,
@@ -25,10 +25,11 @@ describe("startup backfill policy", () => {
     expect(startupBackfillDeadline(now, existing, 15)).toEqual(existing);
   });
 
-  it("defers only OLX backfill when OLX realtime was enqueued in the same tick", () => {
-    const realtime = new Set(["OLX"] as const);
-    expect(deferOlxBackfillAfterRealtime("OLX", realtime)).toBe(true);
-    expect(deferOlxBackfillAfterRealtime("RST", realtime)).toBe(false);
+  it("defers OLX and RST backfill when their realtime run was enqueued in the same tick", () => {
+    const realtime = new Set(["OLX", "RST"] as const);
+    expect(deferOriginSensitiveBackfillAfterRealtime("OLX", realtime)).toBe(true);
+    expect(deferOriginSensitiveBackfillAfterRealtime("RST", realtime)).toBe(true);
+    expect(deferOriginSensitiveBackfillAfterRealtime("CARS_UA", realtime)).toBe(false);
   });
 
   it("re-arms a deferred cycle after a short safe delay instead of consuming it", () => {

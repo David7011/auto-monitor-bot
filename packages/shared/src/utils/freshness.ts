@@ -6,8 +6,8 @@ const KYIV_TIME_ZONE = "Europe/Kyiv";
 const MAX_FUTURE_PUBLICATION_DRIFT_MS = 2 * 60 * 1000;
 
 const SOURCE_PRIORITY: Record<ListingSource, number> = {
-  AUTO_RIA: 50,
-  OLX: 40,
+  AUTO_RIA: 40,
+  OLX: 50,
   CARS_UA: 30,
   AUTOMOTO: 25,
   RST: 20,

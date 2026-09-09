@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAutoRiaSearchUrl,
+  isAutoRiaCredentialRejection,
   selectAutoRiaCandidateIds,
 } from "../apps/worker/src/collectors/auto-ria.js";
 import type { SourceSearchContext } from "../apps/worker/src/collectors/base.js";
@@ -53,6 +54,9 @@ describe("AUTO.RIA search URL", () => {
     expect(url.searchParams.get("created_after")).toBe(context.publishedAfter!.toISOString());
     expect(url.searchParams.get("state[0]")).toBe("11");
     expect(url.searchParams.get("city[0]")).toBe("0");
+    expect(url.searchParams.get("bodystyle[0]")).toBe("3");
+    expect(url.searchParams.get("type[0]")).toBe("1");
+    expect(url.searchParams.has("fuel_id[0]")).toBe(false);
     expect(url.pathname).not.toContain("average");
     expect(url.pathname).not.toContain("vin");
   });
@@ -83,6 +87,37 @@ describe("AUTO.RIA search URL", () => {
     expect(url.searchParams.get("city[0]")).toBe("1");
   });
 
+  it("keeps an all-makes search broad and never sends a model id without its mark id", () => {
+    const context: SourceSearchContext = {
+      source: "AUTO_RIA",
+      fingerprint: "all-makes",
+      filterIds: ["filter-1"],
+      autoRiaModelId: 87,
+      models: [],
+      bodyTypes: [],
+      fuelTypes: [],
+      gearboxes: [],
+      driveTypes: [],
+      colors: [],
+      yearFrom: 1990,
+      priceTo: 10000,
+      regions: ["dnipropetrovska"],
+      cities: ["dnipro"],
+      keywords: [],
+      excludeKeywords: [],
+      freshnessMode: "TODAY",
+      initialWindowBehavior: "SKIP_EXISTING",
+      maxInitialWindowNotifications: 50,
+    };
+
+    const url = new URL(buildAutoRiaSearchUrl(context, "test-api-key"));
+    expect(url.searchParams.has("marka_id[0]")).toBe(false);
+    expect(url.searchParams.has("model_id[0]")).toBe(false);
+    expect(url.searchParams.get("s_yers[0]")).toBe("1990");
+    expect(url.searchParams.get("price_do")).toBe("10000");
+    expect(url.searchParams.get("state[0]")).toBe("11");
+  });
+
   it("looks past an isolated known ID but stops at a stable known tail", () => {
     const known = new Set(["known-1", "known-2", "known-3"]);
     expect(selectAutoRiaCandidateIds(
@@ -100,5 +135,12 @@ describe("AUTO.RIA search URL", () => {
       2,
       10,
     )).toEqual(["new-1", "new-2"]);
+  });
+
+  it("recognizes only structured API credential failures", () => {
+    expect(isAutoRiaCredentialRejection(JSON.stringify({ error: "API_KEY_INVALID" }))).toBe(true);
+    expect(isAutoRiaCredentialRejection(JSON.stringify({ error: { code: "INVALID_API_KEY" } }))).toBe(true);
+    expect(isAutoRiaCredentialRejection(JSON.stringify({ error: "HTTP 403 challenge" }))).toBe(false);
+    expect(isAutoRiaCredentialRejection("captcha API_KEY_INVALID")).toBe(false);
   });
 });

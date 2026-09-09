@@ -5,7 +5,7 @@ export const TELEGRAM_FLASH_RENDERED_TEXT_LIMIT = 3_900;
 export function telegramFlashBundleText(
   listings: readonly Pick<
     TelegramListingSnapshot,
-    "source" | "url" | "title" | "brand" | "model" | "year" | "priceNormalized" | "priceOriginal" | "currencyOriginal" | "city"
+    "source" | "categoryKey" | "provisionalReasons" | "url" | "title" | "brand" | "model" | "year" | "priceNormalized" | "priceOriginal" | "currencyOriginal" | "city"
   >[],
 ): string {
   const lines = [
@@ -15,7 +15,7 @@ export function telegramFlashBundleText(
   ];
   for (const [index, listing] of listings.entries()) {
     const title = compactTitle(listing);
-    const suffix = [compactPrice(listing), listing.city].filter(Boolean).join(" · ");
+    const suffix = [compactPrice(listing), listing.city, listing.provisionalReasons?.length ? "⚠️ характеристики не подтверждены" : null].filter(Boolean).join(" · ");
     lines.push(
       `<a href="${escapeHtmlAttribute(listing.url)}">${index + 1}. ${escapeHtmlText(title)}</a>${suffix ? ` · ${escapeHtmlText(suffix)}` : ""}`,
     );
@@ -35,8 +35,11 @@ function compactTitle(listing: Pick<TelegramListingSnapshot, "source" | "title" 
 }
 
 function compactPrice(
-  listing: Pick<TelegramListingSnapshot, "priceNormalized" | "priceOriginal" | "currencyOriginal">,
+  listing: Pick<TelegramListingSnapshot, "categoryKey" | "priceNormalized" | "priceOriginal" | "currencyOriginal">,
 ): string | null {
+  if (listing.categoryKey && listing.categoryKey !== "vehicle.car") {
+    return listing.priceOriginal != null ? `${listing.priceOriginal} ${listing.currencyOriginal ?? "?"}` : null;
+  }
   if (listing.priceNormalized != null) return `${listing.priceNormalized} $`;
   if (listing.priceOriginal != null) return `${listing.priceOriginal} ${listing.currencyOriginal ?? ""}`.trim();
   return null;

@@ -9,6 +9,8 @@ import {
   normalizeCityIds,
   normalizeRegionIds,
   normalizeVehicleText,
+  sourceSupportsCategory,
+  marketplaceCategoryKey,
   UKRAINE_REGIONS,
   type FilterHygieneCandidate,
 } from "@amb/shared";
@@ -89,7 +91,7 @@ export async function createFilterFromTelegram(text: string): Promise<string> {
   if (!parsed.cleanQuery) return newFilterPrompt();
 
   const taxonomy = await resolveAutoRiaIds(parsed.brand, parsed.model);
-  const sources = defaultSourcesForFilter(Boolean(taxonomy.autoRiaMarkId));
+  const sources = defaultSourcesForFilter();
   const displayVehicle = [parsed.brand, parsed.model].filter(Boolean).join(" ")
     || parsed.vehicleQuery
     || "Любое авто";
@@ -154,9 +156,7 @@ export async function createFilterFromTelegram(text: string): Promise<string> {
 
   const autoRiaLine = taxonomy.autoRiaMarkId
     ? `AUTO.RIA подключен: марка ${taxonomy.autoRiaMarkId}${taxonomy.autoRiaModelId ? `, модель ${taxonomy.autoRiaModelId}` : ""}.`
-    : env.AUTO_RIA_API_KEY
-      ? "AUTO.RIA не добавлен: не удалось точно распознать марку в справочнике."
-      : "AUTO.RIA не добавлен: API ключ не настроен.";
+    : "AUTO.RIA подключен через публичную выдачу; марка и модель проверяются после загрузки.";
 
   return trimTelegramMessage([
     "Фильтр создан.",
@@ -394,20 +394,18 @@ export async function setFilterAllSources(id: string): Promise<string> {
 }
 
 export async function addAutoRiaToCompatibleFilters(): Promise<string> {
-  if (!env.AUTO_RIA_API_KEY) return "AUTO.RIA API ключ не настроен.";
-
   const filters = await prisma.filter.findMany({ where: { enabled: true }, orderBy: { createdAt: "desc" } });
   let updated = 0;
   let skipped = 0;
   for (const filter of filters) {
-    if (filter.sources.includes("AUTO_RIA") && filter.autoRiaMarkId) continue;
-    const taxonomy = filter.autoRiaMarkId
-      ? { autoRiaMarkId: filter.autoRiaMarkId, autoRiaModelId: filter.autoRiaModelId }
-      : await resolveAutoRiaIds(filter.brand, filter.model);
-    if (!taxonomy.autoRiaMarkId) {
+    if (!sourceSupportsCategory("AUTO_RIA", marketplaceCategoryKey(filter.categoryKey))) {
       skipped++;
       continue;
     }
+    if (filter.sources.includes("AUTO_RIA")) continue;
+    const taxonomy = filter.autoRiaMarkId
+      ? { autoRiaMarkId: filter.autoRiaMarkId, autoRiaModelId: filter.autoRiaModelId }
+      : await resolveAutoRiaIds(filter.brand, filter.model);
     await prisma.filter.update({
       where: { id: filter.id },
       data: {
@@ -419,7 +417,7 @@ export async function addAutoRiaToCompatibleFilters(): Promise<string> {
     });
     updated++;
   }
-  return `AUTO.RIA добавлен в совместимые фильтры: ${updated}. Пропущено без точной марки: ${skipped}.`;
+  return `AUTO.RIA добавлен в совместимые фильтры: ${updated}. Других категорий: ${skipped}. Публичная выдача работает без API-ключа.`;
 }
 
 function filterSummaryLine(filter: Filter, index: number): string {
@@ -452,18 +450,16 @@ async function updateFilterSources(
   filter: Filter,
   requestedSources: ListingSource[],
 ): Promise<string> {
-  let nextSources = uniqueSources(requestedSources);
+  const nextSources = uniqueSources(requestedSources).filter((source) =>
+    sourceSupportsCategory(source, marketplaceCategoryKey(filter.categoryKey)));
   let autoRiaMarkId = filter.autoRiaMarkId;
   let autoRiaModelId = filter.autoRiaModelId;
 
   if (nextSources.includes("AUTO_RIA")) {
-    if (!env.AUTO_RIA_API_KEY) {
-      nextSources = nextSources.filter((source) => source !== "AUTO_RIA");
-    } else if (!autoRiaMarkId) {
+    if (!autoRiaMarkId) {
       const taxonomy = await resolveAutoRiaIds(filter.brand, filter.model);
       autoRiaMarkId = taxonomy.autoRiaMarkId;
       autoRiaModelId = taxonomy.autoRiaModelId;
-      if (!autoRiaMarkId) nextSources = nextSources.filter((source) => source !== "AUTO_RIA");
     }
   }
 
@@ -479,7 +475,7 @@ async function updateFilterSources(
     },
   });
   if (requestedSources.includes("AUTO_RIA") && !nextSources.includes("AUTO_RIA")) {
-    return `Источники обновлены для "${filter.name}", но AUTO.RIA пропущен: нужна точно распознанная марка.`;
+    return `Источники обновлены для "${filter.name}"; AUTO.RIA не поддерживает категорию этого фильтра.`;
   }
   return `Источники обновлены для "${filter.name}": ${formatList(nextSources.map(sourceLabel))}`;
 }
@@ -520,11 +516,8 @@ async function filterByIndex(index: number): Promise<Filter | null> {
   return filters[0] ?? null;
 }
 
-function defaultSourcesForFilter(autoRiaReady: boolean): ListingSource[] {
-  return uniqueSources([
-    ...(autoRiaReady && env.AUTO_RIA_API_KEY ? (["AUTO_RIA"] as ListingSource[]) : []),
-    ...REAL_FILTER_SOURCES,
-  ]);
+function defaultSourcesForFilter(): ListingSource[] {
+  return uniqueSources(REAL_FILTER_SOURCES);
 }
 
 function parseSourceList(value: string): ListingSource[] {

@@ -8,6 +8,13 @@ $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $RuntimeDir = Join-Path $ProjectRoot ".runtime"
 $LockPath = Join-Path $RuntimeDir "validation.lock"
 $LockStream = $null
+$DashboardNextEnvPath = Join-Path $ProjectRoot "apps\dashboard\next-env.d.ts"
+$DashboardNextEnvExisted = Test-Path -LiteralPath $DashboardNextEnvPath
+$DashboardNextEnvBytes = if ($DashboardNextEnvExisted) {
+  [IO.File]::ReadAllBytes($DashboardNextEnvPath)
+} else {
+  $null
+}
 
 function Invoke-Pnpm {
   param([Parameter(Mandatory = $true)][string[]]$Arguments)
@@ -83,6 +90,11 @@ try {
   Write-Host "Isolated production build passed; live artifacts were not modified." -ForegroundColor Green
 } finally {
   foreach ($directory in $validationDirs) { Remove-ValidationOutput -Path $directory }
+  if ($DashboardNextEnvExisted) {
+    [IO.File]::WriteAllBytes($DashboardNextEnvPath, $DashboardNextEnvBytes)
+  } elseif (Test-Path -LiteralPath $DashboardNextEnvPath) {
+    Remove-Item -LiteralPath $DashboardNextEnvPath -Force
+  }
   if ($LockStream) {
     $LockStream.Dispose()
     Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue

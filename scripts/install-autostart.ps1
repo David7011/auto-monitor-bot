@@ -22,6 +22,7 @@ $RestoreDrillTaskName = "$TaskName Database Restore Drill"
 $LogDir = Join-Path $ProjectRoot ".runtime\logs"
 $SecurityCheckScript = Join-Path $ProjectRoot "scripts\assert-runtime-security.ps1"
 $SecurityCheckLauncher = Join-Path $ProjectRoot "scripts\security-check.cmd"
+$RuntimeSecurityScript = Join-Path $ProjectRoot "scripts\runtime-security.ps1"
 
 if (!(Test-Path $StartScript)) {
   throw "Start script not found: $StartScript"
@@ -67,6 +68,22 @@ function Assert-SecureProjectAcl {
 }
 
 Assert-SecureProjectAcl
+. $RuntimeSecurityScript
+$securityPolicy = Read-AmbSecurityPolicy -ProjectRoot $ProjectRoot
+
+function Set-TaskReadAccessForProjectOwner {
+  param([Parameter(Mandatory = $true)][string[]]$TaskNames)
+
+  $scheduler = New-Object -ComObject "Schedule.Service"
+  $scheduler.Connect()
+  $rootFolder = $scheduler.GetFolder("\")
+  $taskSddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;$($securityPolicy.OwnerSid))"
+  foreach ($name in $TaskNames) {
+    $registeredTask = $rootFolder.GetTask("\$name")
+    # TASK_DONT_ADD_PRINCIPAL_ACE keeps the DACL exactly as declared above.
+    $registeredTask.SetSecurityDescriptor($taskSddl, 0x10)
+  }
+}
 $action = New-ScheduledTaskAction `
   -Execute "$env:SystemRoot\System32\cmd.exe" `
   -Argument "/d /s /c `"`"$SupervisorLauncher`"`"" `
@@ -152,6 +169,13 @@ try {
     -Settings $settings `
     -Description "Checks and recovers an automatically started Auto Monitor Bot session while its run request is active." `
     -Force | Out-Null
+
+  Set-TaskReadAccessForProjectOwner -TaskNames @(
+    $TaskName,
+    $WatchdogTaskName,
+    $BackupTaskName,
+    $RestoreDrillTaskName
+  )
 } catch {
   throw "Failed to install the SYSTEM startup task. Run this script from an elevated PowerShell window. Original error: $($_.Exception.Message)"
 }

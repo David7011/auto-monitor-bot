@@ -75,10 +75,18 @@ export async function handleExternalProtection(input: {
   semanticWarnings: Set<string>;
 }): Promise<void> {
   const status = input.result.captchaDetected ? "CAPTCHA_DETECTED" : "RATE_LIMITED";
+  const priorRstProbeAttempts = input.result.captchaDetected && input.source === "RST"
+    ? (await prisma.challengeIncident.findFirst({
+        where: { sourceId: input.sourceId, recoveredAt: null },
+        orderBy: { updatedAt: "desc" },
+        select: { probeAttempts: true },
+      }))?.probeAttempts
+    : undefined;
   const pauseSeconds = input.result.captchaDetected
     ? captchaPauseSeconds({
         source: input.source,
         consecutiveErrors: input.priorConsecutiveErrors,
+        priorProbeAttempts: priorRstProbeAttempts,
         baseSeconds: Math.max(60, env.CAPTCHA_PAUSE_SECONDS),
         maxSeconds: Math.max(env.CAPTCHA_PAUSE_SECONDS, env.CAPTCHA_PAUSE_MAX_SECONDS),
       })
@@ -346,6 +354,9 @@ export function countProcessingResult(result: ListingProcessingResult | undefine
       accepted: 0,
     };
   }
+  if (result.outcome === "SHADOWED") {
+    return { matched: 1, rejected: 0, duplicate: 0, dispatched: 0, accepted: 1 };
+  }
   return { matched: 1, rejected: 0, duplicate: 0, dispatched: 1, accepted: 1 };
 }
 
@@ -356,6 +367,12 @@ export async function retryLockCollision(job: CollectorRunJob, lane: ListingDisc
     // can survive until that run finishes and then create a compressed request
     // burst; the scheduler will issue the next normal cadence job instead.
     await log.info("collector", `${job.source} ${lane} scan coalesced with an already running scan`);
+    return;
+  }
+  if (job.source === "RST" && isBackgroundDiscoveryLane(lane)) {
+    // RST uses one origin-wide lock. Never queue a delayed background retry
+    // behind realtime: the next normal backfill cycle is safer than a burst.
+    await log.info("collector", `${job.source} ${lane} scan coalesced behind the realtime-safe origin gate`);
     return;
   }
   const maxRetries = isBackgroundDiscoveryLane(lane) ? 1 : env.COLLECTOR_LOCK_RETRY_MAX;
@@ -477,6 +494,10 @@ export function scanDurationMs(lane: ListingDiscoveryLane): number {
 }
 
 export function collectorLockScope(job: CollectorRunJob, lane: ListingDiscoveryLane): string {
+  // RST's Cloudflare protection observes the origin, not our internal lanes.
+  // One shared lease prevents realtime and backfill workers from hitting it
+  // concurrently while keeping OLX coverage isolation unchanged.
+  if (job.source === "RST") return "ORIGIN";
   return job.trigger === "COVERAGE" || lane === "COVERAGE" ? "COVERAGE" : lane;
 }
 

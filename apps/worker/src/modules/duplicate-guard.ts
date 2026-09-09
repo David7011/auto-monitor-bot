@@ -1,5 +1,5 @@
 import { Prisma, prisma } from "@amb/db";
-import { normalizeText, type NormalizedListing } from "@amb/shared";
+import { marketplaceCategoryKey, normalizeText, type NormalizedListing } from "@amb/shared";
 
 export type DuplicateReason =
   | "SOURCE_EXTERNAL_ID"
@@ -37,8 +37,8 @@ async function findStrongDuplicate(listing: NormalizedListing): Promise<Duplicat
   const or: Prisma.ListingWhereInput[] = [
     { source: listing.source, externalId: listing.externalId },
     ...(listing.canonicalUrl.trim() ? [{ canonicalUrl: listing.canonicalUrl }] : []),
-    ...(vin ? [{ vin }] : []),
-    ...(plateNormalized ? [{ plateNormalized }] : []),
+    ...(marketplaceCategoryKey(listing.categoryKey) === "vehicle.car" && vin ? [{ vin }] : []),
+    ...(marketplaceCategoryKey(listing.categoryKey) === "vehicle.car" && plateNormalized ? [{ plateNormalized }] : []),
   ];
 
   const match = await prisma.listing.findFirst({
@@ -68,6 +68,7 @@ async function findStrongDuplicate(listing: NormalizedListing): Promise<Duplicat
 }
 
 async function findPossibleDuplicate(listing: NormalizedListing): Promise<DuplicateDecision | null> {
+  if (marketplaceCategoryKey(listing.categoryKey) !== "vehicle.car") return null;
   if (!listing.title || listing.year == null || (listing.priceNormalized ?? listing.priceOriginal) == null) return null;
 
   // Compare each price only against the field it came from — matching a USD

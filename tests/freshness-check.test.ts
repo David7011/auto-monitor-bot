@@ -117,9 +117,9 @@ describe("freshness check", () => {
       listing("700", sameTime, "OLX"),
     ]);
     expect(ordered.map((item) => `${item.source}:${item.externalId}`)).toEqual([
+      "OLX:700",
       "AUTO_RIA:900",
       "AUTO_RIA:800",
-      "OLX:700",
       "CARS_UA:100",
     ]);
   });

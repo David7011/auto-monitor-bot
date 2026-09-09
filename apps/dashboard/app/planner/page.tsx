@@ -1,15 +1,18 @@
 "use client"
 
 import Link from "next/link"
+import { useState } from "react"
 import useSWR from "swr"
 import { AlertTriangle, CheckCircle2, Clock, DatabaseZap, Gauge, ListChecks, ShieldAlert, Zap } from "lucide-react"
-import { clientApi as api } from "@/lib/client-api"
+import { clientApi as api, dashboardErrorMessage } from "@/lib/client-api"
 import type { SearchPlanResponse, SearchPlanRow } from "@/lib/types"
 import { HudPanel } from "@/components/hud/hud-panel"
+import { GlowButton } from "@/components/hud/glow-button"
 import { MetricCard } from "@/components/hud/metric-card"
 import { StatusBadge } from "@/components/hud/status-badge"
 import { DataTable, type Column } from "@/components/ui/data-table"
 import { cn } from "@/lib/utils"
+import { useToast } from "@/components/ui/toast"
 
 const fetcher = <T,>(path: string) => api.get<T>(path)
 
@@ -75,11 +78,34 @@ function formatDurationSeconds(value: number | null) {
 }
 
 export default function PlannerPage() {
-  const { data, isLoading } = useSWR<SearchPlanResponse>("/search-plan", fetcher, { refreshInterval: 4000 })
+  const [recoveryAction, setRecoveryAction] = useState<"ack" | "retry" | null>(null)
+  const { toast } = useToast()
+  const { data, isLoading, mutate } = useSWR<SearchPlanResponse>("/search-plan", fetcher, { refreshInterval: 4000 })
   const plans = data?.plans ?? []
   const autoRiaRows = plans.filter((plan) => plan.source === "AUTO_RIA")
   const blocked = plans.filter((plan) => plan.severity === "danger")
   const warnings = plans.filter((plan) => plan.severity === "warning")
+
+  async function recoveryCommand(action: "ack" | "retry") {
+    const window = data?.offlineRecovery.latest
+    if (!window || window.status !== "UNRESOLVED") return
+    setRecoveryAction(action)
+    try {
+      await api.post(`/search-plan/recovery/${window.id}/${action === "ack" ? "acknowledge" : "retry"}`)
+      await mutate()
+      toast({
+        tone: action === "ack" ? "info" : "warning",
+        title: action === "ack" ? "Ограничение принято к сведению" : "Повторное восстановление запущено",
+        description: action === "ack"
+          ? "Статус остаётся UNRESOLVED — полнота данных не объявлена подтверждённой."
+          : "Глубокий проход разрешён один раз по команде оператора.",
+      })
+    } catch (error) {
+      toast({ tone: "error", title: "Команда не выполнена", description: dashboardErrorMessage(error) })
+    } finally {
+      setRecoveryAction(null)
+    }
+  }
 
   const planColumns: Column<SearchPlanRow>[] = [
     {
@@ -98,6 +124,7 @@ export default function PlannerPage() {
       render: (plan) => (
         <div className="max-w-[240px]">
           <div className="font-semibold text-foreground">{plan.filterName}</div>
+          <div className="mt-1 font-mono text-[10px] text-accent-soft">{plan.categoryKey}{plan.shadowMode ? " · SHADOW" : ""}</div>
           <div className="mt-1 line-clamp-2 text-xs text-muted">{plan.filterSummary}</div>
         </div>
       ),
@@ -123,6 +150,7 @@ export default function PlannerPage() {
         <div>
           <div className="num text-xs text-muted">{formatDate(plan.lastSuccessfulScanAt)}</div>
           {plan.recentRun ? <div className="mt-1 text-xs text-muted">{runStatusLabel(plan.recentRun.status)} · {plan.recentRun.foundCount}/{plan.recentRun.newCount} · {plan.recentRun.pageCount} стр.</div> : null}
+          <div className={cn("mt-1 font-mono text-[10px]", plan.parserHealth === "HEALTHY" ? "text-success" : plan.parserHealth === "DEGRADED" ? "text-danger" : "text-warning")}>PARSER: {plan.parserHealth}</div>
         </div>
       ),
     },
@@ -151,8 +179,8 @@ export default function PlannerPage() {
       </header>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <MetricCard label="Контексты" value={data?.totals.plannedContexts ?? 0} icon={<ListChecks />} hint={`активных фильтров: ${data?.totals.activeFilters ?? 0}`} />
-        <MetricCard label="AUTO.RIA" value={data?.totals.autoRiaContexts ?? 0} icon={<Zap />} hint={`до ${data?.totals.autoRiaEstimatedRequestsPerScan ?? 0} запросов за проверку`} />
+        <MetricCard label="Discovery shards" value={data?.totals.discoveryShards ?? 0} icon={<ListChecks />} hint={`категорий: ${data?.totals.activeCategories ?? 0} · фильтров: ${data?.totals.activeFilters ?? 0}`} />
+        <MetricCard label="AUTO.RIA" value={data?.totals.autoRiaContexts ?? 0} icon={<Zap />} hint={`${data?.totals.autoRiaEstimatedRequestsPerScan ?? 0} обычно / до ${data?.totals.autoRiaMaximumRequestsPerScan ?? 0} при новых авто`} />
         <MetricCard label="Первичная синхронизация" value={data?.totals.initialSyncPending ?? 0} icon={<Clock />} hint="Без повторной отправки старых объявлений" />
         <MetricCard label="Предупреждения" value={data?.totals.warnings ?? 0} icon={<AlertTriangle />} hint="Нужно внимание" />
         <MetricCard label="Блокировки" value={data?.totals.blocked ?? 0} icon={<ShieldAlert />} hint="Контекст не сканирует корректно" />
@@ -161,14 +189,18 @@ export default function PlannerPage() {
       <HudPanel
         kicker="P0 · OFFLINE WINDOW"
         title="Доказательство восстановления до persisted boundary"
-        action={data?.offlineRecovery.status === "PENDING" ? <ShieldAlert className="size-4 text-danger" /> : <CheckCircle2 className="size-4 text-success" />}
+        action={data?.offlineRecovery.status === "VERIFIED" ? <CheckCircle2 className="size-4 text-success" /> : <ShieldAlert className="size-4 text-danger" />}
       >
         {data?.offlineRecovery.latest ? (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <StatusLine
               label="Статус"
               ok={data.offlineRecovery.status === "VERIFIED"}
-              value={data.offlineRecovery.status === "PENDING" ? `не закрыто (${data.offlineRecovery.pendingCount})` : "подтверждено"}
+              value={data.offlineRecovery.status === "PENDING"
+                ? `восстановление (${data.offlineRecovery.pendingCount})`
+                : data.offlineRecovery.status === "UNRESOLVED"
+                  ? `недостижимо (${data.offlineRecovery.unresolvedCount})`
+                  : "подтверждено"}
             />
             <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
               Persisted boundary<br /><span className="font-mono text-foreground">{formatDate(data.offlineRecovery.latest.persistedBoundaryAt)}</span>
@@ -177,9 +209,32 @@ export default function PlannerPage() {
               Обязательный cutoff<br /><span className="font-mono text-foreground">{formatDate(data.offlineRecovery.latest.requiredCutoffAt)}</span>
             </div>
             <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
-              Свидетельство<br /><span className="font-mono text-foreground">{data.offlineRecovery.latest.verificationMethod ?? "ожидается"}</span>
+              Свидетельство<br /><span className="font-mono text-foreground">{data.offlineRecovery.latest.verificationMethod ?? data.offlineRecovery.latest.unresolvedReason ?? "ожидается"}</span>
               <br />run: <span className="font-mono text-foreground">{data.offlineRecovery.latest.verifiedRunId?.slice(0, 12) ?? "—"}</span>
             </div>
+            {data.offlineRecovery.latest.status === "UNRESOLVED" ? (
+              <div className="col-span-full flex flex-col gap-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-xs text-muted sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  Историческая граница не доказана. Realtime продолжает работать, автоматический повторный deep scan для той же generation отключён.
+                  {data.offlineRecovery.latest.acknowledgedAt
+                    ? ` Принято к сведению: ${formatDate(data.offlineRecovery.latest.acknowledgedAt)}.`
+                    : ""}
+                </div>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  <GlowButton
+                    tone="neutral"
+                    loading={recoveryAction === "ack"}
+                    disabled={Boolean(data.offlineRecovery.latest.acknowledgedAt)}
+                    onClick={() => void recoveryCommand("ack")}
+                  >
+                    {data.offlineRecovery.latest.acknowledgedAt ? "Ознакомлен" : "Принять к сведению"}
+                  </GlowButton>
+                  <GlowButton tone="danger" loading={recoveryAction === "retry"} onClick={() => void recoveryCommand("retry")}>
+                    Повторить один раз
+                  </GlowButton>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : (
           <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-sm text-muted">
@@ -202,7 +257,7 @@ export default function PlannerPage() {
               <StatusLine label="VIN-поиск" ok={!data?.autoRia.vinLookupEnabled} value={data?.autoRia.vinLookupEnabled ? "включен" : "выключен"} />
             </div>
             <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
-              Резерв: {data?.autoRia.softReserve ?? 0} запросов всего, {data?.autoRia.minSearchReserve ?? 0} оставлено под поиск. Подробных карточек за проход: до {data?.autoRia.maxInfoPerScan ?? 0}.
+              Резерв: {data?.autoRia.softReserve ?? 0} запросов всего, {data?.autoRia.minSearchReserve ?? 0} оставлено под поиск. Поисковый бюджет: до {data?.autoRia.searchBudgetPerHour ?? 0}/час; подробных карточек за проход: до {data?.autoRia.maxInfoPerScan ?? 0}.
             </div>
             <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
               Первичный проход: <span className="text-foreground">{data?.autoRia.initialWindowBehavior === "NOTIFY_MATCHING_IN_WINDOW" ? "отправлять подходящие" : "только запомнить существующие"}</span>. Максимум стартовых уведомлений:{" "}
@@ -303,7 +358,8 @@ export default function PlannerPage() {
                 <div>Последняя публикация: <span className="font-mono text-foreground">{formatDate(plan.lastPublishedAt)}</span></div>
                 <div>Граница скана: <span className="font-mono text-foreground">{formatDate(plan.lastCompletedCutoff)}</span></div>
                 <div>Самое старое обработанное: <span className="font-mono text-foreground">{formatDate(plan.oldestScannedPublishedAt)}</span></div>
-                <div>Макс. запросов: <span className="font-mono text-foreground">{plan.estimatedRequestsPerScan}</span></div>
+                <div>Запросы: <span className="font-mono text-foreground">{plan.estimatedRequestsPerScan} обычно / до {plan.maximumRequestsPerScan}</span></div>
+                <div>Последний проход: <span className="font-mono text-foreground">{plan.recentRequestsPerScan ?? "—"} запросов</span></div>
               </div>
               <IssueList plan={plan} />
             </div>

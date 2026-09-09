@@ -1,7 +1,7 @@
 @echo off
 setlocal
 set "NODE_HOME=%~dp0.runtime\node-runtime-v2\node-v24.18.0-win-x64"
-set "PNPM_HOME=%~dp0.runtime\node-runtime-v2\pnpm-10.0.0"
+set "PNPM_HOME=%~dp0.runtime\node-runtime-v2\pnpm-10.34.5"
 
 if not exist "%NODE_HOME%\node.exe" goto bootstrap
 if not exist "%PNPM_HOME%\pnpm.cmd" goto bootstrap

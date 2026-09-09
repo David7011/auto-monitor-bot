@@ -39,12 +39,13 @@ export async function enqueue(
   name: QueueName,
   jobName: string,
   data: unknown,
-  options: { jobId?: string; priority?: number; delay?: number } = {},
+  options: { jobId?: string; priority?: number; delay?: number; deduplicationId?: string } = {},
 ): Promise<void> {
   await getQueue(name).add(jobName, data, {
     jobId: options.jobId,
     priority: options.priority ?? QUEUE_PRIORITIES[name],
     delay: options.delay,
+    deduplication: options.deduplicationId ? { id: options.deduplicationId } : undefined,
     removeOnComplete: 500,
     removeOnFail: 200,
     attempts: 3,

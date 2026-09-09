@@ -6,7 +6,6 @@ import { OlxCollector } from "./olx.js";
 import { RstCollector } from "./rst.js";
 import { CarsUaCollector } from "./cars-ua.js";
 import { AutoMotoCollector } from "./automoto.js";
-import { env } from "../env.js";
 
 const collectors = new Map<ListingSource, SourceCollector>();
 
@@ -16,11 +15,8 @@ collectors.set("RST", new RstCollector());
 collectors.set("CARS_UA", new CarsUaCollector());
 collectors.set("AUTOMOTO", new AutoMotoCollector());
 
-// AUTO.RIA is only registered when an API key is available;
-// otherwise the MOCK source is used for testing the pipeline.
-if (env.AUTO_RIA_API_KEY) {
-  collectors.set("AUTO_RIA", new AutoRiaCollector());
-}
+// Public search remains available when the optional official API has no key.
+collectors.set("AUTO_RIA", new AutoRiaCollector());
 
 export function getCollector(source: ListingSource): SourceCollector | undefined {
   return collectors.get(source);

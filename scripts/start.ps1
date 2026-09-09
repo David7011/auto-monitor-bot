@@ -88,7 +88,7 @@ function Set-NodeRuntimeOnD {
   $env:npm_config_userconfig = Join-Path $ProjectRoot ".npmrc"
   $env:npm_config_loglevel = "error"
   $env:PNPM_HOME = Join-Path $NodeRuntimeDir "pnpm-home"
-  $env:PNPM_STORE_PATH = "D:\.pnpm-store"
+  $env:PNPM_STORE_PATH = Join-Path $ProjectRoot ".runtime\pnpm-store"
   $env:NO_UPDATE_NOTIFIER = "1"
 
   if (!(Test-Path -LiteralPath $EnsureNodeRuntimeScript)) {
@@ -327,12 +327,19 @@ function Start-NodeApp(
 
 function Invoke-Pnpm([string[]]$Arguments) {
   Push-Location $ProjectRoot
+  $previousErrorActionPreference = $ErrorActionPreference
   try {
+    # Prisma and other well-behaved native tools write informational lines to
+    # stderr. Windows PowerShell turns those lines into ErrorRecord objects;
+    # with Stop they aborted startup even when the native exit code was zero.
+    $ErrorActionPreference = "Continue"
     & $script:PnpmCmd @Arguments
-    if ($LASTEXITCODE -ne 0) {
-      throw "pnpm@10.0.0 $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    $nativeExitCode = $LASTEXITCODE
+    if ($nativeExitCode -ne 0) {
+      throw "pnpm@10.34.5 $($Arguments -join ' ') failed with exit code $nativeExitCode"
     }
   } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
     Pop-Location
   }
 }

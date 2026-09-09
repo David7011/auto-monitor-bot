@@ -1,7 +1,7 @@
 param(
   [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
   [string]$NodeVersion = "24.18.0",
-  [string]$PnpmVersion = "10.0.0"
+  [string]$PnpmVersion = "10.34.5"
 )
 
 $ErrorActionPreference = "Stop"

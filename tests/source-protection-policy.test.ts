@@ -14,6 +14,28 @@ describe("source protection policy", () => {
     })).toBe(24 * 60 * 60);
   });
 
+  it("progressively spaces persistent RST challenges instead of probing every day forever", () => {
+    const pause = (consecutiveErrors: number) => captchaPauseSeconds({
+      source: "RST",
+      consecutiveErrors,
+      baseSeconds: 900,
+      maxSeconds: 3600,
+    });
+    expect(pause(6)).toBe(3 * 24 * 60 * 60);
+    expect(pause(10)).toBe(7 * 24 * 60 * 60);
+    expect(pause(100)).toBe(7 * 24 * 60 * 60);
+  });
+
+  it("uses durable incident probe history when the source error counter was reset", () => {
+    expect(captchaPauseSeconds({
+      source: "RST",
+      consecutiveErrors: 1,
+      priorProbeAttempts: 18,
+      baseSeconds: 900,
+      maxSeconds: 3600,
+    })).toBe(7 * 24 * 60 * 60);
+  });
+
   it("keeps the normal capped policy for OLX and initial RST incidents", () => {
     expect(captchaPauseSeconds({
       source: "OLX",

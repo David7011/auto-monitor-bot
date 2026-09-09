@@ -30,6 +30,37 @@ describe("adaptive backfill policy", () => {
     expect(decision).toMatchObject({ mode: "EVIDENCE", profile: "LIGHT", intervalSeconds: 120 });
   });
 
+  it("skips duplicate deep recovery for the same unresolved capability generation", () => {
+    const decision = decideAdaptiveBackfill({
+      ...evidence(cleanRuns(4)),
+      unresolvedRecovery: {
+        count: 1,
+        attemptedGeneration: "olx-public-depth-v1:page=50:offset=1000",
+        currentGeneration: "olx-public-depth-v1:page=50:offset=1000",
+      },
+    }, 120, now);
+    expect(decision).toMatchObject({ mode: "UNRESOLVED", profile: "LIGHT", intervalSeconds: 600 });
+  });
+
+  it("allows one new recovery when the capability generation changes", () => {
+    const decision = decideAdaptiveBackfill({
+      ...evidence(cleanRuns(4)),
+      unresolvedRecovery: {
+        count: 1,
+        attemptedGeneration: "olx-public-depth-v1:page=50:offset=1000",
+        currentGeneration: "olx-public-depth-v2:page=50:offset=2000",
+      },
+    }, 120, now);
+    expect(decision).toMatchObject({ mode: "RECOVERY", profile: "FULL", intervalSeconds: 120 });
+  });
+
+  it("keeps a durable pending window ahead of routine adaptive evidence", () => {
+    expect(decideAdaptiveBackfill({
+      ...evidence(cleanRuns(8)),
+      pendingRecoveryCount: 1,
+    }, 120, now)).toMatchObject({ mode: "RECOVERY", profile: "FULL" });
+  });
+
   it("enters lean mode only after a consecutive clean zero-recovery history", () => {
     const runs = cleanRuns(8).map((run, index) => ({ ...run, profile: index === 7 ? "FULL" as const : "LIGHT" as const }));
     const decision = decideAdaptiveBackfill(evidence(runs), 120, now);
@@ -86,6 +117,19 @@ describe("adaptive backfill policy", () => {
       profile: "LIGHT",
       intervalSeconds: 600,
     });
+  });
+
+  it("honors the protection cooldown even when a newer probe recovered an advert and a gap remains pending", () => {
+    const runs: BackfillRunEvidence[] = [
+      { ...cleanRuns(1)[0]!, recoveredCount: 1, profile: "LIGHT" },
+      { ...cleanRuns(1)[0]!, startedAt: new Date(now.getTime() - 5 * 60_000),
+        status: "RATE_LIMITED", errorMessage: "HTTP 429" },
+    ];
+    const decision = decideAdaptiveBackfill({ ...evidence(runs), pendingRecoveryCount: 1 }, 120, now);
+    expect(decision).toMatchObject({ mode: "PROTECTION", profile: "LIGHT", intervalSeconds: 1800 });
+    expect(backfillDue(runs[0]!.startedAt, decision, now)).toBe(false);
+    expect(decideAdaptiveBackfill({ ...evidence(runs), pendingRecoveryCount: 1 }, 120,
+      new Date(now.getTime() + 31 * 60_000))).toMatchObject({ mode: "RECOVERY", profile: "FULL" });
   });
 
   it("stops treating old recovery evidence as active after two newer clean backfills", () => {

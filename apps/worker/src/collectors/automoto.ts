@@ -88,7 +88,7 @@ export class AutoMotoCollector implements SourceCollector {
         const pageUrl = withPageNumber(searchUrl, page);
         const response = await fetchHtml(pageUrl, { source: "AUTOMOTO", timeoutMs: env.AUTOMOTO_REQUEST_TIMEOUT_MS });
         requestCount += 1;
-        const blocked = isBlockedHtml(response.status, response.body);
+        const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds, response);
         if (blocked.rateLimited || blocked.captchaDetected) {
           return { listings, ...blocked, responseStatus: response.status, affectedUrl: pageUrl, pageCount, requestCount, observedCount, semanticWarnings };
         }

@@ -1,9 +1,15 @@
 import type { ListingSource } from "./listing.js";
+import type { CategoryFilterCriteria, MarketplaceCategoryKey, UnknownFilterPolicy } from "./category.js";
 
 export type UserFilter = {
   id: string;
   name: string;
   enabled: boolean;
+  categoryKey: MarketplaceCategoryKey;
+  categorySchemaVersion: number;
+  categoryCriteria: CategoryFilterCriteria | null;
+  unknownPolicy: UnknownFilterPolicy;
+  shadowMode: boolean;
   sources: ListingSource[];
   autoRiaCategoryId: number | null;
   autoRiaMarkId: number | null;

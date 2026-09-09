@@ -1,4 +1,8 @@
-import { sourceHttpClient } from "./source-http-client.js";
+import {
+  detectBodyProtection,
+  sourceHttpClient,
+  type SourceHttpClassification,
+} from "./source-http-client.js";
 import type { OlxRequestClass } from "../modules/olx-request-coordinator.js";
 
 export type BlockedHtmlResult = {
@@ -9,18 +13,6 @@ export type BlockedHtmlResult = {
   retryAfterSeconds?: number;
   responseStatus?: number;
 };
-
-const CAPTCHA_PATTERNS: Array<{ detector: string; pattern: RegExp }> = [
-  { detector: "recaptcha", pattern: /\b(?:g-recaptcha|recaptcha|hcaptcha|h-captcha)\b/iu },
-  { detector: "cloudflare-challenge", pattern: /\b(?:cf-chl|cf-browser-verification|challenge-platform|turnstile)\b/iu },
-  { detector: "human-verification", pattern: /\b(?:verify you are human|checking your browser|robot or human|unusual traffic)\b/iu },
-  { detector: "access-denied", pattern: /\b(?:access denied|forbidden|доступ заборонено|доступ запрещен)\b/iu },
-];
-
-const RATE_LIMIT_PATTERNS: Array<{ detector: string; pattern: RegExp }> = [
-  { detector: "too-many-requests", pattern: /\b(?:too many requests|rate limit|try again later|429)\b/iu },
-  { detector: "temporary-ban", pattern: /\b(?:temporarily blocked|temporary block|заблокировано временно|тимчасово заблоковано)\b/iu },
-];
 
 export async function fetchHtml(
   url: string,
@@ -38,8 +30,11 @@ export async function fetchHtml(
   retryAfterSeconds?: number;
   requestStartedAt?: Date;
   firstByteAt?: Date;
+  cacheAgeSeconds?: number;
   coordinatorWaitMs?: number;
   coordinatorPostFinishQuietMs?: number;
+  classification: SourceHttpClassification;
+  detector?: string;
 }> {
   const response = await sourceHttpClient.text(url, {
     source: options.source ?? "PUBLIC_HTTP",
@@ -63,12 +58,20 @@ export async function fetchHtml(
     retryAfterSeconds: response.retryAfterSeconds,
     requestStartedAt: response.requestStartedAt,
     firstByteAt: response.firstByteAt,
+    cacheAgeSeconds: response.cacheAgeSeconds,
     coordinatorWaitMs: response.coordinatorWaitMs,
     coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
+    classification: response.classification,
+    detector: response.detector,
   };
 }
 
-export function isBlockedHtml(status: number, body: string, retryAfterSeconds?: number): BlockedHtmlResult {
+export function isBlockedHtml(
+  status: number,
+  body: string,
+  retryAfterSeconds?: number,
+  upstream?: { classification: SourceHttpClassification; detector?: string; contentType?: string },
+): BlockedHtmlResult {
   if (status === 429) {
     return {
       rateLimited: true,
@@ -79,30 +82,22 @@ export function isBlockedHtml(status: number, body: string, retryAfterSeconds?: 
     };
   }
 
-  const lower = body.slice(0, 20_000).toLowerCase();
-
-  for (const item of CAPTCHA_PATTERNS) {
-    if (item.pattern.test(lower)) {
-      return {
-        captchaDetected: true,
-        detector: item.detector,
-        limitedReason: `Обнаружена CAPTCHA или защитная страница (${item.detector}). Источник поставлен на паузу.`,
-        responseStatus: status,
-      };
-    }
-  }
-
-  for (const item of RATE_LIMIT_PATTERNS) {
-    if (item.pattern.test(lower)) {
-      return {
-        rateLimited: true,
-        detector: item.detector,
-        limitedReason: `Обнаружено ограничение запросов или временная блокировка (${item.detector}). Источник поставлен на паузу.`,
-        retryAfterSeconds,
-        responseStatus: status,
-      };
-    }
-  }
+  const signal = upstream?.classification === "CHALLENGE" || upstream?.classification === "RATE_LIMITED"
+    ? { classification: upstream.classification, detector: upstream.detector ?? "source-http-classification" }
+    : detectBodyProtection(upstream?.contentType ?? "text/html", body);
+  if (signal?.classification === "CHALLENGE") return {
+    captchaDetected: true,
+    detector: signal.detector,
+    limitedReason: `Обнаружена CAPTCHA или защитная страница (${signal.detector}). Источник поставлен на паузу.`,
+    responseStatus: status,
+  };
+  if (signal?.classification === "RATE_LIMITED") return {
+    rateLimited: true,
+    detector: signal.detector,
+    limitedReason: `Обнаружено ограничение запросов или временная блокировка (${signal.detector}). Источник поставлен на паузу.`,
+    retryAfterSeconds,
+    responseStatus: status,
+  };
 
   if (status === 403) {
     return {

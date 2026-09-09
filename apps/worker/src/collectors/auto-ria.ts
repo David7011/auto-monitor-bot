@@ -22,6 +22,7 @@ import { env } from "../env.js";
 import { redisConnection } from "../lib/queues.js";
 import { consumeAutoRiaQuota } from "../modules/auto-ria-quota.js";
 import { sourceHttpClient } from "./source-http-client.js";
+import { AutoRiaPublicCollector } from "./auto-ria-public.js";
 
 type RiaSearchResponse = {
   result?: {
@@ -72,6 +73,7 @@ type FetchJsonResult<T> =
       requestMade?: boolean;
       status?: number;
       message?: string;
+      credentialRejected?: boolean;
     };
 
 const API_BASE = "https://developers.ria.com/auto";
@@ -81,11 +83,11 @@ const BODY_TYPE_IDS: Record<string, number> = {
   sedan: 3,
   hatchback: 4,
   wagon: 2,
-  coupe: 5,
-  convertible: 6,
-  minivan: 8,
-  van: 9,
-  pickup: 7,
+  coupe: 6,
+  convertible: 7,
+  minivan: 13,
+  van: 12,
+  pickup: 11,
   suv: 5,
   crossover: 5,
 };
@@ -114,7 +116,7 @@ const GEARBOX_IDS: Record<string, number> = {
  * enabled in env. Info calls are spent only on ids that are new for the current
  * search context.
  */
-export class AutoRiaCollector implements SourceCollector {
+class AutoRiaApiCollector implements SourceCollector {
   readonly source = "AUTO_RIA" as const;
   readonly supportsNewestFirst = true;
   readonly newestFirstVerified = true;
@@ -146,6 +148,7 @@ export class AutoRiaCollector implements SourceCollector {
     const searchUrl = buildAutoRiaSearchUrl(context, apiKey);
     const search = await fetchJson<RiaSearchResponse>(searchUrl);
     if (!search.ok) {
+      if (search.credentialRejected) throw new AutoRiaCredentialError();
       return {
         listings: [],
         rateLimited: search.rateLimited,
@@ -178,6 +181,7 @@ export class AutoRiaCollector implements SourceCollector {
       const info = await loadAutoRiaInfo(id, apiKey);
       if (info.requestMade) requestCount += 1;
       if (!info.ok) {
+        if (info.credentialRejected) throw new AutoRiaCredentialError();
         if (info.quotaDeferredSeconds) {
           return {
             listings,
@@ -261,8 +265,10 @@ export function buildAutoRiaSearchUrl(context: SourceSearchContext, apiKey: stri
   params.set("with_photo", "1");
   params.set("currency", "1");
 
-  appendNumber(params, "marka_id[0]", context.autoRiaMarkId);
-  appendNumber(params, "model_id[0]", context.autoRiaModelId);
+  if (context.autoRiaMarkId != null) {
+    appendNumber(params, "marka_id[0]", context.autoRiaMarkId);
+    appendNumber(params, "model_id[0]", context.autoRiaModelId);
+  }
   appendNumber(params, "s_yers[0]", context.yearFrom);
   appendNumber(params, "po_yers[0]", context.yearTo);
   appendNumber(params, "price_ot", context.priceFrom);
@@ -278,8 +284,8 @@ export function buildAutoRiaSearchUrl(context: SourceSearchContext, apiKey: stri
   appendNumber(params, "seatsFrom", context.seatsFrom);
   appendNumber(params, "seatsTo", context.seatsTo);
 
-  appendMappedValues(params, "type", context.bodyTypes, BODY_TYPE_IDS);
-  appendMappedValues(params, "fuel_id", context.fuelTypes, FUEL_TYPE_IDS);
+  appendMappedValues(params, "bodystyle", context.bodyTypes, BODY_TYPE_IDS);
+  appendMappedValues(params, "type", context.fuelTypes, FUEL_TYPE_IDS);
   appendMappedValues(params, "gearbox", context.gearboxes, GEARBOX_IDS);
   appendGeoValues(params, context);
 
@@ -324,6 +330,15 @@ async function fetchJson<T>(url: string): Promise<FetchJsonResult<T>> {
     return { ok: false, captchaDetected: true, requestMade: true, status: response.status, message: `AUTO.RIA вернул защитную страницу (${response.detector ?? "неизвестно"})` };
   }
   if (response.classification === "ACCESS_DENIED") {
+    if (isAutoRiaCredentialRejection(response.body)) {
+      return {
+        ok: false,
+        credentialRejected: true,
+        requestMade: true,
+        status: response.status,
+        message: "AUTO.RIA отклонил учетные данные API",
+      };
+    }
     return { ok: false, rateLimited: true, requestMade: true, status: response.status, message: "AUTO.RIA вернул ограничение доступа HTTP 403" };
   }
 
@@ -333,6 +348,77 @@ async function fetchJson<T>(url: string): Promise<FetchJsonResult<T>> {
     status: response.status,
     message: response.errorMessage ?? `AUTO.RIA ${response.classification}${response.status ? ` HTTP ${response.status}` : ""}`,
   };
+}
+
+class AutoRiaCredentialError extends Error {
+  constructor() {
+    super("AUTO.RIA API credentials rejected");
+    this.name = "AutoRiaCredentialError";
+  }
+}
+
+let rejectedApiKey: string | undefined;
+
+/**
+ * Public SSR search is the safe default and requires no credential. The
+ * official API is opt-in; only a structured credential rejection falls back
+ * to public search. A real challenge/429 remains visible to protection logic.
+ */
+export class AutoRiaCollector implements SourceCollector {
+  readonly source = "AUTO_RIA" as const;
+  readonly supportsNewestFirst = true;
+  readonly newestFirstVerified = false;
+  private readonly publicCollector = new AutoRiaPublicCollector();
+  private readonly apiCollector = new AutoRiaApiCollector();
+
+  async collect(
+    context: SourceSearchContext,
+    state: SourceSearchState,
+    input?: CollectorScanOptions,
+  ): Promise<CollectorResult> {
+    const apiKey = env.AUTO_RIA_API_KEY;
+    if (env.AUTO_RIA_ACCESS_MODE !== "api" || !apiKey || rejectedApiKey === apiKey) {
+      return this.publicCollector.collect(context, state, input);
+    }
+    try {
+      return await this.apiCollector.collect(context, state, input);
+    } catch (error) {
+      if (!(error instanceof AutoRiaCredentialError)) throw error;
+      rejectedApiKey = apiKey;
+      const fallback = await this.publicCollector.collect(context, state, input);
+      return {
+        ...fallback,
+        semanticWarnings: [
+          ...(fallback.semanticWarnings ?? []),
+          "AUTO.RIA API credentials were rejected; switched to public search for this process",
+        ],
+      };
+    }
+  }
+}
+
+export function isAutoRiaCredentialRejection(body: string | undefined): boolean {
+  if (!body?.trim()) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  const candidates: string[] = [];
+  const visit = (item: unknown, depth: number): void => {
+    if (depth > 4 || candidates.length > 32) return;
+    if (typeof item === "string") {
+      candidates.push(item);
+      return;
+    }
+    if (!item || typeof item !== "object") return;
+    for (const [key, nested] of Object.entries(item)) {
+      if (/^(?:code|error|error_code|name|reason|status)$/iu.test(key)) visit(nested, depth + 1);
+    }
+  };
+  visit(value, 0);
+  return candidates.some((candidate) => /^(?:API[_ -]?KEY[_ -]?(?:INVALID|MISSING|EXPIRED|REQUIRED)|INVALID[_ -]?API[_ -]?KEY|UNAUTHORIZED)$/iu.test(candidate.trim()));
 }
 
 function normalizeAutoRiaInfo(id: string, info: RiaInfoResponse, now: Date): NormalizedListing | undefined {

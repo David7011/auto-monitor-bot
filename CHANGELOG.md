@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-09-07 — multi-category correctness checkpoint
+
+- Durable SHADOW/LIVE delivery intent, provisional reasons in cards/flash, guarded replay/promotion, and preservation of NOTIFIED outcomes.
+- Non-vehicle normalization no longer performs automotive inference or silently uses USD budgets. Contradictory capacities remain UNKNOWN; GPU filters use the profile's model field.
+- Search-state writes enforce scope ownership and parser-health boundaries. Equivalent planner upgrades re-key the original state with its recovery history; cleanup cannot cascade-delete recovery windows.
+- New category forms default to shadow and clear stale category inputs. Mixed-category run duration is no longer attributed to cars; non-car listings no longer enter recurring vehicle-enrichment recovery.
+- Added isolated PostgreSQL/Redis/Telegram acceptance scenarios for shadow delivery, promotion, category isolation, degraded parsing and legacy recovery identity. Full multi-category live/performance acceptance is still pending; see the dated checkpoint report.
+
+## 2026-09-04 — multi-category marketplace architecture
+
+- Добавлен versioned category registry для автомобилей, ноутбуков, телефонов, ПК, GPU, консолей, электросамокатов и generic; legacy rows остаются `vehicle.car`.
+- OLX discovery параметризован фиксированными category-owned путями. Непроверенные внутренние category ID не угадываются: новые вертикали используют публичную HTML-выдачу, а все origin-запросы сохраняют единый pacing/protection coordinator.
+- Search Plan Compiler объединяет N фильтров одной категории в один discovery shard и ставит автомобильный shard первым. Category, source descriptor и planner version входят в fingerprint, поэтому known tail/recovery/coverage не пересекаются.
+- Электронные характеристики проходят runtime validation; фильтрация стала tri-state (`MATCH`, `NO_MATCH`, `UNKNOWN`). Недостающие характеристики не превращаются в silent reject.
+- Hard dedupe оставляет VIN/номер только автомобилям; soft similarity электроники не подавляет первое уведомление.
+- Observation journal, listings, search state и runs получили additive category/provenance/parser fields и DB check constraints. Normalizer version повышена до 4.
+- Telegram и Dashboard стали category-aware; для новых категорий доступен per-filter shadow mode без production Telegram.
+- Semantic OLX parser health запрещает считать HTTP 200 с потерянной структурой успешным coverage.
+- Изолированный acceptance-стенд теперь разворачивает абсолютно пустую PostgreSQL через production `migrate deploy`, а не `db push`, и затем выполняет fault injection.
+
 ## 2026-08-30 — crash-safe hot handoff and newest-first notification bursts
 
 - Нормализованное объявление теперь записывается в PostgreSQL до Redis hot-claim. Падение worker между claim и первой долговечной записью больше не может скрыть объявление от observation replay.

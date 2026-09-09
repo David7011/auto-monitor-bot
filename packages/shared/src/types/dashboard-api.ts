@@ -7,6 +7,7 @@ import type {
   VehicleCheckDto,
 } from "./listing.js";
 import type { SourceCapabilities } from "./source-capabilities.js";
+import type { MarketplaceCategoryKey, UnknownFilterPolicy } from "./category.js";
 import type { JournalLatencySummary, MetricSummary } from "../utils/metrics.js";
 
 /**
@@ -186,7 +187,28 @@ export type MetricsResponse<DateValue = string> = {
     publicationTimestamps: number;
     telegramNotifications: number;
   };
+  /** Compatibility alias for collectorRealtimeDurationMs. Never mixes background lanes. */
   collectorDurationMs: MetricSummary;
+  collectorRealtimeDurationMs: MetricSummary;
+  collectorDurationByLane: Array<{
+    lane: "REALTIME" | "BACKFILL" | "COVERAGE" | "MANUAL";
+    durationMs: MetricSummary;
+  }>;
+  collectorDurationBySourceLane: Array<{
+    source: SourceKind;
+    lane: "REALTIME" | "BACKFILL" | "COVERAGE" | "MANUAL";
+    durationMs: MetricSummary;
+  }>;
+  categoryHealth: Array<{
+    categoryKey: MarketplaceCategoryKey;
+    realtimeDurationMs: MetricSummary;
+    durableJournalToTelegramAcceptanceMs: MetricSummary;
+    observations: number;
+    discoveryShards: number;
+    parserDegradedShards: number;
+    recoveryPendingShards: number;
+    lastSuccessfulScanAt: DateValue | null;
+  }>;
   publicationTimestampToFirstSeenMs: MetricSummary;
   firstSeenToTelegramMs: MetricSummary;
   publicationTimestampToTelegramMs: MetricSummary;
@@ -265,7 +287,10 @@ export type MetricsResponse<DateValue = string> = {
   }>;
   latestCompletenessAudit: unknown | null;
   slo: {
-    collectorP95Under2Seconds: boolean;
+    collectorP95Under2Seconds: boolean | null;
+    collectorP95Metric: "REALTIME_SUCCESS_OR_LIMITED_24H";
+    collectorP95Status: "PASS" | "FAIL" | "LOW_SAMPLE";
+    collectorMinimumSampleSize: number;
     telegramP95Under3Seconds: boolean | null;
     telegramP95Metric: "DURABLE_JOURNAL_TO_TELEGRAM_ACCEPTANCE";
     telegramP95Status: "PASS" | "FAIL" | "LOW_SAMPLE";
@@ -297,6 +322,9 @@ export type SearchPlanResponse<DateValue = string> = {
     warnings: number;
     autoRiaContexts: number;
     autoRiaEstimatedRequestsPerScan: number;
+      autoRiaMaximumRequestsPerScan: number;
+      activeCategories: number;
+      discoveryShards: number;
   };
   autoRia: {
     configured: boolean;
@@ -306,6 +334,7 @@ export type SearchPlanResponse<DateValue = string> = {
     softReserve: number;
     minSearchReserve: number;
     maxInfoPerScan: number;
+    searchBudgetPerHour: number;
     totalUsed: number;
     hourlyUsed: number;
     totalRemaining: number;
@@ -349,12 +378,13 @@ export type SearchPlanResponse<DateValue = string> = {
     lastTransitionAt: DateValue | null;
   };
   offlineRecovery: {
-    status: "NONE" | "PENDING" | "VERIFIED";
+    status: "NONE" | "PENDING" | "VERIFIED" | "UNRESOLVED";
     pendingCount: number;
+    unresolvedCount: number;
     latest: {
       id: string;
       reason: "OFFLINE_WINDOW" | "REALTIME_OVERFLOW" | "KNOWN_IDS_RESET";
-      status: "PENDING" | "VERIFIED";
+      status: "PENDING" | "VERIFIED" | "UNRESOLVED";
       persistedBoundaryAt: DateValue;
       requiredCutoffAt: DateValue;
       detectedAt: DateValue;
@@ -364,6 +394,13 @@ export type SearchPlanResponse<DateValue = string> = {
       verifiedAt: DateValue | null;
       verifiedRunId: string | null;
       verificationMethod: "KNOWN_TAIL" | "CUTOFF" | "EXHAUSTED" | null;
+      unresolvedReason: "PUBLIC_OFFSET_CAP" | "UNSTABLE_PAGINATION" | "NON_PARTITIONABLE_RANGE" | "SOURCE_EXHAUSTED_BEFORE_BOUNDARY" | null;
+      unresolvedAt: DateValue | null;
+      attemptGeneration: string | null;
+      acknowledgedAt: DateValue | null;
+      acknowledgedBy: string | null;
+      acknowledgementNote: string | null;
+      attemptCount: number;
       oldestObservedAt: DateValue | null;
       pageCount: number;
       requestCount: number;
@@ -401,7 +438,15 @@ export type SearchPlanRow<DateValue = string> = {
   sourceStatus: SourceRow<DateValue>["status"];
   sourceNextCheckAt: DateValue | null;
   filterId: string;
-  filterName: string;
+    filterName: string;
+    categoryKey: MarketplaceCategoryKey;
+    categorySchemaVersion: number;
+    sourceCategoryPath: string | null;
+    unknownPolicy: UnknownFilterPolicy;
+    shadowMode: boolean;
+    parserHealth: "HEALTHY" | "DEGRADED" | "UNKNOWN";
+    parserHealthDetails: unknown;
+    lastParserHealthyAt: DateValue | null;
   freshnessMode: FilterRow["freshnessMode"];
   filterSummary: string;
   initialSyncCompletedAt: DateValue | null;
@@ -423,6 +468,8 @@ export type SearchPlanRow<DateValue = string> = {
   coverageRecoveryCutoffAt: DateValue | null;
   fingerprint: string | null;
   estimatedRequestsPerScan: number;
+  maximumRequestsPerScan: number;
+  recentRequestsPerScan: number | null;
   supported: {
     mode: "api-filtered" | "html-newest" | "html-local-sort" | "html-limited" | "event-filtered";
     apiFields: string[];

@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $BackupRoot = Join-Path $ProjectRoot ".runtime\backups"
 $DrillRoot = Join-Path $ProjectRoot ".runtime\restore-drills"
-$SevenZip = "C:\Program Files\7-Zip\7z.exe"
+. (Join-Path $PSScriptRoot "invoke-backup-crypto.ps1")
 
 function Get-DotEnvValue([string]$Key) {
   $line = Get-Content -LiteralPath (Join-Path $ProjectRoot ".env") -Encoding UTF8 |
@@ -46,12 +46,14 @@ function Get-Sha256Hex([string]$Path) {
 
 New-Item -ItemType Directory -Force -Path $DrillRoot | Out-Null
 if (!$ArchivePath) {
-  $ArchivePath = Get-ChildItem -LiteralPath $BackupRoot -Filter "database-*.7z" -File |
+  $ArchivePath = Get-ChildItem -LiteralPath $BackupRoot -Filter "database-*.ambbak" -File |
     Sort-Object LastWriteTime -Descending | Select-Object -ExpandProperty FullName -First 1
 }
 if (!$ArchivePath -or !(Test-Path -LiteralPath $ArchivePath)) { throw "No encrypted database backup is available" }
 $ArchivePath = [System.IO.Path]::GetFullPath($ArchivePath)
-if (!(Test-Path -LiteralPath $SevenZip)) { throw "7-Zip is required: $SevenZip" }
+if ([IO.Path]::GetExtension($ArchivePath) -cne ".ambbak") {
+  throw "Automated restore accepts authenticated .ambbak backups only; legacy .7z archives require controlled manual recovery"
+}
 
 $hashPath = "$ArchivePath.sha256"
 if (!(Test-Path -LiteralPath $hashPath)) { throw "Backup checksum is missing: $hashPath" }
@@ -80,10 +82,10 @@ $created = $false
 $startedAt = Get-Date
 try {
   New-Item -ItemType Directory -Force -Path $workDir | Out-Null
-  & $SevenZip x -y "-p$encryptionPassword" "-o$workDir" $ArchivePath *> $null
-  if ($LASTEXITCODE -ne 0) { throw "Encrypted archive extraction failed" }
-  $dumpPath = Get-ChildItem -LiteralPath $workDir -Filter "*.dump" -File -Recurse | Select-Object -ExpandProperty FullName -First 1
-  if (!$dumpPath) { throw "The backup archive does not contain a PostgreSQL dump" }
+  $dumpPath = Join-Path $workDir "database.dump"
+  Invoke-BackupCrypto -Operation decrypt -InputPath $ArchivePath -OutputPath $dumpPath -Password $encryptionPassword
+  $encryptionPassword = $null
+  if (!(Test-Path -LiteralPath $dumpPath)) { throw "Backup decryption did not create a PostgreSQL dump" }
   & $pgRestore --list $dumpPath *> $null
   if ($LASTEXITCODE -ne 0) { throw "pg_restore could not read the extracted dump" }
 
@@ -117,6 +119,7 @@ try {
     & $dropdb "--host=$($uri.Host)" "--port=$databasePort" "--username=$databaseUser" --force $databaseName *> $null
   }
   $env:PGPASSWORD = $previousPassword
+  $encryptionPassword = $null
   if (Test-Path -LiteralPath $workDir) {
     $resolved = [System.IO.Path]::GetFullPath($workDir)
     $prefix = $DrillRoot.TrimEnd('\') + '\'

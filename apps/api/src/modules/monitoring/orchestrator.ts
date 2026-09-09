@@ -1,11 +1,14 @@
-import { prisma, type ListingSource, type Source } from "@amb/db";
+import { prisma, type ListingSource, type MonitoringState, type Source } from "@amb/db";
 import {
   DEFAULT_INTERVAL_SECONDS,
   DEFAULT_JITTER_SECONDS,
   QUEUE_NAMES,
   SOURCE_LABELS,
   intervalWithJitterMs,
+  olxRecoveryAttemptGeneration,
+  olxRecoveryRetryEligible,
 } from "@amb/shared";
+import { autoRiaRealtimeIntervalSeconds, autoRiaSearchBudgetPerHour } from "../../lib/auto-ria-plan.js";
 import { env } from "../../env.js";
 import { logError, logInfo, logWarn } from "../../lib/error-log.js";
 import { enqueue } from "../../lib/queues.js";
@@ -19,7 +22,7 @@ import {
   type AdaptiveBackfillEvidence,
 } from "./backfill-policy.js";
 import {
-  deferOlxBackfillAfterRealtime,
+  deferOriginSensitiveBackfillAfterRealtime,
   nextBackfillTickAfterAttempt,
   startupBackfillDeadline,
 } from "./startup-backfill-policy.js";
@@ -49,7 +52,7 @@ export function defaultSourceDefinitions(
   config: Pick<typeof env, "AUTO_RIA_API_KEY" | "MOCK_SOURCE_ENABLED" | "MONITOR_INTERVAL_SECONDS">,
 ) {
   return [
-    { source: "AUTO_RIA", name: SOURCE_LABELS.AUTO_RIA ?? "AUTO.RIA", enabled: Boolean(config.AUTO_RIA_API_KEY), supportsNewestFirst: true, newestFirstVerified: true, intervalSeconds: env.LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS, jitterSeconds: env.LIVE_AUTO_RIA_JITTER_SECONDS },
+    { source: "AUTO_RIA", name: SOURCE_LABELS.AUTO_RIA ?? "AUTO.RIA", enabled: true, supportsNewestFirst: true, newestFirstVerified: true, intervalSeconds: env.LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS, jitterSeconds: env.LIVE_AUTO_RIA_JITTER_SECONDS },
     { source: "OLX", name: SOURCE_LABELS.OLX ?? "OLX", enabled: false, supportsNewestFirst: true, newestFirstVerified: true, intervalSeconds: env.LIVE_OLX_INTERVAL_SECONDS, jitterSeconds: env.LIVE_OLX_JITTER_SECONDS },
     { source: "RST", name: SOURCE_LABELS.RST ?? "RST", enabled: false, supportsNewestFirst: false, newestFirstVerified: false, intervalSeconds: env.LIVE_RST_INTERVAL_SECONDS, jitterSeconds: env.LIVE_RST_JITTER_SECONDS },
     { source: "CARS_UA", name: SOURCE_LABELS.CARS_UA ?? "Cars.ua", enabled: false, supportsNewestFirst: true, newestFirstVerified: false, intervalSeconds: env.LIVE_CARS_UA_INTERVAL_SECONDS, jitterSeconds: env.LIVE_CARS_UA_JITTER_SECONDS },
@@ -61,6 +64,7 @@ export function defaultSourceDefinitions(
 export class MonitoringOrchestrator {
   private timer: NodeJS.Timeout | null = null;
   private tickInProgress = false;
+  private backgroundTickInProgress = false;
   private running = false;
   private activeTargetSources = new Set<ListingSource>();
   private backfillPolicyModes = new Map<string, string>();
@@ -305,6 +309,30 @@ export class MonitoringOrchestrator {
         });
       }
 
+      // Historical evidence queries and recovery planning can be slow. Keep
+      // one background scheduler in flight without holding the realtime clock.
+      void this.tickBackground(sources, state, now, realtimeEnqueued);
+      await prisma.monitoringState.update({
+        where: { id: STATE_ID },
+        data: { lastTickAt: now },
+      });
+    } catch (error) {
+      await logError("orchestrator", "Tick failed", error instanceof Error ? error.message : String(error));
+    } finally {
+      this.tickInProgress = false;
+      await this.scheduleNext();
+    }
+  }
+
+  private async tickBackground(
+    sources: Source[],
+    state: MonitoringState,
+    now: Date,
+    realtimeEnqueued: ReadonlySet<ListingSource>,
+  ): Promise<void> {
+    if (!this.running || this.backgroundTickInProgress) return;
+    this.backgroundTickInProgress = true;
+    try {
       let nextBackfillTickAt = state.nextBackfillTickAt;
       let backfillCycleCompleted = false;
       if (!nextBackfillTickAt) {
@@ -325,7 +353,8 @@ export class MonitoringOrchestrator {
         nextCoverageTickAt = startupCoverageDeadline(now, null, env.OLX_COVERAGE_INITIAL_DELAY_SECONDS);
       } else if (nextCoverageTickAt <= now) {
         const olx = sources.find((source) => source.source === "OLX");
-        if (olx && (!olx.pausedUntil || olx.pausedUntil <= now)) {
+        if (olx && (!olx.pausedUntil || olx.pausedUntil <= now)
+          && await this.backgroundGenerationCurrent(state.generation)) {
           await enqueue(
             QUEUE_NAMES.COLLECTOR_COVERAGE,
             "collect",
@@ -346,10 +375,9 @@ export class MonitoringOrchestrator {
         nextCoverageTickAt = nextCoverageTickAfterAttempt(now, env.OLX_COVERAGE_INTERVAL_SECONDS);
       }
 
-      await prisma.monitoringState.update({
-        where: { id: STATE_ID },
+      await prisma.monitoringState.updateMany({
+        where: { id: STATE_ID, generation: state.generation, status: "RUNNING" },
         data: {
-          lastTickAt: now,
           nextBackfillTickAt,
           nextCoverageTickAt,
           ...(state.nextBackfillTickAt && state.nextBackfillTickAt <= now && backfillCycleCompleted
@@ -359,10 +387,10 @@ export class MonitoringOrchestrator {
         },
       });
     } catch (error) {
-      await logError("orchestrator", "Tick failed", error instanceof Error ? error.message : String(error));
+      await logError("orchestrator", "Background scheduling failed", error instanceof Error ? error.message : String(error))
+        .catch(() => undefined);
     } finally {
-      this.tickInProgress = false;
-      await this.scheduleNext();
+      this.backgroundTickInProgress = false;
     }
   }
 
@@ -372,15 +400,16 @@ export class MonitoringOrchestrator {
     now: Date,
     realtimeEnqueued: ReadonlySet<ListingSource>,
   ): Promise<{ deferred: boolean }> {
-    if (
-      sources.some((source) => source.source === "OLX")
-      && deferOlxBackfillAfterRealtime("OLX", realtimeEnqueued)
-    ) {
+    if (sources.some((source) =>
+      BACKFILL_SOURCES.has(source.source)
+      && deferOriginSensitiveBackfillAfterRealtime(source.source, realtimeEnqueued)
+    )) {
       return { deferred: true };
     }
     for (const source of sources) {
       if (!BACKFILL_SOURCES.has(source.source)) continue;
       if (source.pausedUntil && source.pausedUntil > now) continue;
+      if (source.source === "OLX") await rearmOlxRecoveryForChangedCapability(now);
       const evidence = source.source === "OLX" ? await loadOlxBackfillEvidence(now) : undefined;
       const decision = evidence
         ? decideAdaptiveBackfill(evidence, env.BACKFILL_INTERVAL_SECONDS, now)
@@ -397,25 +426,40 @@ export class MonitoringOrchestrator {
       await this.reportBackfillPolicy(source.source, scheduledDecision);
 
       const lastBackfillAt = evidence?.runs[0]?.startedAt;
+      const recoveryPending = source.source === "OLX" && (evidence?.pendingRecoveryCount ?? 0) > 0;
+      // Pending is durable urgency, not permission to bypass origin cooldowns.
+      // Otherwise a pending window defeats PROTECTION/UNRESOLVED backoff and
+      // adds another deep job on every scheduler attempt.
       if (source.source === "OLX" && !backfillDue(lastBackfillAt, scheduledDecision, now)) continue;
 
+      const queuedTrigger = recoveryPending ? "RECOVERY" : "BACKFILL";
+      if (!await this.backgroundGenerationCurrent(generation)) return { deferred: false };
       await enqueue(
         QUEUE_NAMES.COLLECTOR_BACKFILL,
         "collect",
         {
           sourceId: source.id,
           source: source.source,
-          trigger: "BACKFILL",
+          trigger: queuedTrigger,
           lane: "BACKFILL",
           monitoringGeneration: generation,
           scheduledAt: now.toISOString(),
           backfillProfile: scheduledDecision.profile,
           backfillReason: scheduledDecision.reason,
         },
-        { jobId: `collector-backfill-${source.source}-${generation}-${now.getTime()}` },
+        { jobId: `collector-${queuedTrigger.toLowerCase()}-${source.source}-${generation}-${now.getTime()}` },
       );
     }
     return { deferred: false };
+  }
+
+  private async backgroundGenerationCurrent(generation: number): Promise<boolean> {
+    if (!this.running) return false;
+    const state = await prisma.monitoringState.findUnique({
+      where: { id: STATE_ID },
+      select: { status: true, generation: true },
+    });
+    return this.running && state?.status === "RUNNING" && state.generation === generation;
   }
 
   private async reportBackfillPolicy(source: string, decision: AdaptiveBackfillDecision): Promise<void> {
@@ -520,12 +564,18 @@ function sourceDue(source: Source, now: Date): boolean {
 
 function effectiveRealtimeIntervalSeconds(source: Source, autoRiaContextCount: number): number {
   if (source.source !== "AUTO_RIA") return Math.max(1, source.intervalSeconds);
-  const hourlySearchBudget = Math.max(
-    1,
-    Math.min(env.AUTO_RIA_SEARCH_REQUESTS_PER_HOUR, env.AUTO_RIA_HOURLY_REQUEST_LIMIT),
+  const hourlySearchBudget = autoRiaSearchBudgetPerHour(
+    env.AUTO_RIA_SEARCH_REQUESTS_PER_HOUR,
+    env.AUTO_RIA_HOURLY_REQUEST_LIMIT,
+    env.AUTO_RIA_MAX_INFO_PER_SCAN,
   );
-  const quotaSafeInterval = Math.ceil((3600 * Math.max(1, autoRiaContextCount)) / hourlySearchBudget);
-  return Math.max(source.intervalSeconds, env.LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS, quotaSafeInterval);
+  return autoRiaRealtimeIntervalSeconds({
+    accessMode: env.AUTO_RIA_ACCESS_MODE,
+    sourceIntervalSeconds: source.intervalSeconds,
+    minimumIntervalSeconds: env.LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS,
+    contextCount: autoRiaContextCount,
+    hourlySearchBudget,
+  });
 }
 
 async function estimateAutoRiaContextCount(): Promise<number> {
@@ -563,7 +613,15 @@ async function loadOlxBackfillEvidence(now: Date): Promise<AdaptiveBackfillEvide
   const evidenceCutoff = new Date(now.getTime() - 6 * 60 * 60 * 1000);
   const anomalyCutoff = new Date(now.getTime() - 30 * 60 * 1000);
   const observationCutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const [runs, recoveredObservations, unresolvedObservationCount, realtimeAnomaly, adverseAudit] = await Promise.all([
+  const [
+    runs,
+    recoveredObservations,
+    unresolvedObservationCount,
+    realtimeAnomaly,
+    adverseAudit,
+    pendingRecoveryCount,
+    unresolvedRecovery,
+  ] = await Promise.all([
     prisma.collectorRun.findMany({
       where: {
         source: "OLX",
@@ -621,7 +679,20 @@ async function loadOlxBackfillEvidence(now: Date): Promise<AdaptiveBackfillEvide
       orderBy: { startedAt: "desc" },
       select: { startedAt: true },
     }),
+    prisma.coverageRecoveryWindow.count({
+      where: { source: "OLX", status: "PENDING" },
+    }),
+    prisma.coverageRecoveryWindow.findFirst({
+      where: { source: "OLX", status: "UNRESOLVED" },
+      orderBy: { unresolvedAt: "desc" },
+      select: { attemptGeneration: true },
+    }),
   ]);
+
+  const currentGeneration = currentOlxRecoveryGeneration();
+  const unresolvedRecoveryCount = unresolvedRecovery
+    ? await prisma.coverageRecoveryWindow.count({ where: { source: "OLX", status: "UNRESOLVED" } })
+    : 0;
 
   return {
     runs: runs.map((run) => ({
@@ -638,9 +709,86 @@ async function loadOlxBackfillEvidence(now: Date): Promise<AdaptiveBackfillEvide
       profile: backfillProfileFromMetrics(run.coverageMetrics),
     })),
     unresolvedObservationCount,
+    pendingRecoveryCount,
+    unresolvedRecovery: unresolvedRecovery
+      ? {
+          count: unresolvedRecoveryCount,
+          attemptedGeneration: unresolvedRecovery.attemptGeneration,
+          currentGeneration,
+        }
+      : undefined,
     realtimeAnomalyAt: realtimeAnomaly?.startedAt,
     adverseAuditAt: adverseAudit?.startedAt,
   };
+}
+
+function currentOlxRecoveryGeneration(): string {
+  return olxRecoveryAttemptGeneration({
+    pageSize: env.OLX_API_PAGE_SIZE,
+    maxOffset: env.OLX_API_MAX_OFFSET,
+  });
+}
+
+async function rearmOlxRecoveryForChangedCapability(now: Date): Promise<number> {
+  const currentGeneration = currentOlxRecoveryGeneration();
+  const unresolved = await prisma.coverageRecoveryWindow.findMany({
+    where: { source: "OLX", status: "UNRESOLVED" },
+    select: {
+      id: true,
+      sourceSearchStateId: true,
+      requiredCutoffAt: true,
+      attemptGeneration: true,
+    },
+  });
+  let rearmed = 0;
+  for (const window of unresolved) {
+    if (!olxRecoveryRetryEligible({
+      attemptedGeneration: window.attemptGeneration,
+      currentGeneration,
+    })) continue;
+
+    const changed = await prisma.$transaction(async (tx) => {
+      const transition = await tx.coverageRecoveryWindow.updateMany({
+        where: { id: window.id, status: "UNRESOLVED" },
+        data: {
+          status: "PENDING",
+          unresolvedReason: null,
+          unresolvedAt: null,
+          attemptGeneration: null,
+          acknowledgedAt: null,
+          acknowledgedBy: null,
+          acknowledgementNote: null,
+        },
+      });
+      if (transition.count === 0) return false;
+      const state = await tx.sourceSearchState.findUnique({
+        where: { id: window.sourceSearchStateId },
+        select: { coverageRecoveryCutoffAt: true },
+      });
+      const cutoff = state?.coverageRecoveryCutoffAt
+        && state.coverageRecoveryCutoffAt < window.requiredCutoffAt
+        ? state.coverageRecoveryCutoffAt
+        : window.requiredCutoffAt;
+      await tx.sourceSearchState.update({
+        where: { id: window.sourceSearchStateId },
+        data: {
+          coverageRecoveryPending: true,
+          coverageRecoveryCutoffAt: cutoff,
+          lastPage: 1,
+        },
+      });
+      return true;
+    });
+    if (changed) rearmed += 1;
+  }
+  if (rearmed > 0) {
+    await logInfo(
+      "orchestrator",
+      `OLX recovery capability changed; re-armed ${rearmed} unresolved window(s)`,
+      `generation=${currentGeneration}; at=${now.toISOString()}`,
+    );
+  }
+  return rearmed;
 }
 
 function defaultBackfillDecision(): AdaptiveBackfillDecision {

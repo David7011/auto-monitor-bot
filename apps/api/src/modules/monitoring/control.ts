@@ -156,9 +156,7 @@ async function activateLiveSource(
 }
 
 export function configuredScheduledSources(): ListingSource[] {
-  return env.AUTO_RIA_API_KEY
-    ? ["AUTO_RIA", "OLX", "RST", "CARS_UA", "AUTOMOTO"]
-    : ["OLX", "RST", "CARS_UA", "AUTOMOTO"];
+  return ["OLX", "AUTO_RIA", "RST", "CARS_UA", "AUTOMOTO"];
 }
 
 function autoRiaLiveIntervalSeconds(): number {

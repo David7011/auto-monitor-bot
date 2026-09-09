@@ -5,6 +5,11 @@ import {
   buildOlxFeedTargets,
   extractRenderedOlxCards,
   normalizeOlxAd,
+  nextOlxRecoveryResumePage,
+  olxBackfillPageWindow,
+  olxEmptyPageProvesExhaustion,
+  olxEmptyRecoveryUnresolvedReason,
+  olxRecoveryUnresolvedReason,
   olxApiFeedUrls,
   parseRenderedCardDate,
   selectOlxCandidates,
@@ -91,6 +96,96 @@ describe("OLX date normalization", () => {
     const listing = normalizeOlxAd(ad({ params: [{ key: "cleared_customs", normalizedValue: "yes" }] }), now);
     expect(listing?.customsCleared).toBe(true);
   });
+
+  it("preserves the precision of rendered timestamps without downgrading structured ones", () => {
+    expect(normalizeOlxAd(ad({ htmlCardOnly: true, timestampConfidence: "LOW" }), now))
+      .toMatchObject({ timestampConfidence: "LOW", skipReason: "PUBLICATION_TIME_DAY_ONLY" });
+    expect(normalizeOlxAd(ad({ htmlCardOnly: true, timestampConfidence: "MEDIUM" }), now))
+      .toMatchObject({ timestampConfidence: "MEDIUM", skipReason: undefined });
+    expect(normalizeOlxAd(ad({}), now)?.timestampConfidence).toBe("HIGH");
+  });
+});
+
+describe("OLX durable recovery pagination", () => {
+  it("resumes a bounded recovery attempt from the persisted page", () => {
+    expect(olxBackfillPageWindow({
+      pageBudget: 4,
+      maxOffsetPages: 21,
+      recovery: true,
+      persistedResumePage: 6,
+    })).toEqual({ startPage: 6, endPage: 9 });
+  });
+
+  it("overlaps the two deepest pages to absorb offset drift", () => {
+    expect(nextOlxRecoveryResumePage(6, 9)).toBe(8);
+    expect(nextOlxRecoveryResumePage(6, 5)).toBe(6);
+  });
+
+  it("never accepts an empty mutable offset page as continuity proof", () => {
+    expect(olxEmptyPageProvesExhaustion({
+      startPage: 1,
+      currentPage: 1,
+      observedBeforeEmptyPage: 0,
+    })).toBe(false);
+    expect(olxEmptyPageProvesExhaustion({
+      startPage: 1,
+      currentPage: 2,
+      observedBeforeEmptyPage: 50,
+    })).toBe(false);
+    expect(olxEmptyPageProvesExhaustion({
+      startPage: 6,
+      currentPage: 6,
+      observedBeforeEmptyPage: 0,
+    })).toBe(false);
+  });
+
+  it("classifies only a pending recovery that actually reached the public cap as unresolved", () => {
+    expect(olxRecoveryUnresolvedReason({
+      recovery: true,
+      pending: true,
+      anchored: false,
+      cutoffReached: false,
+      lastPageScanned: 21,
+      maxOffsetPages: 21,
+    })).toBe("PUBLIC_OFFSET_CAP");
+    expect(olxRecoveryUnresolvedReason({
+      recovery: true,
+      pending: true,
+      anchored: true,
+      cutoffReached: false,
+      lastPageScanned: 21,
+      maxOffsetPages: 21,
+    })).toBeUndefined();
+    expect(olxRecoveryUnresolvedReason({
+      recovery: false,
+      pending: true,
+      anchored: false,
+      cutoffReached: false,
+      lastPageScanned: 21,
+      maxOffsetPages: 21,
+    })).toBeUndefined();
+  });
+
+  it("bounds repeated empty recovery pages without calling them verified", () => {
+    expect(olxEmptyRecoveryUnresolvedReason({
+      recovery: true,
+      pending: true,
+      observedBeforeEmptyPage: 0,
+      priorAttemptCount: 1,
+    })).toBeUndefined();
+    expect(olxEmptyRecoveryUnresolvedReason({
+      recovery: true,
+      pending: true,
+      observedBeforeEmptyPage: 0,
+      priorAttemptCount: 2,
+    })).toBe("SOURCE_EXHAUSTED_BEFORE_BOUNDARY");
+    expect(olxEmptyRecoveryUnresolvedReason({
+      recovery: true,
+      pending: true,
+      observedBeforeEmptyPage: 50,
+      priorAttemptCount: 0,
+    })).toBe("SOURCE_EXHAUSTED_BEFORE_BOUNDARY");
+  });
 });
 
 describe("OLX fast feed URLs", () => {
@@ -128,6 +223,18 @@ describe("OLX fast feed URLs", () => {
     const now = new Date("2026-08-19T17:30:00.000Z");
     expect(parseRenderedCardDate("Сьогодні о 16:20", now)?.toISOString()).toBe("2026-08-19T13:20:00.000Z");
     expect(parseRenderedCardDate("Вчора о 23:05", now)?.toISOString()).toBe("2026-08-18T20:05:00.000Z");
+    expect(parseRenderedCardDate("05 серпня 2026 р. о 16:20", now)?.toISOString()).toBe("2026-08-05T13:20:00.000Z");
+    expect(parseRenderedCardDate("31 лютого 2026 р.", now)).toBeUndefined();
+    expect(parseRenderedCardDate("Сьогодні о 26:20", now)).toBeUndefined();
+  });
+
+  it("labels rendered minute and day timestamps with their actual precision", () => {
+    const card = (id: string, date: string) => `<div data-cy="l-card" id="${id}"><a href="/d/test-ID${id}.html"><h4>Car</h4></a><p data-testid="location-date">Дніпро - ${date}</p></div>`;
+    const cards = extractRenderedOlxCards(
+      card("123", "Сьогодні о 16:20") + card("124", "05 серпня 2026 р."),
+      new Date("2026-08-19T17:30:00.000Z"),
+    );
+    expect(cards.map((item) => item.timestampConfidence)).toEqual(["MEDIUM", "LOW"]);
   });
 
   it("builds separate fast API feeds for Dnipro and Samar", () => {
@@ -179,6 +286,33 @@ describe("OLX fast feed URLs", () => {
 });
 
 describe("OLX mixed promoted feed", () => {
+  it("never treats the synthetic noon of a day-only card as historical cutoff proof", () => {
+    const result = selectOlxCandidates([
+      ad({ id: "day-only", htmlCardOnly: true, timestampConfidence: "LOW", createdTime: "2026-07-10T09:00:00Z" }),
+    ], {
+      now: new Date("2026-07-10T12:00:00Z"),
+      publishedAfter: new Date("2026-07-10T10:00:00Z"),
+      knownExternalIds: new Set(),
+      maxCandidates: 10,
+    });
+    expect(result).toMatchObject({ cutoffEncountered: false, fullyBeforeCutoff: false, oldestObservedAt: undefined });
+    expect(result.listings.map((listing) => listing.externalId)).toEqual(["day-only"]);
+  });
+
+  it("retains minute-only cards that could fall after a cutoff within that minute", () => {
+    const result = selectOlxCandidates([
+      ad({ id: "uncertain-seconds", htmlCardOnly: true, timestampConfidence: "MEDIUM", createdTime: "2026-07-10T10:00:00Z" }),
+      ad({ id: "prior-minute", htmlCardOnly: true, timestampConfidence: "MEDIUM", createdTime: "2026-07-10T09:59:00Z" }),
+    ], {
+      now: new Date("2026-07-10T12:00:00Z"),
+      publishedAfter: new Date("2026-07-10T10:00:30Z"),
+      knownExternalIds: new Set(),
+      maxCandidates: 10,
+    });
+    expect(result.fullyBeforeCutoff).toBe(false);
+    expect(result.listings.map((listing) => listing.externalId)).toEqual(["uncertain-seconds"]);
+  });
+
   it("continues past an old promoted advert and keeps fresh adverts below it", () => {
     const now = new Date("2026-07-10T10:00:00.000Z");
     const result = selectOlxCandidates([
@@ -263,6 +397,61 @@ describe("OLX mixed promoted feed", () => {
     expect(shouldStopOlxRealtimePage(false, result.fullyBeforeCutoff)).toBe(true);
     expect(result.listings).toEqual([]);
     expect(result.scannedExternalIds).toEqual(["old-1", "old-2"]);
+  });
+
+  it("does not let a fresh sticky advert repeated from an earlier page block cutoff proof", () => {
+    const now = new Date("2026-07-10T10:00:00.000Z");
+    const result = selectOlxCandidates([
+      ad({ id: "sticky-fresh", createdTime: "2026-07-10T09:59:00.000Z" }),
+      ad({ id: "old-1", createdTime: "2026-07-09T23:59:00.000Z" }),
+    ], {
+      now,
+      publishedAfter: new Date("2026-07-10T00:00:00.000Z"),
+      knownExternalIds: new Set(),
+      seenExternalIds: new Set(["sticky-fresh"]),
+      continuityIgnoreExternalIds: new Set(["sticky-fresh"]),
+      maxCandidates: 10,
+    });
+
+    expect(result.fullyBeforeCutoff).toBe(true);
+    expect(result.observedCount).toBe(1);
+    expect(result.oldestObservedAt).toEqual(new Date("2026-07-09T23:59:00.000Z"));
+    expect(result.scannedExternalIds).toEqual(["old-1"]);
+  });
+
+  it("keeps a fresh repeated advert as cutoff evidence unless recovery explicitly neutralizes it", () => {
+    const now = new Date("2026-07-10T10:00:00.000Z");
+    const result = selectOlxCandidates([
+      ad({ id: "sticky-fresh", createdTime: "2026-07-10T09:59:00.000Z" }),
+      ad({ id: "old-1", createdTime: "2026-07-09T23:59:00.000Z" }),
+    ], {
+      now,
+      publishedAfter: new Date("2026-07-10T00:00:00.000Z"),
+      knownExternalIds: new Set(),
+      seenExternalIds: new Set(["sticky-fresh"]),
+      maxCandidates: 10,
+    });
+
+    expect(result.fullyBeforeCutoff).toBe(false);
+    expect(result.oldestObservedAt).toEqual(new Date("2026-07-09T23:59:00.000Z"));
+  });
+
+  it("does not fabricate cutoff proof from a page containing only ignored fresh placements", () => {
+    const now = new Date("2026-07-10T10:00:00.000Z");
+    const result = selectOlxCandidates([
+      ad({ id: "sticky-fresh", createdTime: "2026-07-10T09:59:00.000Z" }),
+    ], {
+      now,
+      publishedAfter: new Date("2026-07-10T00:00:00.000Z"),
+      knownExternalIds: new Set(),
+      seenExternalIds: new Set(["sticky-fresh"]),
+      continuityIgnoreExternalIds: new Set(["sticky-fresh"]),
+      maxCandidates: 10,
+    });
+
+    expect(result.fullyBeforeCutoff).toBe(false);
+    expect(result.cutoffEncountered).toBe(false);
+    expect(result.observedCount).toBe(0);
   });
 
   it("does not hide fresh overflow when the candidate limit is reached", () => {

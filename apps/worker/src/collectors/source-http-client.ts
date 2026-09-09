@@ -41,6 +41,7 @@ export type SourceHttpTextResult = {
   coordinatorPostFinishQuietMs?: number;
   requestStartedAt?: Date;
   firstByteAt?: Date;
+  cacheAgeSeconds?: number;
   status: number;
   contentType: string;
   body: string;
@@ -63,16 +64,12 @@ type SourceHttpClientDependencies = {
 
 const DEFAULT_ACCEPTED_TEXT = ["text/html", "application/xhtml+xml", "application/xml", "text/plain"];
 const DEFAULT_ACCEPTED_JSON = ["application/json", "text/json"];
-const CHALLENGE_PATTERNS: Array<{ detector: string; pattern: RegExp }> = [
-  { detector: "recaptcha", pattern: /\b(?:g-recaptcha|recaptcha|hcaptcha|h-captcha)\b/iu },
-  { detector: "cloudflare-challenge", pattern: /\b(?:cf-chl|cf-browser-verification|challenge-platform|turnstile)\b/iu },
-  { detector: "human-verification", pattern: /\b(?:verify you are human|checking your browser|robot or human|unusual traffic)\b/iu },
-  { detector: "access-denied", pattern: /\b(?:access denied|forbidden|доступ заборонено|доступ запрещен)\b/iu },
-];
-const RATE_LIMIT_PATTERNS: Array<{ detector: string; pattern: RegExp }> = [
-  { detector: "too-many-requests", pattern: /\b(?:too many requests|rate limit|try again later|429)\b/iu },
-  { detector: "temporary-ban", pattern: /\b(?:temporarily blocked|temporary block|заблокировано временно|тимчасово заблоковано)\b/iu },
-];
+const CLOUDFLARE_CHALLENGE_RUNTIME = /(?:\/cdn-cgi\/challenge-platform\/|\bwindow\._cf_chl_opt\b|\bcf-chl-(?:widget|managed|interactive)\b)/iu;
+const CLOUDFLARE_INTERSTITIAL_TEXT = /\b(?:just a moment|attention required|performing security verification|enable javascript and cookies to continue)\b/iu;
+const CAPTCHA_WIDGET = /(?:\b(?:g-recaptcha|h-captcha)\b|\bdata-sitekey\s*=|\b(?:grecaptcha|hcaptcha)\.(?:execute|render)\b)/iu;
+const HUMAN_VERIFICATION_TEXT = /\b(?:verify (?:that )?you are human|checking your browser|complete (?:the )?(?:captcha|security check)|robot or human|unusual traffic)\b|(?:підтвердіть|подтвердите)[^<]{0,40}(?:людина|человек)|(?:перевірка|проверка)[^<]{0,40}(?:безпеки|безопасности)/iu;
+const ACCESS_DENIED_TEXT = /\b(?:access denied|request forbidden)\b|доступ (?:заборонено|запрещен)/iu;
+const RATE_LIMIT_TEXT = /\b(?:too many requests|rate limit(?:ed| exceeded)?|temporarily blocked|temporary block)\b|(?:тимчасово|временно) заблок(?:овано|ирован)/iu;
 const sourceDispatcher = new Agent({
   connections: env.SOURCE_HTTP_CONNECTIONS_PER_ORIGIN,
   pipelining: 1,
@@ -212,7 +209,13 @@ export class SourceHttpClient {
 
       const encoding = options.encoding ?? (contentType.toLowerCase().includes("windows-1251") ? "windows-1251" : "utf8");
       const body = new TextDecoder(encoding).decode(buffer);
-      const { classification, detector } = classifyResponse(response.status, contentType, body, options.acceptedContentTypes ?? DEFAULT_ACCEPTED_TEXT);
+      const { classification, detector } = classifyResponse(
+        response.status,
+        contentType,
+        body,
+        options.acceptedContentTypes ?? DEFAULT_ACCEPTED_TEXT,
+        response.headers.get("cf-mitigated"),
+      );
 
       return {
         requestId,
@@ -224,6 +227,7 @@ export class SourceHttpClient {
         classification,
         detector,
         retryAfterSeconds,
+        cacheAgeSeconds: parseCacheAge(response.headers.get("age")),
       };
     } catch (error) {
       if (preemptionSignal?.aborted) {
@@ -322,19 +326,26 @@ function classifyResponse(
   contentType: string,
   body: string,
   acceptedContentTypes: string[],
+  cfMitigated: string | null,
 ): { classification: SourceHttpClassification; detector?: string } {
+  // Cloudflare documents this response header as the authoritative signal for
+  // every Challenge Page type. Prefer it over mutable HTML fingerprints.
+  if (cfMitigated?.trim().toLowerCase() === "challenge") {
+    return { classification: "CHALLENGE", detector: "cloudflare-cf-mitigated" };
+  }
   if (status === 304) return { classification: "NOT_MODIFIED" };
   if (status === 429) return { classification: "RATE_LIMITED" };
   if (status === 403) {
-    const detector = detectorForBody(body);
-    return { classification: detector ? "CHALLENGE" : "ACCESS_DENIED", detector };
+    const protection = detectBodyProtection(contentType, body);
+    return protection?.classification === "CHALLENGE"
+      ? protection
+      : { classification: "ACCESS_DENIED", detector: protection?.detector };
   }
   if (status >= 500) return { classification: "SOURCE_UNAVAILABLE" };
   if (status < 200 || status >= 300) return { classification: "INVALID_RESPONSE" };
 
-  const detector = detectorForBody(body);
-  if (detector) return { classification: "CHALLENGE", detector };
-  if (rateLimitDetectorForBody(body)) return { classification: "RATE_LIMITED" };
+  const protection = detectBodyProtection(contentType, body);
+  if (protection) return protection;
   if (!contentTypeAllowed(contentType, acceptedContentTypes)) return { classification: "INVALID_RESPONSE" };
   if (!body.trim()) return { classification: "EMPTY_RESULT" };
   return { classification: "SUCCESS" };
@@ -345,14 +356,107 @@ function contentTypeAllowed(contentType: string, accepted: string[]): boolean {
   return !normalized || accepted.some((item) => normalized.includes(item));
 }
 
-function detectorForBody(body: string): string | undefined {
-  const lower = body.slice(0, 20_000).toLowerCase();
-  return CHALLENGE_PATTERNS.find((item) => item.pattern.test(lower))?.detector;
+export type BodyProtectionSignal = {
+  classification: "CHALLENGE" | "RATE_LIMITED";
+  detector: string;
+};
+
+/**
+ * Detects protection responses whose servers incorrectly return HTTP 2xx.
+ * Ordinary listing content is never classified from a bare word, number, or
+ * embedded CAPTCHA library: the signal must describe the response document
+ * itself, or be a structured JSON error envelope.
+ */
+export function detectBodyProtection(contentType: string, body: string): BodyProtectionSignal | undefined {
+  const sample = body.slice(0, 100_000);
+  const normalizedContentType = contentType.toLowerCase();
+
+  if (normalizedContentType.includes("json") || looksLikeJson(sample)) {
+    // JSON listing strings may themselves contain HTML snippets. They are
+    // data, not headings of the response document.
+    return detectJsonProtection(body);
+  }
+
+  const headingText = htmlDocumentHeadings(sample);
+  if (CLOUDFLARE_CHALLENGE_RUNTIME.test(sample) && CLOUDFLARE_INTERSTITIAL_TEXT.test(headingText)) {
+    return { classification: "CHALLENGE", detector: "cloudflare-challenge-document" };
+  }
+  if (HUMAN_VERIFICATION_TEXT.test(headingText)) {
+    return {
+      classification: "CHALLENGE",
+      detector: CAPTCHA_WIDGET.test(sample) ? "captcha-challenge-document" : "human-verification-document",
+    };
+  }
+  if (ACCESS_DENIED_TEXT.test(headingText)) {
+    return { classification: "CHALLENGE", detector: "access-denied-document" };
+  }
+  if (RATE_LIMIT_TEXT.test(headingText)) {
+    return { classification: "RATE_LIMITED", detector: "rate-limit-document" };
+  }
+
+  if (normalizedContentType.includes("text/plain")) {
+    const plain = sample.trim();
+    if (plain.length <= 2_000 && HUMAN_VERIFICATION_TEXT.test(plain) && CAPTCHA_WIDGET.test(plain)) {
+      return { classification: "CHALLENGE", detector: "captcha-challenge-text" };
+    }
+    if (plain.length <= 2_000 && RATE_LIMIT_TEXT.test(plain)) {
+      return { classification: "RATE_LIMITED", detector: "rate-limit-text" };
+    }
+  }
+  return undefined;
 }
 
-function rateLimitDetectorForBody(body: string): string | undefined {
-  const lower = body.slice(0, 20_000).toLowerCase();
-  return RATE_LIMIT_PATTERNS.find((item) => item.pattern.test(lower))?.detector;
+function detectJsonProtection(body: string): BodyProtectionSignal | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const value = parsed as Record<string, unknown>;
+  const hasErrorEnvelope = value.error != null || value.errors != null || value.success === false || value.ok === false;
+  if (!hasErrorEnvelope) return undefined;
+  const errorText = JSON.stringify({
+    error: value.error,
+    errors: value.errors,
+    message: value.message,
+    detail: value.detail,
+    status: value.status,
+    code: value.code,
+  }).slice(0, 20_000);
+  const numericStatus = Number(value.status ?? value.code ?? nestedErrorStatus(value.error));
+  if (numericStatus === 429 || RATE_LIMIT_TEXT.test(errorText)) {
+    return { classification: "RATE_LIMITED", detector: "json-rate-limit-error" };
+  }
+  if (HUMAN_VERIFICATION_TEXT.test(errorText) || CAPTCHA_WIDGET.test(errorText)) {
+    return { classification: "CHALLENGE", detector: "json-challenge-error" };
+  }
+  return undefined;
+}
+
+function nestedErrorStatus(error: unknown): unknown {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
+  const value = error as Record<string, unknown>;
+  return value.status ?? value.code;
+}
+
+function htmlDocumentHeadings(body: string): string {
+  const document = body.replace(/<!--[\s\S]*?-->|<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, " ");
+  const headings = [...document.matchAll(/<(?:title|h1)\b[^>]*>([\s\S]*?)<\/(?:title|h1)>/giu)]
+    .map((match) => (match[1] ?? "").replace(/<[^>]+>/gu, " "));
+  return headings.join(" ").replace(/\s+/gu, " ").trim();
+}
+
+function looksLikeJson(body: string): boolean {
+  const trimmed = body.trimStart();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
+}
+
+function parseCacheAge(value: string | null): number | undefined {
+  if (value == null || !/^\d+$/u.test(value.trim())) return undefined;
+  const age = Number(value);
+  return Number.isSafeInteger(age) ? age : undefined;
 }
 
 function parseRetryAfter(value: string | null): number | undefined {

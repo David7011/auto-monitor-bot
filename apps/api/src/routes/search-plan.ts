@@ -1,14 +1,18 @@
 import type { FastifyInstance } from "fastify";
 import { prisma, type Filter, type ListingSource, type Source, type SourceSearchState } from "@amb/db";
 import {
+  QUEUE_NAMES,
   autoRiaGeoParamsForSelection,
+  marketplaceCategoryKey,
+  sourceSupportsCategory,
   type FilterRow,
   type SearchPlanResponse,
   type SearchPlanRow,
 } from "@amb/shared";
 import { env } from "../env.js";
+import { autoRiaIdentityIssues, autoRiaRequestPlan, autoRiaSearchBudgetPerHour } from "../lib/auto-ria-plan.js";
 import { olxHtmlCoverageIssue } from "../lib/search-plan-health.js";
-import { redisConnection } from "../lib/queues.js";
+import { enqueue, redisConnection } from "../lib/queues.js";
 
 const REAL_SOURCES: ListingSource[] = ["AUTO_RIA", "OLX", "RST", "CARS_UA", "AUTOMOTO"];
 const AUTO_RIA_SEARCH_FIELDS = [
@@ -67,8 +71,8 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
           filter,
           source,
           sourceRecord: sourceMap.get(source),
-          state: states.find((item) => item.source === source && item.filterIds.includes(filter.id)),
-          recentRun: recentRuns.find((run) => run.source === source) ?? null,
+          state: states.find((item) => item.source === source && item.categoryKey === marketplaceCategoryKey(filter.categoryKey) && item.filterIds.includes(filter.id)),
+          recentRun: recentRuns.find((run) => run.source === source && (run.categoryKey === marketplaceCategoryKey(filter.categoryKey) || run.categoryKey === "mixed")) ?? null,
         }),
       ),
     );
@@ -84,7 +88,13 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       autoRiaEstimatedRequestsPerScan: plans
         .filter((plan) => plan.source === "AUTO_RIA" && plan.sourceEnabled)
         .reduce((sum, plan) => sum + plan.estimatedRequestsPerScan, 0),
+      autoRiaMaximumRequestsPerScan: plans
+        .filter((plan) => plan.source === "AUTO_RIA" && plan.sourceEnabled)
+        .reduce((sum, plan) => sum + plan.maximumRequestsPerScan, 0),
+      activeCategories: new Set(filters.map((filter) => marketplaceCategoryKey(filter.categoryKey))).size,
+      discoveryShards: new Set(states.map((state) => `${state.source}:${state.fingerprint}`)).size,
     };
+    const latestRecovery = recoveryWindows.find((window) => window.status !== "VERIFIED") ?? recoveryWindows[0];
 
     return {
       generatedAt: now.toISOString(),
@@ -114,28 +124,38 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       offlineRecovery: {
         status: recoveryWindows.some((window) => window.status === "PENDING")
           ? "PENDING"
+          : recoveryWindows.some((window) => window.status === "UNRESOLVED")
+            ? "UNRESOLVED"
           : recoveryWindows.length > 0
             ? "VERIFIED"
             : "NONE",
         pendingCount: recoveryWindows.filter((window) => window.status === "PENDING").length,
-        latest: recoveryWindows[0]
+        unresolvedCount: recoveryWindows.filter((window) => window.status === "UNRESOLVED").length,
+        latest: latestRecovery
           ? {
-              id: recoveryWindows[0].id,
-              reason: recoveryWindows[0].reason,
-              status: recoveryWindows[0].status,
-              persistedBoundaryAt: recoveryWindows[0].persistedBoundaryAt.toISOString(),
-              requiredCutoffAt: recoveryWindows[0].requiredCutoffAt.toISOString(),
-              detectedAt: recoveryWindows[0].detectedAt.toISOString(),
-              latestSeenAt: recoveryWindows[0].latestSeenAt?.toISOString() ?? null,
-              lastAttemptAt: recoveryWindows[0].lastAttemptAt?.toISOString() ?? null,
-              lastAttemptRunId: recoveryWindows[0].lastAttemptRunId,
-              verifiedAt: recoveryWindows[0].verifiedAt?.toISOString() ?? null,
-              verifiedRunId: recoveryWindows[0].verifiedRunId,
-              verificationMethod: recoveryWindows[0].verificationMethod,
-              oldestObservedAt: recoveryWindows[0].oldestObservedAt?.toISOString() ?? null,
-              pageCount: recoveryWindows[0].pageCount,
-              requestCount: recoveryWindows[0].requestCount,
-              observedCount: recoveryWindows[0].observedCount,
+              id: latestRecovery.id,
+              reason: latestRecovery.reason,
+              status: latestRecovery.status,
+              persistedBoundaryAt: latestRecovery.persistedBoundaryAt.toISOString(),
+              requiredCutoffAt: latestRecovery.requiredCutoffAt.toISOString(),
+              detectedAt: latestRecovery.detectedAt.toISOString(),
+              latestSeenAt: latestRecovery.latestSeenAt?.toISOString() ?? null,
+              lastAttemptAt: latestRecovery.lastAttemptAt?.toISOString() ?? null,
+              lastAttemptRunId: latestRecovery.lastAttemptRunId,
+              verifiedAt: latestRecovery.verifiedAt?.toISOString() ?? null,
+              verifiedRunId: latestRecovery.verifiedRunId,
+              verificationMethod: latestRecovery.verificationMethod,
+              unresolvedReason: latestRecovery.unresolvedReason,
+              unresolvedAt: latestRecovery.unresolvedAt?.toISOString() ?? null,
+              attemptGeneration: latestRecovery.attemptGeneration,
+              acknowledgedAt: latestRecovery.acknowledgedAt?.toISOString() ?? null,
+              acknowledgedBy: latestRecovery.acknowledgedBy,
+              acknowledgementNote: latestRecovery.acknowledgementNote,
+              attemptCount: latestRecovery.attemptCount,
+              oldestObservedAt: latestRecovery.oldestObservedAt?.toISOString() ?? null,
+              pageCount: latestRecovery.pageCount,
+              requestCount: latestRecovery.requestCount,
+              observedCount: latestRecovery.observedCount,
             }
           : null,
       },
@@ -163,6 +183,99 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       plans,
     } satisfies SearchPlanResponse;
   });
+
+  app.post<{
+    Params: { id: string };
+    Body: { acknowledgedBy?: string; note?: string };
+  }>("/search-plan/recovery/:id/acknowledge", async (req, reply) => {
+    const acknowledgedBy = boundedText(req.body?.acknowledgedBy, 120) ?? "local-operator";
+    const note = boundedText(req.body?.note, 500);
+    const updated = await prisma.coverageRecoveryWindow.updateMany({
+      where: { id: req.params.id, status: "UNRESOLVED" },
+      data: {
+        acknowledgedAt: new Date(),
+        acknowledgedBy,
+        acknowledgementNote: note ?? null,
+      },
+    });
+    if (updated.count === 0) {
+      return reply.code(409).send({ error: "Only an UNRESOLVED recovery window can be acknowledged" });
+    }
+    return prisma.coverageRecoveryWindow.findUnique({ where: { id: req.params.id } });
+  });
+
+  app.post<{ Params: { id: string } }>("/search-plan/recovery/:id/retry", async (req, reply) => {
+    const rearmed = await prisma.$transaction(async (tx) => {
+      const window = await tx.coverageRecoveryWindow.findUnique({ where: { id: req.params.id } });
+      if (!window || window.status !== "UNRESOLVED") return null;
+      const transition = await tx.coverageRecoveryWindow.updateMany({
+        where: { id: window.id, status: "UNRESOLVED" },
+        data: {
+          status: "PENDING",
+          unresolvedReason: null,
+          unresolvedAt: null,
+          attemptGeneration: null,
+          acknowledgedAt: null,
+          acknowledgedBy: null,
+          acknowledgementNote: null,
+        },
+      });
+      if (transition.count === 0) return null;
+      const state = await tx.sourceSearchState.findUnique({
+        where: { id: window.sourceSearchStateId },
+        select: { coverageRecoveryCutoffAt: true },
+      });
+      const cutoff = state?.coverageRecoveryCutoffAt
+        && state.coverageRecoveryCutoffAt < window.requiredCutoffAt
+        ? state.coverageRecoveryCutoffAt
+        : window.requiredCutoffAt;
+      await tx.sourceSearchState.update({
+        where: { id: window.sourceSearchStateId },
+        data: {
+          coverageRecoveryPending: true,
+          coverageRecoveryCutoffAt: cutoff,
+          lastPage: 1,
+        },
+      });
+      return window;
+    });
+    if (!rearmed) {
+      return reply.code(409).send({ error: "Only an UNRESOLVED recovery window can be retried" });
+    }
+
+    const [source, monitoring] = await Promise.all([
+      prisma.source.findUnique({ where: { source: "OLX" } }),
+      prisma.monitoringState.findUnique({ where: { id: "singleton" } }),
+    ]);
+    if (source?.enabled && monitoring?.status === "RUNNING") {
+      await enqueue(
+        QUEUE_NAMES.COLLECTOR_BACKFILL,
+        "collect",
+        {
+          sourceId: source.id,
+          source: "OLX",
+          trigger: "RECOVERY",
+          lane: "BACKFILL",
+          monitoringGeneration: monitoring.generation,
+          scheduledAt: new Date().toISOString(),
+          backfillProfile: "FULL",
+          backfillReason: "operator forced retry of unresolved recovery window",
+        },
+        { jobId: `coverage-recovery-force-OLX-${req.params.id}-${Date.now()}` },
+      );
+    }
+    return {
+      id: rearmed.id,
+      status: "PENDING",
+      queued: Boolean(source?.enabled && monitoring?.status === "RUNNING"),
+    };
+  });
+}
+
+function boundedText(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, maxLength) : undefined;
 }
 
 type OlxDiscoveryRow = {
@@ -226,6 +339,7 @@ function buildPlanRow({
   sourceRecord: Source | undefined;
   state: SourceSearchState | undefined;
   recentRun: {
+    categoryKey: string;
     lane: string;
     status: string;
     foundCount: number;
@@ -235,10 +349,14 @@ function buildPlanRow({
     errorMessage: string | null;
     finishedAt: Date | null;
     coverageMetrics: unknown;
+    requestCount: number;
   } | null;
-}) {
+}): SearchPlanRow {
   const issues = planIssues(filter, source, sourceRecord, state);
   const supported = sourceSupport(filter, source, sourceRecord);
+  const requestPlan = source === "AUTO_RIA"
+    ? autoRiaRequestPlan(env.AUTO_RIA_MAX_INFO_PER_SCAN, recentRun?.requestCount)
+    : autoRiaRequestPlan(-1, null);
   const severity: SearchPlanRow["severity"] = issues.some((issue) => issue.level === "danger")
     ? "danger"
     : issues.some((issue) => issue.level === "warning")
@@ -253,6 +371,14 @@ function buildPlanRow({
     sourceNextCheckAt: sourceRecord?.nextCheckAt?.toISOString() ?? null,
     filterId: filter.id,
     filterName: filter.name,
+    categoryKey: marketplaceCategoryKey(filter.categoryKey),
+    categorySchemaVersion: filter.categorySchemaVersion,
+    sourceCategoryPath: state?.sourceCategoryPath ?? null,
+    unknownPolicy: filter.unknownPolicy === "STRICT" ? "STRICT" : "MAX_COVERAGE",
+    shadowMode: filter.shadowMode,
+    parserHealth: state?.parserHealth === "HEALTHY" || state?.parserHealth === "DEGRADED" ? state.parserHealth : "UNKNOWN",
+    parserHealthDetails: state?.parserHealthDetails ?? null,
+    lastParserHealthyAt: state?.lastParserHealthyAt?.toISOString() ?? null,
     freshnessMode: filter.freshnessMode as FilterRow["freshnessMode"],
     filterSummary: summarizeFilter(filter),
     initialSyncCompletedAt: state?.initialSyncCompletedAt?.toISOString() ?? null,
@@ -273,7 +399,9 @@ function buildPlanRow({
     coverageRecoveryPending: state?.coverageRecoveryPending ?? false,
     coverageRecoveryCutoffAt: state?.coverageRecoveryCutoffAt?.toISOString() ?? null,
     fingerprint: state ? `${state.fingerprint.slice(0, 10)}...` : null,
-    estimatedRequestsPerScan: source === "AUTO_RIA" ? 1 + env.AUTO_RIA_MAX_INFO_PER_SCAN : 0,
+    estimatedRequestsPerScan: source === "AUTO_RIA" ? requestPlan.expectedRequestsPerScan : 0,
+    maximumRequestsPerScan: source === "AUTO_RIA" ? requestPlan.maximumRequestsPerScan : 0,
+    recentRequestsPerScan: source === "AUTO_RIA" ? requestPlan.recentRequestsPerScan : null,
     supported,
     issues,
     severity,
@@ -295,7 +423,8 @@ function buildPlanRow({
 
 function targetSources(filter: Filter): ListingSource[] {
   const sources = filter.sources.length > 0 ? filter.sources : REAL_SOURCES;
-  return sources.filter((source) => REAL_SOURCES.includes(source));
+  const categoryKey = marketplaceCategoryKey(filter.categoryKey);
+  return sources.filter((source) => REAL_SOURCES.includes(source) && sourceSupportsCategory(source, categoryKey));
 }
 
 function planIssues(filter: Filter, source: ListingSource, sourceRecord: Source | undefined, state: SourceSearchState | undefined) {
@@ -318,20 +447,15 @@ function planIssues(filter: Filter, source: ListingSource, sourceRecord: Source 
   } else if (!state.initialSyncCompletedAt) {
     issues.push({ level: "warning", message: "Первичная синхронизация еще выполняется" });
   }
+  if (state?.parserHealth === "DEGRADED") {
+    issues.push({ level: "danger", message: "Структура выдачи изменилась: parser degraded, coverage не подтверждается" });
+  }
 
   if (source === "AUTO_RIA") {
-    if (!env.AUTO_RIA_API_KEY) {
-      issues.push({ level: "danger", message: "API-ключ AUTO.RIA не настроен" });
-    }
-    if (!filter.autoRiaMarkId) {
-      issues.push({ level: "danger", message: "Не выбран официальный ID марки AUTO.RIA; запрос получился бы слишком широким" });
-    }
-    if (filter.brand && !filter.autoRiaMarkId) {
-      issues.push({ level: "warning", message: "Марка указана текстом, но отсутствует официальный ID марки AUTO.RIA" });
-    }
-    if (filter.model && filter.autoRiaMarkId && !filter.autoRiaModelId) {
-      issues.push({ level: "warning", message: "Модель указана текстом, но отсутствует официальный ID модели AUTO.RIA" });
-    }
+    const autoRiaStrategy = env.AUTO_RIA_ACCESS_MODE === "api" && Boolean(env.AUTO_RIA_API_KEY)
+      ? "api"
+      : "public";
+    issues.push(...autoRiaIdentityIssues(filter, autoRiaStrategy));
     if (autoRiaNeedsGeoPostFilter(filter)) {
       issues.push({ level: "warning", message: "Для части городов нет ID AUTO.RIA: область фильтруется в API, город проверяется после загрузки" });
     }
@@ -375,9 +499,12 @@ function sourceSupport(
   sourceRecord: Source | undefined,
 ): SearchPlanRow["supported"] {
   if (source === "AUTO_RIA") {
+    const apiMode = env.AUTO_RIA_ACCESS_MODE === "api" && Boolean(env.AUTO_RIA_API_KEY);
     return {
-      mode: "api-filtered",
-      apiFields: AUTO_RIA_SEARCH_FIELDS.filter((field) => fieldUsed(filter, field)).map((field) => FIELD_LABELS[field]),
+      mode: apiMode ? "api-filtered" : "html-local-sort",
+      apiFields: apiMode
+        ? AUTO_RIA_SEARCH_FIELDS.filter((field) => fieldUsed(filter, field)).map((field) => FIELD_LABELS[field])
+        : [],
       postFilterFields: postFilterFields(filter, source),
     };
   }
@@ -470,13 +597,20 @@ async function autoRiaQuota(now: Date) {
     redisRollingCount("auto-ria:quota:rolling-hour", now.getTime() - 60 * 60 * 1000),
   ]);
   return {
-    configured: Boolean(env.AUTO_RIA_API_KEY),
+    configured: true,
+    accessMode: env.AUTO_RIA_ACCESS_MODE,
+    apiConfigured: Boolean(env.AUTO_RIA_API_KEY),
     userIdConfigured: Boolean(env.AUTO_RIA_USER_ID),
     totalLimit: env.AUTO_RIA_TOTAL_REQUEST_LIMIT,
     hourlyLimit: env.AUTO_RIA_HOURLY_REQUEST_LIMIT,
     softReserve: env.AUTO_RIA_SOFT_RESERVE,
     minSearchReserve: env.AUTO_RIA_MIN_SEARCH_RESERVE,
     maxInfoPerScan: env.AUTO_RIA_MAX_INFO_PER_SCAN,
+    searchBudgetPerHour: autoRiaSearchBudgetPerHour(
+      env.AUTO_RIA_SEARCH_REQUESTS_PER_HOUR,
+      env.AUTO_RIA_HOURLY_REQUEST_LIMIT,
+      env.AUTO_RIA_MAX_INFO_PER_SCAN,
+    ),
     totalUsed,
     hourlyUsed,
     totalRemaining: Math.max(0, env.AUTO_RIA_TOTAL_REQUEST_LIMIT - totalUsed),

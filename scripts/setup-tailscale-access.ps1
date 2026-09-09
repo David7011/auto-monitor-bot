@@ -1,8 +1,7 @@
 [CmdletBinding()]
 param(
   [int]$DashboardPort = 3001,
-  [switch]$StatusOnly,
-  [switch]$BuildAndroidApp
+  [switch]$StatusOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -153,8 +152,3 @@ try {
 }
 
 [pscustomobject]$result | Format-List
-
-if ($BuildAndroidApp) {
-    & (Join-Path $PSScriptRoot "build-android.ps1") -DefaultServerUrl $remoteUrl -SkipSdkUpdate
-  if ($LASTEXITCODE -ne 0) { throw "Android build failed." }
-}

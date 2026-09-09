@@ -95,6 +95,14 @@ function Stop-AmbAppProcesses {
     [int[]]$OwnedPorts = @(3001, 4000)
   )
 
+  $controlPrincipal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+  if (!$controlPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $systemTask = Get-ScheduledTask -TaskName 'Auto Monitor Bot' -ErrorAction SilentlyContinue
+    if ($systemTask -and $systemTask.Principal.UserId -in @('SYSTEM', 'S-1-5-18')) {
+      throw 'Cannot safely inspect/stop SYSTEM processes with a normal token. Use .\amb.cmd local:stop or local:restart.'
+    }
+  }
+
   $allProcesses = @(Get-CimInstance Win32_Process)
   $rootIds = [System.Collections.Generic.HashSet[int]]::new()
   $stoppedIds = [System.Collections.Generic.HashSet[int]]::new()
@@ -140,7 +148,11 @@ function Stop-AmbAppProcesses {
       }
     }
 
-    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    # A process may exit while the snapshot is inspected. Otherwise a failed
+    # termination must retain PID records and prevent a second app startup.
+    if (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) {
+      Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+    }
     Write-Host "Stopped process $($process.ProcessId): $($process.Name)"
   }
 

@@ -9,6 +9,9 @@ import {
   inferBrandFromText,
   inferVehicleAttributes,
   type NormalizedListing,
+  type MarketplaceCategoryKey,
+  type TimestampConfidence,
+  validateCategoryAttributes,
 } from "@amb/shared";
 import { env } from "../env.js";
 import { currentUsdExchangeRate } from "../modules/exchange-rate.js";
@@ -45,6 +48,8 @@ export type OlxAd = {
   photos?: string[];
   params?: OlxParam[];
   htmlCardOnly?: boolean;
+  /** Structured timestamps are exact; rendered card dates have lower precision. */
+  timestampConfidence?: TimestampConfidence;
 };
 
 type OlxApiParamValue = {
@@ -143,11 +148,16 @@ export function extractPrerenderedState(html: string): OlxPrerenderedState {
   return JSON.parse(jsonText) as OlxPrerenderedState;
 }
 
-export function normalizeOlxAd(ad: OlxAd, now = new Date()): NormalizedListing | undefined {
+export function normalizeOlxAd(
+  ad: OlxAd,
+  now = new Date(),
+  categoryKey: MarketplaceCategoryKey = "vehicle.car",
+): NormalizedListing | undefined {
   const externalId = String(ad.id ?? "");
   if (!externalId || !ad.url) return undefined;
 
   const params = new Map((ad.params ?? []).map((param) => [param.key, param]));
+  if (categoryKey !== "vehicle.car") return normalizeMarketplaceAd(ad, params, now, categoryKey);
   const year = numberFromParam(params.get("motor_year"));
   const mileageThousand = numberFromParam(params.get("motor_mileage_thou"));
   const price = ad.price?.regularPrice?.value;
@@ -172,10 +182,14 @@ export function normalizeOlxAd(ad: OlxAd, now = new Date()): NormalizedListing |
   // In hunting mode a re-listed / bumped advert counts as fresh.
   const publishedAt = env.OLX_INCLUDE_REFRESHED ? mostRecentDate(createdAt, refreshedAt) : createdAt;
   const normalizedPrice = normalizePriceToUsd(price, currency);
+  const categoryAttributes = validateCategoryAttributes(categoryKey, inferCategoryAttributes(categoryKey, attributeText)).attributes;
 
   return {
     source: "OLX",
     externalId,
+    categoryKey,
+    categorySchemaVersion: 1,
+    categoryAttributes,
     url: ad.url,
     canonicalUrl: canonicalizeUrl(ad.url),
     title: ad.title,
@@ -210,17 +224,132 @@ export function normalizeOlxAd(ad: OlxAd, now = new Date()): NormalizedListing |
     photoUrls: ad.photos ?? [],
     publishedAt,
     refreshedAt,
-    timestampConfidence: publishedAt ? "HIGH" : "UNKNOWN",
-    skipReason: publishedAt ? undefined : ad.createdTime ? "INVALID_PUBLICATION_DATE" : "UNKNOWN_PUBLICATION_DATE",
+    timestampConfidence: olxTimestampConfidence(ad, publishedAt),
+    skipReason: publishedAt
+      ? olxTimestampConfidence(ad, publishedAt) === "LOW" ? "PUBLICATION_TIME_DAY_ONLY" : undefined
+      : ad.createdTime ? "INVALID_PUBLICATION_DATE" : "UNKNOWN_PUBLICATION_DATE",
     firstSeenAt: now,
     raw: ad,
   };
 }
 
+/** Non-vehicle fast path deliberately never invokes vehicle inference. */
+function normalizeMarketplaceAd(
+  ad: OlxAd,
+  params: Map<string, OlxParam>,
+  now: Date,
+  categoryKey: MarketplaceCategoryKey,
+): NormalizedListing {
+  const text = [ad.title, ad.description, paramsText(ad.params)].filter(Boolean).join(" ");
+  const brand = firstParamValue(params, ["brand", "manufacturer"])
+    ?? text.match(/\b(HP|Lenovo|Dell|Apple|Asus|Acer|MSI|Samsung|Xiaomi|Huawei|Honor|Google|OnePlus|Sony|Nintendo|Microsoft|Ninebot|Segway)\b/iu)?.[1];
+  const model = valueFromParam(params.get("model"));
+  const categoryAttributes = validateCategoryAttributes(categoryKey, {
+    ...inferCategoryAttributes(categoryKey, text), ...(brand ? { brand } : {}), ...(model ? { model } : {}),
+  }).attributes;
+  const createdAt = parseDate(ad.createdTime);
+  const refreshedAt = parseDate(ad.lastRefreshTime);
+  const publishedAt = env.OLX_INCLUDE_REFRESHED ? mostRecentDate(createdAt, refreshedAt) : createdAt;
+  return {
+    source: "OLX", externalId: String(ad.id), categoryKey, categorySchemaVersion: 1, categoryAttributes,
+    url: ad.url!, canonicalUrl: canonicalizeUrl(ad.url!), title: ad.title, brand, model,
+    priceOriginal: ad.price?.regularPrice?.value, currencyOriginal: ad.price?.regularPrice?.currencyCode,
+    condition: firstParamValue(params, ["condition", "state"]),
+    city: ad.location?.cityName, region: ad.location?.regionName,
+    description: ad.description, photoUrls: ad.photos ?? [], publishedAt, refreshedAt,
+    timestampConfidence: olxTimestampConfidence(ad, publishedAt),
+    skipReason: publishedAt
+      ? olxTimestampConfidence(ad, publishedAt) === "LOW" ? "PUBLICATION_TIME_DAY_ONLY" : undefined
+      : ad.createdTime ? "INVALID_PUBLICATION_DATE" : "UNKNOWN_PUBLICATION_DATE",
+    firstSeenAt: now, raw: ad,
+  };
+}
+
+export function inferCategoryAttributes(
+  categoryKey: MarketplaceCategoryKey,
+  text: string,
+): Record<string, string | number | string[]> {
+  const normalized = text.replace(/\s+/gu, " ").trim();
+  if (categoryKey === "vehicle.car" || categoryKey === "generic") return {};
+  const commonRiskKeywords = [
+    "під ремонт", "под ремонт", "на запчастини", "на запчасти", "не працює", "не работает",
+    "дефект", "нюанс", "icloud", "mdm", "lock",
+  ].filter((value) => normalized.toLowerCase().includes(value));
+  const storageGb = capacityGb(normalized, /(?:ssd|hdd|emmc|накопичувач|накопитель|storage|пам(?:'|’)ять|память)\s*[:/-]?\s*(\d+(?:[.,]\d+)?)\s*(tb|тб|gb|гб)/iu,
+    /(\d+(?:[.,]\d+)?)\s*(tb|тб|gb|гб)\s*(?:ssd|hdd|emmc|storage)/iu);
+  const ramGb = capacityGb(normalized, /(?:ram|озу|оператив\w*|ddr\d*)\s*[:/-]?\s*(\d+(?:[.,]\d+)?)\s*(gb|гб)/iu,
+    /(\d+(?:[.,]\d+)?)\s*(gb|гб)\s*(?:ram|озу|оператив\w*|ddr\d*)/iu);
+  const gpu = normalized.match(/\b((?:rtx|gtx|rx)\s*\d{3,4}(?:\s*ti|\s*super|\s*xt)?|intel\s+(?:iris|arc)[\w\s-]*|radeon\s+[\w-]+)/iu)?.[1];
+  const cpu = normalized.match(/\b((?:intel\s+)?(?:core\s+)?i[3579]-?\d{3,5}[a-z]{0,2}|(?:amd\s+)?ryzen\s+[3579]\s+\d{3,5}[a-z]{0,2}|apple\s+m[1-9](?:\s+(?:pro|max|ultra))?)/iu)?.[1];
+  const batteryHealthPercent = numberMatch(normalized, /(?:battery|акб|батаре\w*)[^\d]{0,16}(\d{2,3})\s*%/iu);
+
+  if (categoryKey === "electronics.laptop" || categoryKey === "electronics.desktop") {
+    const refreshRateHz = numberMatch(normalized, /(\d{2,3})\s*(?:hz|гц)/iu);
+    const screenInches = numberMatch(normalized, /(1[0-9](?:[.,]\d)?)\s*(?:"|дюйм)/iu);
+    return cleanAttributes({ cpu, gpu, ramGb, storageGb, screenInches, refreshRateHz, batteryHealthPercent, riskKeywords: commonRiskKeywords });
+  }
+  if (categoryKey === "electronics.phone") {
+    const phoneStorageGb = storageGb ?? capacityGb(normalized, /\b(\d{2,4})\s*(gb|гб)\b/iu);
+    return cleanAttributes({ storageGb: phoneStorageGb, batteryHealthPercent, riskKeywords: commonRiskKeywords });
+  }
+  if (categoryKey === "electronics.component.gpu") {
+    const vramGb = capacityGb(normalized, /(?:vram|gddr\d*|відеопам\w*|видеопам\w*)?\s*[:/-]?\s*(\d+(?:[.,]\d+)?)\s*(gb|гб)/iu);
+    return cleanAttributes({ model: gpu, vramGb, riskKeywords: commonRiskKeywords });
+  }
+  if (categoryKey === "gaming.console") {
+    const platform = normalized.match(/\b(playstation|ps[345]|xbox(?:\s+(?:one|series\s+[sx]))?|nintendo\s+switch|steam\s+deck)\b/iu)?.[1];
+    return cleanAttributes({ platform, model: platform, storageGb });
+  }
+  const powerW = numberMatch(normalized, /(\d{3,5})\s*(?:w|вт)/iu);
+  const rangeKm = numberMatch(normalized, /(?:запас\s+ходу|запас\s+хода|range)[^\d]{0,12}(\d{1,3})\s*(?:км|km)/iu);
+  const batteryWh = numberMatch(normalized, /(\d{2,5})\s*(?:wh|вт[·\s-]*год)/iu);
+  return cleanAttributes({ powerW, rangeKm, batteryWh });
+}
+
+function numberMatch(text: string, pattern: RegExp): number | undefined {
+  const values = [...text.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))]
+    .map((match) => Number.parseFloat((match[1] ?? "").replace(",", "."))).filter(Number.isFinite);
+  const unique = [...new Set(values)];
+  return unique.length === 1 ? unique[0] : undefined;
+}
+
+function capacityGb(text: string, ...patterns: RegExp[]): number | undefined {
+  const values = patterns.flatMap((pattern) => [...text.matchAll(new RegExp(pattern.source, `${pattern.flags}g`))])
+    .map((match) => Number.parseFloat((match[1] ?? "").replace(",", ".")) * (/^(?:tb|тб)$/iu.test(match[2] ?? "") ? 1024 : 1))
+    .filter(Number.isFinite);
+  // Conflicting capacities are not evidence for picking the first/min/max.
+  const unique = [...new Set(values)];
+  return unique.length === 1 ? unique[0] : undefined;
+}
+
+function cleanAttributes(value: Record<string, string | number | string[] | undefined>): Record<string, string | number | string[]> {
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string | number | string[]] => entry[1] !== undefined));
+}
+
 export function olxPublishedAt(ad: OlxAd): Date | undefined {
   const createdAt = parseDate(ad.createdTime);
   const refreshedAt = parseDate(ad.lastRefreshTime);
-  return env.OLX_INCLUDE_REFRESHED ? mostRecentDate(createdAt, refreshedAt) : createdAt;
+  const publishedAt = env.OLX_INCLUDE_REFRESHED ? mostRecentDate(createdAt, refreshedAt) : createdAt;
+  const confidence = olxTimestampConfidence(ad, publishedAt);
+  // A day-only card is represented at noon for display, not as evidence that
+  // a historical boundary was reached. Keep it eligible for observation.
+  return confidence === "LOW" || confidence === "UNKNOWN" ? undefined : publishedAt;
+}
+
+export function olxPublicationBeforeCutoff(ad: OlxAd, cutoff: Date): boolean {
+  const publishedAt = olxPublishedAt(ad);
+  if (!publishedAt) return false;
+  // A rendered HH:mm timestamp covers the entire minute. Never skip a card
+  // whose unknown seconds could place it after the requested boundary.
+  const uncertaintyMs = olxTimestampConfidence(ad, publishedAt) === "MEDIUM" ? 60_000 : 0;
+  return uncertaintyMs > 0
+    ? publishedAt.getTime() + uncertaintyMs <= cutoff.getTime()
+    : publishedAt < cutoff;
+}
+
+function olxTimestampConfidence(ad: OlxAd, publishedAt: Date | undefined): TimestampConfidence {
+  if (!publishedAt) return "UNKNOWN";
+  return ad.timestampConfidence ?? (ad.htmlCardOnly ? "LOW" : "HIGH");
 }
 
 function apiParamLabel(value: OlxApiParam["value"]): string | undefined {

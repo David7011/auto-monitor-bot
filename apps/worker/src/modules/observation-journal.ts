@@ -5,21 +5,24 @@ import {
   type Filter,
   type ObservationDecision,
 } from "@amb/db";
-import type {
-  FilterRejectionReason,
-  ListingDiscoveryLane,
-  ListingSource,
-  NormalizedListing,
-  TimestampConfidence,
+import {
+  marketplaceCategoryKey,
+  validateCategoryAttributes,
+  type FilterRejectionReason,
+  type ListingDiscoveryLane,
+  type ListingSource,
+  type NormalizedListing,
+  type TimestampConfidence,
 } from "@amb/shared";
 
-const NORMALIZER_VERSION = 3;
+const NORMALIZER_VERSION = 4;
 const WRITE_BATCH_SIZE = 12;
 
 export type ObservationEvaluationInput = {
   decision: ObservationDecision;
   matchedFilterIds?: string[];
   rejectionReasons?: FilterRejectionReason[];
+  evaluationNotes?: string[];
   filterRevision?: string;
   listingId?: string;
   dispatchAttempted?: boolean;
@@ -62,8 +65,10 @@ export async function recordObservationEvaluation(
       decision: input.decision,
       matchedFilterIds: unique(input.matchedFilterIds ?? []),
       rejectionReasons: unique(input.rejectionReasons ?? []),
+      evaluationNotes: unique(input.evaluationNotes ?? []),
       filterRevision: input.filterRevision,
       lastEvaluatedAt: now,
+      filterCompletedAt: now,
       dispatchAttemptedAt: input.dispatchAttempted ? now : null,
       listingId: input.listingId,
       evaluationCount: 1,
@@ -73,8 +78,10 @@ export async function recordObservationEvaluation(
       decision: input.decision,
       matchedFilterIds: unique(input.matchedFilterIds ?? []),
       rejectionReasons: unique(input.rejectionReasons ?? []),
+      evaluationNotes: unique(input.evaluationNotes ?? []),
       filterRevision: input.filterRevision,
       lastEvaluatedAt: now,
+      filterCompletedAt: now,
       ...(input.dispatchAttempted ? { dispatchAttemptedAt: now } : {}),
       ...(input.listingId ? { listingId: input.listingId } : {}),
       evaluationCount: { increment: 1 },
@@ -93,7 +100,7 @@ export async function markObservationOutcome(
   },
 ): Promise<void> {
   await prisma.sourceSeenListing.updateMany({
-    where: { source, externalId },
+    where: { source, externalId, ...(input.decision !== "NOTIFIED" ? { decision: { not: "NOTIFIED" as const } } : {}) },
     data: {
       decision: input.decision,
       lastEvaluatedAt: new Date(),
@@ -156,6 +163,12 @@ export function deserializeNormalizedListing(value: Prisma.JsonValue): Normalize
   return {
     source,
     externalId,
+    categoryKey: marketplaceCategoryKey(stringValue(data.categoryKey)),
+    categorySchemaVersion: numberValue(data.categorySchemaVersion) ?? 1,
+    categoryAttributes: validateCategoryAttributes(
+      marketplaceCategoryKey(stringValue(data.categoryKey)),
+      data.categoryAttributes,
+    ).attributes,
     url,
     canonicalUrl: stringValue(data.canonicalUrl) ?? url,
     title: stringValue(data.title),
@@ -214,6 +227,9 @@ function observationData(listing: NormalizedListing, lane: ListingDiscoveryLane)
   return {
     source: listing.source,
     externalId: listing.externalId,
+    categoryKey: marketplaceCategoryKey(listing.categoryKey),
+    categorySchemaVersion: listing.categorySchemaVersion ?? 1,
+    categoryAttributes: listing.categoryAttributes ?? {},
     url: listing.url,
     canonicalUrl: listing.canonicalUrl,
     title: listing.title ?? null,
@@ -249,6 +265,9 @@ function observationUpdateData(listing: NormalizedListing) {
     url: listing.url,
     canonicalUrl: listing.canonicalUrl,
     title: listing.title ?? null,
+    categoryKey: marketplaceCategoryKey(listing.categoryKey),
+    categorySchemaVersion: listing.categorySchemaVersion ?? 1,
+    categoryAttributes: listing.categoryAttributes ?? {},
     brand: listing.brand ?? null,
     model: listing.model ?? null,
     year: listing.year ?? null,

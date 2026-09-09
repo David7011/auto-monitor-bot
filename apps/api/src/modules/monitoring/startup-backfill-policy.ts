@@ -16,11 +16,11 @@ export function startupBackfillDeadline(
   return existing && existing > floor ? existing : floor;
 }
 
-export function deferOlxBackfillAfterRealtime(
+export function deferOriginSensitiveBackfillAfterRealtime(
   source: ListingSource,
   realtimeEnqueued: ReadonlySet<ListingSource>,
 ): boolean {
-  return source === "OLX" && realtimeEnqueued.has("OLX");
+  return (source === "OLX" || source === "RST") && realtimeEnqueued.has(source);
 }
 
 export function nextBackfillTickAfterAttempt(

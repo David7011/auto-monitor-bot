@@ -47,6 +47,11 @@ if (!(Test-AmbRunIntent)) {
   exit 0
 }
 
+Write-Host "Laptop power policy:"
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "power-policy.ps1")
+if ($LASTEXITCODE -ne 0) { $Failed = $true }
+Write-Host ""
+
 Write-Host "Ports:"
 $ports = @(3001, 4000, $PostgresPort, $RedisPort) | Select-Object -Unique
 $portStatus = foreach ($port in $ports) {
@@ -89,10 +94,9 @@ try {
     Get-ScheduledTask -TaskName "Auto Monitor Bot Database Restore Drill" -ErrorAction Stop
   )
   $tasks | Select-Object TaskName, State | Format-Table -AutoSize
-  $supervisorProcess = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like "*scripts\supervisor.ps1*" } |
-    Select-Object -First 1
-  Write-Host "Supervisor active: $([bool]$supervisorProcess)"
+  $supervisorTask = $tasks | Where-Object { $_.TaskName -eq "Auto Monitor Bot" } | Select-Object -First 1
+  $supervisorTaskRunning = $supervisorTask.State -eq "Running"
+  $heartbeatFresh = $false
   $supervisorHeartbeatPath = Join-Path $ProjectRoot ".runtime\supervisor-heartbeat.json"
   if (Test-Path -LiteralPath $supervisorHeartbeatPath) {
     try {
@@ -101,17 +105,18 @@ try {
       $heartbeatAgeSeconds = [Math]::Max(0, [Math]::Round(((Get-Date) - $heartbeatAt).TotalSeconds, 1))
       $heartbeatFresh = $heartbeatAgeSeconds -le 30
       Write-Host "Supervisor heartbeat: $($supervisorHeartbeat.phase), age ${heartbeatAgeSeconds}s, fresh=$heartbeatFresh"
-      if ($supervisorProcess -and !$heartbeatFresh) { $Failed = $true }
     } catch {
       Write-Host "Supervisor heartbeat is unreadable: $($_.Exception.Message)"
-      if ($supervisorProcess) { $Failed = $true }
     }
   } else {
     Write-Host "Supervisor heartbeat: missing"
-    if ($supervisorProcess) { $Failed = $true }
   }
+  $supervisorActive = $supervisorTaskRunning -and $heartbeatFresh
+  Write-Host "Supervisor active: $supervisorActive (taskRunning=$supervisorTaskRunning, heartbeatFresh=$heartbeatFresh)"
+  if (!$supervisorActive) { $Failed = $true }
 } catch {
   Write-Host "Autostart inspection is unavailable: $($_.Exception.Message)"
+  $Failed = $true
 }
 
 Write-Host ""
@@ -182,7 +187,8 @@ try {
 
 Write-Host ""
 Write-Host "Encrypted database backup:"
-$latestBackup = Get-ChildItem -LiteralPath (Join-Path $ProjectRoot ".runtime\backups") -Filter "database-*.7z" -File -ErrorAction SilentlyContinue |
+$latestBackup = Get-ChildItem -LiteralPath (Join-Path $ProjectRoot ".runtime\backups") -Filter "database-*" -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.Extension -in @(".ambbak", ".7z") } |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($latestBackup) {
   $latestBackup | Select-Object FullName,Length,LastWriteTime | Format-List

@@ -1,6 +1,8 @@
 export const FILTER_REJECTION_REASONS = [
   "FILTER_DISABLED",
   "SOURCE",
+  "CATEGORY",
+  "CATEGORY_ATTRIBUTE",
   "FRESHNESS",
   "BRAND",
   "MODEL",
@@ -32,6 +34,8 @@ export type FilterRejectionReason = (typeof FILTER_REJECTION_REASONS)[number];
 export const FILTER_REJECTION_LABELS: Record<FilterRejectionReason, string> = {
   FILTER_DISABLED: "фильтр выключен",
   SOURCE: "источник не выбран",
+  CATEGORY: "категория объявления не совпала",
+  CATEGORY_ATTRIBUTE: "характеристика категории не совпала",
   FRESHNESS: "объявление вне выбранного периода",
   BRAND: "не совпала марка",
   MODEL: "не совпала модель",

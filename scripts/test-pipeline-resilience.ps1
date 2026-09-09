@@ -74,7 +74,12 @@ if ($env:LOCALAPPDATA) {
       Sort-Object FullName -Descending | Select-Object -ExpandProperty FullName -First 1
   }
 }
-$RedisServer = Resolve-Executable "redis-server" @($WingetRedis, "C:\Program Files\Redis\redis-server.exe", "D:\Redis\redis-server.exe")
+$RedisServer = Resolve-Executable "redis-server" @(
+  (Join-Path $ProjectRoot ".runtime\redis-modern\redis-server.exe"),
+  $WingetRedis,
+  "C:\Program Files\Redis\redis-server.exe",
+  "D:\Redis\redis-server.exe"
+)
 $RedisCli = Resolve-Executable "redis-cli" @((Join-Path (Split-Path -Parent $RedisServer) "redis-cli.exe"))
 $RedisVersionText = (& $RedisServer --version | Out-String)
 $RedisVersionMatch = [regex]::Match($RedisVersionText, 'v=(\d+)\.')
@@ -156,13 +161,9 @@ try {
 
   Push-Location $ProjectRoot
   try {
-    # Historical migrations were created over time and their directory names
-    # do not form a clean lexical bootstrap order. The isolated stand therefore
-    # materializes the current Prisma schema, then installs the current OLX
-    # transactional trigger explicitly.
-    Invoke-Amb @("db:push")
-    & $Psql -h 127.0.0.1 -p $PgPort -U $DatabaseUser -d $DatabaseName -v ON_ERROR_STOP=1 -f (Join-Path $ProjectRoot "packages\db\prisma\migrations\20260727_zz_olx_known_ids_recovery_guard\migration.sql")
-    if ($LASTEXITCODE -ne 0) { throw "Could not install the OLX 2000-ID recovery trigger in the isolated database" }
+    # Exercise the same dependency-aware migration path used by production.
+    # This catches empty-database bootstrap defects that `db push` cannot see.
+    Invoke-Amb @("db:migrate:deploy")
     Invoke-Amb @("--filter", "@amb/worker", "exec", "tsx", "../../tests/integration/pipeline-resilience.ts")
     Invoke-Amb @("db:verify:olx-reset")
   } finally {

@@ -13,8 +13,17 @@ playwright-report/
 .env.test
 .env.*.local
 
+# Private signing material must never be committed.
+.signing.env
+**/.signing.env
+*.jks
+*.keystore
+
 .runtime/
 .codex-logs/
+.idea/
+.vs/
+scripts/setup-new-pc.ps1
 
 *.log
 *.tsbuildinfo
@@ -30,11 +39,6 @@ telegram-updates.json
 *.temp
 *.zip
 *.png.tmp
-apps/mobile-android/.gradle/
-apps/mobile-android/build/
-apps/mobile-android/app/build/
-apps/mobile-android/local.properties
-apps/mobile-android/.signing.env
 **/__pycache__/
 packages/db/src/generated/prisma/
 *.py[cod]

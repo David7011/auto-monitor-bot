@@ -1,4 +1,5 @@
-import { QUEUE_NAMES } from "@amb/shared";
+import { marketplaceCategoryKey, QUEUE_NAMES } from "@amb/shared";
+import { prisma } from "@amb/db";
 import { enqueue } from "../lib/queues.js";
 import { log } from "../lib/log.js";
 import { runMarketPriceEstimate } from "../modules/market-price.js";
@@ -12,6 +13,19 @@ export type ListingEnrichJob = { listingId: string };
  * message quickly, then VIN/plate checks run as the slower enrichment layer.
  */
 export async function processListingEnrich(job: ListingEnrichJob): Promise<void> {
+  const listing = await prisma.listing.findUnique({ where: { id: job.listingId }, select: { categoryKey: true } });
+  if (!listing) return;
+  await prisma.sourceSeenListing.updateMany({
+    where: { listingId: job.listingId, enrichmentStartedAt: null },
+    data: { enrichmentStartedAt: new Date() },
+  });
+  if (marketplaceCategoryKey(listing.categoryKey) !== "vehicle.car") {
+    await prisma.sourceSeenListing.updateMany({
+      where: { listingId: job.listingId },
+      data: { enrichmentCompletedAt: new Date() },
+    });
+    return;
+  }
   // VIN/plate checks and market research are independent. Start the slower
   // vehicle branch immediately instead of waiting for market I/O to finish.
   await enqueue(QUEUE_NAMES.VEHICLE_CHECK, "check", { listingId: job.listingId });
@@ -22,5 +36,10 @@ export async function processListingEnrich(job: ListingEnrichJob): Promise<void>
   } catch (err) {
     await log.warn("market-price", "Market price estimate failed", err instanceof Error ? err.message : String(err));
   }
+
+  await prisma.sourceSeenListing.updateMany({
+    where: { listingId: job.listingId },
+    data: { enrichmentCompletedAt: new Date() },
+  });
 
 }

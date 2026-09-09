@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$Ci)
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -26,13 +26,22 @@ try {
 try {
   Push-Location $ProjectRoot
   try {
-    Invoke-Pnpm -Arguments @("security:check")
+    if ($Ci) {
+      if ($env:GITHUB_ACTIONS -ne "true") {
+        throw "The -Ci validation mode is restricted to GitHub Actions"
+      }
+      Invoke-Pnpm -Arguments @("test:runtime-security")
+    } else {
+      Invoke-Pnpm -Arguments @("security:check")
+    }
     Invoke-Pnpm -Arguments @("db:validate")
     Invoke-Pnpm -Arguments @("db:generate")
     Invoke-Pnpm -Arguments @("docs:check")
     Invoke-Pnpm -Arguments @("typecheck")
     Invoke-Pnpm -Arguments @("lint")
     Invoke-Pnpm -Arguments @("test:powershell")
+    Invoke-Pnpm -Arguments @("test:backup-crypto")
+    Invoke-Pnpm -Arguments @("test:ci-policy")
     Invoke-Pnpm -Arguments @("test:coverage")
     & (Join-Path $PSScriptRoot "verify-production-build.ps1") -SkipLock
     if ($LASTEXITCODE -ne 0) {

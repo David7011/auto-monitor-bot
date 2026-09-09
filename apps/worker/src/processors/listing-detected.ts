@@ -39,7 +39,7 @@ export type ListingDetectedJob = {
 };
 
 export type ListingProcessingResult = {
-  outcome: "REJECTED" | "DUPLICATE" | "DISPATCHED" | "HOT_DUPLICATE";
+  outcome: "REJECTED" | "DUPLICATE" | "DISPATCHED" | "HOT_DUPLICATE" | "SHADOWED";
   listingId?: string;
   matchedFilterIds: string[];
   rejectionReasons: string[];
@@ -97,9 +97,10 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
     where: { source_externalId: { source: listing.source, externalId: listing.externalId } },
     select: { decision: true, listingId: true, matchedFilterIds: true },
   });
-  if (retainedDedupe?.decision === "NOTIFIED" && !retainedDedupe.listingId) {
+  if (retainedDedupe?.decision === "NOTIFIED") {
     return {
       outcome: "DUPLICATE",
+      listingId: retainedDedupe.listingId ?? undefined,
       matchedFilterIds: retainedDedupe.matchedFilterIds,
       rejectionReasons: [],
     };
@@ -110,14 +111,19 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
   const filterInput = forceSourceMatch ? filters.map((filter) => ({ ...filter, sources: [] })) : filters;
   const evaluation = matchFiltersDetailed(listing, filterInput);
   const matched = evaluation.matched;
+  const shadowOnly = matched.length > 0 && matched.every((filter) => filter.shadowMode);
   const matchedFilterIds = matched.map((filter) => filter.id);
   const filterRevision = buildFilterSetRevision(filters);
+  const provisionalNotes = evaluation.evaluations
+    .filter((item) => item.outcome === "UNKNOWN")
+    .flatMap((item) => item.unknownReasons.map((reason) => `${item.filterId}: ${reason}`));
   await recordObservationEvaluation(listing, discoveryLane, {
     decision: matched.length > 0 ? "MATCHED" : "REJECTED",
     matchedFilterIds,
     rejectionReasons: evaluation.rejectionReasons,
+    evaluationNotes: [...provisionalNotes, ...(shadowOnly ? ["SHADOW_MODE: production notification suppressed"] : [])],
     filterRevision,
-    dispatchAttempted: matched.length > 0,
+    dispatchAttempted: matched.length > 0 && !shadowOnly,
   });
   // A rejected candidate was not persisted, so it must be replayable after a
   // filter or normalizer change. Keeping the hot claim here hides valid ads.
@@ -133,11 +139,15 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
   const dup = await checkDuplicate(listing);
   if (dup.type === "STRONG") {
     if (dup.matchedListingId) {
-      await prisma.listing.update({
+      const existingListing = await prisma.listing.update({
         where: { id: dup.matchedListingId },
         data: { lastSeenAt: new Date() },
+        select: { notificationMode: true },
       });
-      if (!job.flashBundleId) await ensureFirstNotification(dup.matchedListingId, undefined, discoveryLane);
+      if (existingListing.notificationMode === "SHADOW") {
+        await authorizeExistingNotification(dup.matchedListingId, matched, provisionalNotes, shadowOnly);
+      }
+      if (!job.flashBundleId && !shadowOnly) await ensureFirstNotification(dup.matchedListingId, undefined, discoveryLane);
     }
     await markObservationOutcome(listing.source, listing.externalId, {
       decision: "DUPLICATE",
@@ -155,6 +165,9 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
   const createData = {
     source: listing.source,
     externalId: listing.externalId,
+    categoryKey: listing.categoryKey ?? "vehicle.car",
+    categorySchemaVersion: listing.categorySchemaVersion ?? 1,
+    categoryAttributes: listing.categoryAttributes ?? {},
     url: listing.url,
     canonicalUrl: listing.canonicalUrl,
     title: listing.title ?? null,
@@ -197,6 +210,8 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
     discoveryLane,
     rawData: listing.raw as object,
     status: "MATCHED",
+    notificationMode: shadowOnly ? "SHADOW" : "LIVE",
+    provisionalReasons: provisionalNotes,
     matches: {
       create: matched.map((f) => ({ filterId: f.id })),
     },
@@ -217,9 +232,12 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
         select: { id: true },
       });
       if (existing) {
-        await prisma.listing.update({ where: { id: existing.id }, data: { lastSeenAt: new Date() } });
+        const existingListing = await prisma.listing.update({ where: { id: existing.id }, data: { lastSeenAt: new Date() }, select: { notificationMode: true } });
+        if (existingListing.notificationMode === "SHADOW") {
+          await authorizeExistingNotification(existing.id, matched, provisionalNotes, shadowOnly);
+        }
         const flashStaged = false;
-        if (!job.flashBundleId) await ensureFirstNotification(existing.id, undefined, discoveryLane);
+        if (!job.flashBundleId && !shadowOnly) await ensureFirstNotification(existing.id, undefined, discoveryLane);
         await markObservationOutcome(listing.source, listing.externalId, {
           decision: "DUPLICATE",
           listingId: existing.id,
@@ -241,6 +259,17 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
     ...saved,
     matches: matched.map((filter) => ({ filter: { name: filter.name } })),
   };
+  if (shadowOnly) {
+    await markObservationOutcome(listing.source, listing.externalId, { decision: "MATCHED", listingId: saved.id });
+    void log.info("pipeline-shadow", `Shadow matched listing: ${saved.url}`).catch(() => undefined);
+    return {
+      outcome: "SHADOWED",
+      listingId: saved.id,
+      matchedFilterIds,
+      rejectionReasons: [],
+      flashStaged: false,
+    };
+  }
   await markObservationOutcome(listing.source, listing.externalId, {
     decision: "DISPATCHED",
     listingId: saved.id,
@@ -292,6 +321,26 @@ async function ensureFirstNotification(
       ),
     },
   );
+}
+
+/** Promotion is possible only after a fresh positive live-filter evaluation. */
+async function authorizeExistingNotification(
+  listingId: string,
+  matched: Filter[],
+  provisionalReasons: string[],
+  shadowOnly: boolean,
+): Promise<void> {
+  if (shadowOnly) return;
+  await prisma.$transaction([
+    prisma.listingMatch.createMany({
+      data: matched.map((filter) => ({ listingId, filterId: filter.id })),
+      skipDuplicates: true,
+    }),
+    prisma.listing.updateMany({
+      where: { id: listingId, notificationMode: "SHADOW" },
+      data: { notificationMode: "LIVE", provisionalReasons },
+    }),
+  ]);
 }
 
 async function loadEnabledFilters(filterIds: string[]): Promise<Filter[]> {

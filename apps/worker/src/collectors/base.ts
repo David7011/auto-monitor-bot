@@ -1,4 +1,12 @@
-import type { ListingDiscoveryLane, ListingSource, NormalizedListing } from "@amb/shared";
+import type {
+  ListingDiscoveryLane,
+  ListingSource,
+  MarketplaceCategoryKey,
+  CategoryFilterCriteria,
+  UnknownFilterPolicy,
+  NormalizedListing,
+  OlxRecoveryUnresolvedReason,
+} from "@amb/shared";
 
 export type CollectorScanOptions = {
   lane: ListingDiscoveryLane;
@@ -38,6 +46,15 @@ export function scanDeadlineReached(options: CollectorScanOptions): boolean {
 
 export type SourceSearchContext = {
   source: ListingSource;
+  categoryKey: MarketplaceCategoryKey;
+  categorySchemaVersion: number;
+  sourceCategoryId?: number;
+  sourceCategoryPath?: string;
+  sourceCategoryQuery?: string;
+  plannerVersion: number;
+  categoryCriteria: CategoryFilterCriteria;
+  unknownPolicy: UnknownFilterPolicy;
+  shadowMode: boolean;
   fingerprint: string;
   filterIds: string[];
   autoRiaCategoryId?: number;
@@ -79,6 +96,7 @@ export type SourceSearchContext = {
 export type SourceSearchState = {
   id: string;
   fingerprint: string;
+  categoryKey?: MarketplaceCategoryKey;
   initialSyncCompletedAt?: Date;
   lastCursor?: string;
   lastExternalId?: string;
@@ -99,6 +117,7 @@ export type SourceSearchState = {
   coverageAnchorExternalIds?: Set<string>;
   coverageRecoveryPending?: boolean;
   coverageRecoveryCutoffAt?: Date;
+  coverageRecoveryAttemptCount?: number;
   knownIdsResetAt?: Date;
 };
 
@@ -114,6 +133,8 @@ export type CollectorResult = {
   /** IDs safely classified during this scan; incomplete/overflow candidates must not be included. */
   scannedExternalIds?: string[];
   observedCount?: number;
+  /** Oldest trustworthy publication timestamp actually observed by this scan. */
+  oldestObservedAt?: Date;
   pageCount?: number;
   requestCount?: number;
   cutoffReached?: boolean;
@@ -135,10 +156,22 @@ export type CollectorResult = {
   coverageVerified?: boolean;
   /** Durable evidence used to close a pending offline/overflow recovery window. */
   coverageVerificationMethod?: "KNOWN_TAIL" | "CUTOFF" | "EXHAUSTED";
+  /** A durable source/algorithm limitation, never a synonym for VERIFIED. */
+  coverageUnresolvedReason?: OlxRecoveryUnresolvedReason;
+  /** Capability fingerprint used to suppress retries until something meaningful changes. */
+  coverageAttemptGeneration?: string;
+  /**
+   * One-based OLX page at which the next bounded recovery attempt should
+   * resume. It deliberately overlaps scanned depth because offset feeds move
+   * when new adverts arrive at the head.
+   */
+  backfillResumePage?: number;
   /** Per-search-fingerprint low-frequency coverage timestamps to persist atomically with scan success. */
   coverageStateUpdate?: CollectorCoverageStateUpdate;
   /** Bounded structured diagnostics used to prove which discovery lanes ran. */
   coverageMetrics?: Record<string, string | number | boolean | null>;
+  parserHealth?: "HEALTHY" | "DEGRADED" | "UNKNOWN";
+  parserHealthDetails?: Record<string, string | number | boolean | null>;
 };
 
 /**

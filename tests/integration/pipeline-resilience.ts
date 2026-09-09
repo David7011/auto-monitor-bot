@@ -2,14 +2,20 @@ import { spawn, spawnSync } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { appendFileSync } from "node:fs";
-import { prisma } from "@amb/db";
-import { QUEUE_NAMES, type NormalizedListing } from "@amb/shared";
+import { prisma, compactSourceSearchStates } from "@amb/db";
+import { QUEUE_NAMES, olxRecoveryAttemptGeneration, type NormalizedListing } from "@amb/shared";
 import { fetchOlxApiFeed, isAdsResult } from "../../apps/worker/src/collectors/olx-feed.js";
 import { selectOlxCandidates } from "../../apps/worker/src/collectors/olx.js";
 import { closeSourceHttpClient } from "../../apps/worker/src/collectors/source-http-client.js";
 import { closeQueues, getQueue } from "../../apps/worker/src/lib/queues.js";
-import { configureTelegramApiRootForIntegrationTest } from "../../apps/worker/src/modules/telegram-service.js";
+import { configureTelegramApiRootForIntegrationTest, sendListingLink, stageListingForFlash, createTelegramFlashBundle, sendTelegramFlashBundle } from "../../apps/worker/src/modules/telegram-service.js";
 import { recordPendingObservations } from "../../apps/worker/src/modules/observation-journal.js";
+import {
+  buildSourceSearchPlan,
+  buildSearchContextFromFilter,
+  loadSourceSearchState,
+  markSourceSearchSuccess,
+} from "../../apps/worker/src/modules/source-search-plan.js";
 import { processListingDetected } from "../../apps/worker/src/processors/listing-detected.js";
 import { processTelegramSend } from "../../apps/worker/src/processors/telegram.js";
 
@@ -54,6 +60,21 @@ async function main(): Promise<void> {
     progress("reset and seed");
     await resetDatabase();
     await seedCatchAllFilter();
+
+    progress("category shadow isolation and promotion");
+    await assertCategoryShadowIsolation();
+    checks.push("durable shadow blocks direct/replayed card and flash; live reevaluation promotes once");
+
+    progress("durable unresolved recovery window");
+    await assertDurableUnresolvedRecoveryWindow();
+    checks.push("unreachable boundary -> durable UNRESOLVED; ACK remains UNRESOLVED; restart preserves state");
+
+    progress("category recovery isolation and degraded parser");
+    await assertCategoryRecoveryIsolation();
+    checks.push("foreign shard write rejected; degraded parser cannot verify cutoff; cleanup retains recovery evidence");
+
+    await assertLegacyShardRekey();
+    checks.push("legacy car re-key preserves state identity, cutoff, anchors and UNRESOLVED foreign key");
 
     progress("healthy pipeline");
     const healthy = await fetchKnownListing("100001");
@@ -132,6 +153,148 @@ async function main(): Promise<void> {
     fakeServer.closeAllConnections();
     await within(once(fakeServer, "close").catch(() => undefined), 2_000, undefined);
   }
+}
+
+async function assertDurableUnresolvedRecoveryWindow(): Promise<void> {
+  const context = (await buildSourceSearchPlan("OLX"))[0];
+  if (!context) throw new Error("OLX integration context was not created");
+  const initialState = await loadSourceSearchState(context);
+  const boundary = new Date(Date.now() - 60 * 60 * 1_000);
+  const cutoff = new Date(boundary.getTime() - 5 * 60 * 1_000);
+  await prisma.sourceSearchState.update({
+    where: { id: initialState.id },
+    data: {
+      initialSyncCompletedAt: new Date(),
+      lastSuccessfulScanAt: boundary,
+      coverageRecoveryPending: true,
+      coverageRecoveryCutoffAt: cutoff,
+      lastPage: 21,
+    },
+  });
+  const window = await prisma.coverageRecoveryWindow.create({
+    data: {
+      source: "OLX",
+      sourceSearchStateId: initialState.id,
+      reason: "OFFLINE_WINDOW",
+      persistedBoundaryAt: boundary,
+      requiredCutoffAt: cutoff,
+    },
+  });
+  const state = await loadSourceSearchState(context);
+  const result = await markSourceSearchSuccess(context, state, [], {
+    initialSyncCompleted: true,
+    lane: "BACKFILL",
+    pageCount: 21,
+    requestCount: 21,
+    observedCount: 1_050,
+    coverageVerified: false,
+    coverageUnresolvedReason: "PUBLIC_OFFSET_CAP",
+    coverageAttemptGeneration: olxRecoveryAttemptGeneration({ pageSize: 50, maxOffset: 1_000 }),
+    runId: "integration-unreachable-boundary",
+  });
+  if (!result.recoveryUnresolved || result.recoveryVerified || result.recoveryRequired) {
+    throw new Error(`Unexpected recovery transition: ${JSON.stringify(result)}`);
+  }
+  const unresolved = await prisma.coverageRecoveryWindow.findUniqueOrThrow({ where: { id: window.id } });
+  if (unresolved.status !== "UNRESOLVED" || unresolved.unresolvedReason !== "PUBLIC_OFFSET_CAP") {
+    throw new Error(`Unreachable window was not persisted as UNRESOLVED: ${unresolved.status}/${unresolved.unresolvedReason}`);
+  }
+  const persistedState = await prisma.sourceSearchState.findUniqueOrThrow({ where: { id: initialState.id } });
+  if (persistedState.coverageRecoveryPending) throw new Error("UNRESOLVED window remained eligible for automatic recovery");
+
+  await prisma.coverageRecoveryWindow.update({
+    where: { id: window.id },
+    data: { acknowledgedAt: new Date(), acknowledgedBy: "integration-test" },
+  });
+  await prisma.$disconnect();
+  const afterRestart = await prisma.coverageRecoveryWindow.findUniqueOrThrow({ where: { id: window.id } });
+  if (afterRestart.status !== "UNRESOLVED" || !afterRestart.acknowledgedAt) {
+    throw new Error("ACK or reconnect changed the durable unresolved state");
+  }
+}
+
+async function assertCategoryShadowIsolation(): Promise<void> {
+  const filter = await prisma.filter.create({ data: {
+    name: "Laptop shadow", categoryKey: "electronics.laptop", sources: ["OLX"],
+    freshnessMode: "ALL_TIME", shadowMode: true, categoryCriteria: { minRamGb: 16 },
+  } });
+  const listing: NormalizedListing = { ...probeListing("100007"), categoryKey: "electronics.laptop",
+    categoryAttributes: {}, title: "HP EliteBook integration 100007", brand: "HP", model: "EliteBook",
+    priceOriginal: 18000, currencyOriginal: "UAH", priceNormalized: 450 };
+  const result = await processListingDetected({ listing, filterIds: [filter.id], bypassHotClaim: true });
+  assert(result.outcome === "SHADOWED" && result.listingId, "Laptop shadow did not persist a match");
+  const row = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { source_externalId: { source: "OLX", externalId: listing.externalId } } });
+  assert(row.listingId === result.listingId && row.dispatchAttemptedAt === null, "Shadow journal lost identity or claimed dispatch");
+  await prisma.$disconnect();
+  await sendListingLink(result.listingId);
+  await processTelegramSend({ listingId: result.listingId });
+  assert(!await stageListingForFlash(result.listingId, "shadow-bundle"), "Shadow entered flash staging");
+  assert(!await createTelegramFlashBundle("shadow-bundle", [result.listingId, "missing"]), "Shadow entered a flash bundle");
+  await prisma.telegramFlashBundle.create({ data: {
+    id: "legacy-shadow-bundle", chatId: "1", listingIds: [result.listingId], lastText: "integration 100007 must not escape",
+  } });
+  assert((await sendTelegramFlashBundle("legacy-shadow-bundle")).length === 0, "Legacy queued flash released a shadow listing");
+  const legacyFlash = await prisma.telegramFlashBundle.findUniqueOrThrow({ where: { id: "legacy-shadow-bundle" } });
+  assert(legacyFlash.lastErrorCode === "SHADOW_SUPPRESSED", "Legacy shadow flash was not visibly suppressed");
+  assert(!telegramDeliveries.has("100007"), "Shadow escaped to Telegram");
+  assert(await prisma.telegramNotification.count({ where: { listingId: result.listingId } }) === 0, "Shadow created a notification retry row");
+  await prisma.filter.update({ where: { id: filter.id }, data: { shadowMode: false } });
+  await delay(2100); // Deliberately expire the production filter cache.
+  await processListingDetected({ listing, filterIds: [filter.id], bypassHotClaim: true });
+  await sendListingLink(result.listingId);
+  const notification = await prisma.telegramNotification.findUniqueOrThrow({ where: { listingId: result.listingId } });
+  assert(telegramDeliveries.get("100007") === 1, "Promotion/replay must deliver exactly once on a successful API response");
+  assert(notification.lastText?.includes("не подтверждена"), "UNKNOWN notification lost its provisional warning");
+  await prisma.filter.update({ where: { id: filter.id }, data: { enabled: false } });
+}
+
+async function assertCategoryRecoveryIsolation(): Promise<void> {
+  const carFilter = await prisma.filter.findFirstOrThrow({ where: { categoryKey: "vehicle.car" } });
+  const carContext = buildSearchContextFromFilter("OLX", carFilter);
+  const laptopContext = buildSearchContextFromFilter("OLX", { ...carFilter, categoryKey: "electronics.laptop" });
+  const car = await loadSourceSearchState(carContext);
+  const laptop = await loadSourceSearchState(laptopContext);
+  const cutoff = new Date(Date.now() - 3600000);
+  await prisma.sourceSearchState.update({ where: { id: laptop.id }, data: {
+    coverageRecoveryPending: true, coverageRecoveryCutoffAt: cutoff, knownExternalIds: ["laptop-tail"],
+  } });
+  await expectFailure(() => markSourceSearchSuccess(carContext, laptop, [], { initialSyncCompleted: true }), "foreign shard recovery write");
+  await markSourceSearchSuccess(laptopContext, await loadSourceSearchState(laptopContext), [], {
+    initialSyncCompleted: true, lane: "BACKFILL", parserHealth: "DEGRADED", coverageVerified: true,
+    cutoffReached: true, coverageVerificationMethod: "CUTOFF", oldestObservedAt: cutoff, cutoff,
+  });
+  const after = await prisma.sourceSearchState.findUniqueOrThrow({ where: { id: laptop.id } });
+  assert(after.lastCompletedCutoff === null && after.coverageRecoveryPending, "Degraded parser advanced proven coverage");
+  assert(after.parserHealth === "DEGRADED", "Parser degradation was not durable");
+  const untouched = await prisma.sourceSearchState.findUniqueOrThrow({ where: { id: car.id } });
+  assert(!untouched.knownExternalIds.includes("laptop-tail"), "Laptop anchors entered car state");
+  const beforeWindows = await prisma.coverageRecoveryWindow.count();
+  const replacement = await prisma.sourceSearchState.create({ data: { source: "OLX", fingerprint: "cleanup-replacement", filterIds: [carFilter.id], query: {} } });
+  await compactSourceSearchStates({ source: "OLX", currentFingerprints: [replacement.fingerprint], preserveStateId: replacement.id });
+  assert(await prisma.coverageRecoveryWindow.count() === beforeWindows, "Planner cleanup deleted durable recovery history");
+  assert(await prisma.sourceSearchState.count({ where: { id: laptop.id } }) === 1, "Planner cleanup deleted pending category recovery");
+}
+
+async function assertLegacyShardRekey(): Promise<void> {
+  const filter = await prisma.filter.findFirstOrThrow({ where: { categoryKey: "vehicle.car" } });
+  const context = buildSearchContextFromFilter("OLX", { ...filter, regions: ["legacy-test-region"], cities: [] });
+  const cutoff = new Date(Date.now() - 7200000);
+  const legacy = await prisma.sourceSearchState.create({ data: {
+    source: "OLX", fingerprint: "legacy-category-less", filterIds: [filter.id],
+    query: { source: "OLX", regions: context.regions, cities: [] },
+    initialSyncCompletedAt: cutoff, lastSuccessfulScanAt: cutoff, lastCompletedCutoff: cutoff,
+    lastPage: 7, knownExternalIds: ["legacy-tail"], coverageAnchorExternalIds: ["frozen-tail"],
+  } });
+  const window = await prisma.coverageRecoveryWindow.create({ data: {
+    source: "OLX", sourceSearchStateId: legacy.id, reason: "OFFLINE_WINDOW", status: "UNRESOLVED",
+    persistedBoundaryAt: cutoff, requiredCutoffAt: cutoff, unresolvedReason: "PUBLIC_OFFSET_CAP", unresolvedAt: new Date(),
+  } });
+  const state = await loadSourceSearchState(context);
+  assert(state.id === legacy.id, "Planner copied a legacy scope instead of preserving its durable identity");
+  assert(state.lastCompletedCutoff?.getTime() === cutoff.getTime() && state.lastPage === 7, "Planner lost legacy cutoff/cursor");
+  assert(state.knownExternalIds.has("legacy-tail") && state.coverageAnchorExternalIds.has("frozen-tail"), "Planner lost legacy anchors");
+  const preserved = await prisma.coverageRecoveryWindow.findUniqueOrThrow({ where: { id: window.id } });
+  assert(preserved.sourceSearchStateId === state.id && preserved.status === "UNRESOLVED", "Planner detached or verified legacy recovery");
 }
 
 const probeMode = process.argv[2];

@@ -147,10 +147,13 @@ export async function sendListingLink(
   const listing = snapshot ?? (await loadListingForTelegram(listingId));
   if (!listing) throw new Error(`Listing not found: ${listingId}`);
 
+  if (listing.notificationMode === "SHADOW") return;
+
   const text = initialMessageText(listing);
   const reservation = await reserveTelegramNotification(listingId, env.TELEGRAM_CHAT_ID || "not-configured", text);
 
   if (reservation.kind === "already-sent") {
+    if (reservation.acceptedAt) await syncAcceptedListing(listingId, reservation.acceptedAt);
     return;
   }
   if (reservation.kind === "locked") return;
@@ -179,6 +182,10 @@ export async function sendListingLink(
       listingTelegramPriority(listing.discoveryLane),
       listingTelegramFreshnessRank(listing),
     );
+    await prisma.sourceSeenListing.updateMany({
+      where: { listingId, telegramRequestedAt: null },
+      data: { telegramRequestedAt: new Date() },
+    });
     const sent = await telegramBot.api.sendMessage(chatId, text, {
       link_preview_options: { is_disabled: true },
       reply_markup: telegramListingKeyboard(
@@ -215,28 +222,16 @@ export async function sendListingLink(
       },
     });
 
-    await prisma.$transaction([
-      prisma.listing.update({ where: { id: listingId }, data: { status: "SENT" } }),
-      prisma.sourceSeenListing.updateMany({
-        where: { listingId },
-        data: { decision: "NOTIFIED" },
-      }),
-      prisma.sourceSeenListing.updateMany({
-        where: { listingId, notifiedAt: null },
-        data: { notifiedAt: acceptedAt },
-      }),
-      prisma.sourceSeenListing.updateMany({
-        where: { listingId, telegramAcceptedAt: null },
-        data: { telegramAcceptedAt: acceptedAt },
-      }),
-    ]);
+    await syncAcceptedListing(listingId, firstAcceptedAt);
   } catch (err) {
     await deferGlobalTelegramGate(err);
     const message = err instanceof Error ? err.message : String(err);
     const retryAfterSeconds = telegramRetryAfterSeconds(err);
     const aborted = options.signal?.aborted === true;
-    await prisma.telegramNotification.update({
-      where: { id: reservation.notificationId },
+    await prisma.telegramNotification.updateMany({
+      // A journal transaction can fail after the acceptance receipt committed.
+      // Never erase SENT / messageId or let a losing sender reopen that receipt.
+      where: { id: reservation.notificationId, status: "PROCESSING", messageId: null },
       data: {
         status: "RETRY_PENDING",
         leaseExpiresAt: null,
@@ -261,6 +256,7 @@ export async function stageListingForFlash(
 ): Promise<boolean> {
   const listing = snapshot ?? (await loadListingForTelegram(listingId));
   if (!listing) throw new Error(`Listing not found: ${listingId}`);
+  if (listing.notificationMode === "SHADOW") return false;
   const chatId = env.TELEGRAM_CHAT_ID || "not-configured";
   const text = initialMessageText(listing);
   const now = new Date();
@@ -314,7 +310,7 @@ export async function createTelegramFlashBundle(
   const uniqueIds = [...new Set(listingIds)];
   if (uniqueIds.length < 2) return false;
   const rows = await prisma.listing.findMany({
-    where: { id: { in: uniqueIds } },
+    where: { id: { in: uniqueIds }, notificationMode: "LIVE" },
     include: { matches: { include: { filter: { select: { name: true } } } } },
   });
   const byId = new Map(rows.map((row) => [row.id, row]));
@@ -357,12 +353,33 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
   const leaseExpiresAt = new Date(now.getTime() + TELEGRAM_FLASH_SEND_LEASE_MS);
   const existing = await prisma.telegramFlashBundle.findUnique({ where: { id: flashBundleId } });
   if (!existing) throw new Error(`Telegram flash bundle not found: ${flashBundleId}`);
-  if (existing.status === "SENT" && existing.messageId) return existing.listingIds;
+  if (existing.messageId && existing.acceptedAt) {
+    await syncAcceptedFlashBundle(flashBundleId, existing.listingIds, existing.acceptedAt);
+    return existing.listingIds;
+  }
   if (existing.status === "PROCESSING" && existing.leaseExpiresAt && existing.leaseExpiresAt > now) return [];
+
+  // A persisted bundle may predate the shadow guard. Never trust cached text
+  // containing suppressed links; release eligible items as individual cards.
+  const eligibleRows = await prisma.listing.findMany({
+    where: { id: { in: existing.listingIds }, notificationMode: "LIVE" }, select: { id: true },
+  });
+  const eligibleIds = new Set(eligibleRows.map((row) => row.id));
+  if (eligibleIds.size !== existing.listingIds.length) {
+    const liveIds = existing.listingIds.filter((id) => eligibleIds.has(id));
+    await prisma.telegramFlashBundle.update({ where: { id: flashBundleId }, data: {
+      status: "FAILED", attemptCount: 10, leaseExpiresAt: null,
+      lastErrorCode: "SHADOW_SUPPRESSED", lastErrorMessage: "Suppressed entries removed; live items released to individual cards",
+    } });
+    await releaseFlashListingsToCards(flashBundleId, liveIds);
+    return liveIds;
+  }
 
   const reserved = await prisma.telegramFlashBundle.updateMany({
     where: {
       id: flashBundleId,
+      messageId: null,
+      status: { not: "SENT" },
       OR: [
         { status: { not: "PROCESSING" } },
         { leaseExpiresAt: null },
@@ -404,8 +421,9 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
     });
     const acceptedAt = new Date();
     const sentAt = acceptedAt;
-    await prisma.$transaction([
-      prisma.telegramFlashBundle.update({
+    // Commit the Telegram receipt separately before updating local projections.
+    // Retrying a projection after a DB fault must never resend the flash.
+    await prisma.telegramFlashBundle.update({
         where: { id: flashBundleId },
         data: {
           chatId,
@@ -417,35 +435,15 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
           lastErrorCode: null,
           lastErrorMessage: null,
         },
-      }),
-      prisma.telegramNotification.updateMany({
-        where: { flashBundleId, status: "FLASH_PENDING" },
-        data: { status: "PENDING", acceptedAt },
-      }),
-      prisma.listing.updateMany({
-        where: { id: { in: existing.listingIds } },
-        data: { status: "SENT" },
-      }),
-      prisma.sourceSeenListing.updateMany({
-        where: { listingId: { in: existing.listingIds } },
-        data: { decision: "NOTIFIED" },
-      }),
-      prisma.sourceSeenListing.updateMany({
-        where: { listingId: { in: existing.listingIds }, notifiedAt: null },
-        data: { notifiedAt: acceptedAt },
-      }),
-      prisma.sourceSeenListing.updateMany({
-        where: { listingId: { in: existing.listingIds }, telegramAcceptedAt: null },
-        data: { telegramAcceptedAt: acceptedAt },
-      }),
-    ]);
+      });
+    await syncAcceptedFlashBundle(flashBundleId, existing.listingIds, acceptedAt);
     return existing.listingIds;
   } catch (error) {
     await deferGlobalTelegramGate(error);
     const message = error instanceof Error ? error.message : String(error);
     const retryAfterSeconds = telegramRetryAfterSeconds(error);
-    await prisma.telegramFlashBundle.update({
-      where: { id: flashBundleId },
+    await prisma.telegramFlashBundle.updateMany({
+      where: { id: flashBundleId, status: "PROCESSING", messageId: null },
       data: {
         status: "RETRY_PENDING",
         leaseExpiresAt: null,
@@ -666,15 +664,15 @@ async function reserveTelegramNotification(
   text: string,
 ): Promise<
   | { kind: "reserved"; notificationId: string; acceptedAt: Date | null }
-  | { kind: "already-sent" }
+  | { kind: "already-sent"; acceptedAt: Date | null }
   | { kind: "locked" }
 > {
   const now = new Date();
   const leaseExpiresAt = new Date(now.getTime() + TELEGRAM_SEND_LEASE_MS);
   const existing = await prisma.telegramNotification.findUnique({ where: { listingId } });
 
-  if ((existing?.status === "SENT" || existing?.status === "UPDATED") && existing.messageId) {
-    return { kind: "already-sent" };
+  if (existing?.messageId) {
+    return { kind: "already-sent", acceptedAt: existing.acceptedAt ?? existing.sentAt };
   }
   if (existing?.status === "PROCESSING" && existing.leaseExpiresAt && existing.leaseExpiresAt > now) {
     return { kind: "locked" };
@@ -685,6 +683,8 @@ async function reserveTelegramNotification(
       const reserved = await prisma.telegramNotification.updateMany({
         where: {
           id: existing.id,
+          messageId: null,
+          status: { notIn: ["SENT", "UPDATED"] },
           OR: [
             { status: { not: "PROCESSING" } },
             { leaseExpiresAt: null },
@@ -724,6 +724,31 @@ async function reserveTelegramNotification(
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") return { kind: "locked" };
     throw err;
   }
+}
+
+async function syncAcceptedListing(listingId: string, acceptedAt: Date): Promise<void> {
+  await prisma.$transaction([
+    prisma.listing.updateMany({
+      where: { id: listingId, status: { in: ["NEW", "MATCHED"] } },
+      data: { status: "SENT" },
+    }),
+    prisma.sourceSeenListing.updateMany({ where: { listingId }, data: { decision: "NOTIFIED" } }),
+    prisma.sourceSeenListing.updateMany({ where: { listingId, notifiedAt: null }, data: { notifiedAt: acceptedAt } }),
+    prisma.sourceSeenListing.updateMany({ where: { listingId, telegramAcceptedAt: null }, data: { telegramAcceptedAt: acceptedAt } }),
+  ]);
+}
+
+async function syncAcceptedFlashBundle(flashBundleId: string, listingIds: string[], acceptedAt: Date): Promise<void> {
+  await prisma.$transaction([
+    prisma.telegramNotification.updateMany({ where: { flashBundleId, status: "FLASH_PENDING" }, data: { status: "PENDING", acceptedAt } }),
+    prisma.listing.updateMany({
+      where: { id: { in: listingIds }, status: { in: ["NEW", "MATCHED"] } },
+      data: { status: "SENT" },
+    }),
+    prisma.sourceSeenListing.updateMany({ where: { listingId: { in: listingIds } }, data: { decision: "NOTIFIED" } }),
+    prisma.sourceSeenListing.updateMany({ where: { listingId: { in: listingIds }, notifiedAt: null }, data: { notifiedAt: acceptedAt } }),
+    prisma.sourceSeenListing.updateMany({ where: { listingId: { in: listingIds }, telegramAcceptedAt: null }, data: { telegramAcceptedAt: acceptedAt } }),
+  ]);
 }
 
 async function loadListingForTelegram(listingId: string): Promise<TelegramListingSnapshot | null> {

@@ -1,11 +1,16 @@
 import type { MarketPriceEstimate, VehicleCheck } from "@amb/db";
-import type { ListingDiscoveryLane } from "@amb/shared";
+import { categoryProfile, marketplaceCategoryKey, validateCategoryAttributes, type ListingDiscoveryLane } from "@amb/shared";
 
 const TELEGRAM_MESSAGE_LIMIT = 3900;
 
 export type TelegramListingSnapshot = {
   id: string;
   source: string;
+  categoryKey?: string;
+  categorySchemaVersion?: number;
+  categoryAttributes?: unknown;
+  notificationMode?: string;
+  provisionalReasons?: string[];
   url: string;
   title: string | null;
   brand: string | null;
@@ -33,6 +38,9 @@ export type TelegramListingSnapshot = {
 };
 
 export function initialMessageText(listing: TelegramListingSnapshot): string {
+  if (marketplaceCategoryKey(listing.categoryKey) !== "vehicle.car") {
+    return categoryMessageText(listing);
+  }
   return clampTelegramText([
     messageHeading(listing),
     "",
@@ -49,6 +57,9 @@ export function enrichedMessageText(
   check: VehicleCheck | null,
   market: MarketPriceEstimate | null,
 ): string {
+  if (marketplaceCategoryKey(listing.categoryKey) !== "vehicle.car") {
+    return categoryMessageText(listing);
+  }
   const lines = [
     messageHeading(listing),
     "",
@@ -58,6 +69,55 @@ export function enrichedMessageText(
   ];
   lines.push("", `Ссылка: ${listing.url}`);
   return clampTelegramText(lines);
+}
+
+function categoryMessageText(listing: TelegramListingSnapshot): string {
+  const categoryKey = marketplaceCategoryKey(listing.categoryKey);
+  const profile = categoryProfile(categoryKey);
+  const attributes = validateCategoryAttributes(categoryKey, listing.categoryAttributes).attributes;
+  const title = listing.title ?? ([listing.brand, listing.model].filter(Boolean).join(" ") || profile.label);
+  const filters = listing.matches?.map((match) => match.filter.name).filter(Boolean).slice(0, 3) ?? [];
+  const attributeLines = categoryAttributeLines(attributes);
+  return clampTelegramText([
+    listing.discoveryLane === "REALTIME" ? `🔥 НОВОЕ — ${profile.telegramLabel}` : messageHeading(listing),
+    ...(listing.provisionalReasons?.length ? ["⚠️ Возможно подходит: часть характеристик ещё не подтверждена.",
+      ...listing.provisionalReasons.slice(0, 3).map((reason) => `Уточнить: ${reason}`)] : []),
+    "",
+    `Источник: ${sourceLabel(listing.source)}`,
+    `${profile.label}: ${title}`,
+    `Цена: ${formatCategoryPrice(listing)}`,
+    `Место: ${[listing.city, listing.region].filter(Boolean).join(", ") || "-"}`,
+    ...attributeLines,
+    `Опубликовано: ${formatDate(listing.publishedAt)}`,
+    `Обнаружено: ${formatDate(listing.firstSeenAt)}`,
+    ...(discoveryLatencyLine(listing) ? [discoveryLatencyLine(listing)!] : []),
+    `Фильтры: ${filters.length ? filters.join(", ") : "-"}`,
+    "",
+    `Ссылка: ${listing.url}`,
+  ]);
+}
+
+function categoryAttributeLines(attributes: Record<string, string | number | string[]>): string[] {
+  const labels: Record<string, string> = {
+    cpu: "CPU", gpu: "GPU", ramGb: "RAM", storageGb: "Накопитель", storageType: "Тип накопителя",
+    screenInches: "Экран", refreshRateHz: "Частота", batteryHealthPercent: "Батарея", model: "Модель",
+    vramGb: "VRAM", platform: "Платформа", powerW: "Мощность", batteryWh: "Батарея",
+    rangeKm: "Запас хода", mileageKm: "Пробег", riskKeywords: "Риски", accessories: "Комплект",
+  };
+  const units: Record<string, string> = {
+    ramGb: " ГБ", storageGb: " ГБ", screenInches: "\"", refreshRateHz: " Гц",
+    batteryHealthPercent: "%", vramGb: " ГБ", powerW: " Вт", batteryWh: " Вт·ч",
+    rangeKm: " км", mileageKm: " км",
+  };
+  return Object.entries(attributes)
+    .filter(([key]) => key !== "brand")
+    .slice(0, 8)
+    .map(([key, value]) => `${labels[key] ?? key}: ${Array.isArray(value) ? value.join(", ") : value}${units[key] ?? ""}`);
+}
+
+function formatCategoryPrice(listing: TelegramListingSnapshot): string {
+  if (listing.priceOriginal != null) return `${listing.priceOriginal} ${listing.currencyOriginal ?? ""}`.trim();
+  return formatPrice(listing);
 }
 
 function listingSummaryLines(listing: TelegramListingSnapshot): string[] {

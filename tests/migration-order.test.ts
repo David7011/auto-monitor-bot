@@ -79,4 +79,57 @@ describe("migration ordering", () => {
     expect(sql).toContain('"verificationMethod" "CoverageVerificationMethod"');
     expect(sql).toContain('REFERENCES "source_search_states"("id") ON DELETE CASCADE');
   });
+
+  it("reopens OLX recovery windows that were falsely verified by an empty first page", () => {
+    const sql = readFileSync(
+      path.resolve("packages/db/prisma/migrations/20260902_reopen_unproven_olx_recovery/migration.sql"),
+      "utf8",
+    );
+    expect(sql).toContain('"status" = \'PENDING\'::"CoverageRecoveryStatus"');
+    expect(sql).toContain('recovery."verificationMethod" = \'EXHAUSTED\'::"CoverageVerificationMethod"');
+    expect(sql).toContain('recovery."pageCount" <= 1');
+    expect(sql).toContain('recovery."observedCount" = 0');
+    expect(sql).toContain('"coverageRecoveryPending" = TRUE');
+    expect(sql).toContain('"coverageAnchorExternalIds" = ARRAY[]::TEXT[]');
+    expect(sql).toContain('"lastPage" = 1');
+  });
+
+  it("reconstructs recovery anchors only from observations persisted before the offline boundary", () => {
+    const sql = readFileSync(
+      path.resolve("packages/db/prisma/migrations/20260902_z_restore_olx_recovery_anchors/migration.sql"),
+      "utf8",
+    );
+    expect(sql).toContain('recovery_window."status" = \'PENDING\'::"CoverageRecoveryStatus"');
+    expect(sql).toContain('seen."firstSeenAt" <= pending."persistedBoundaryAt"');
+    expect(sql).toContain('LIMIT 50');
+    expect(sql).toContain('cardinality(state."coverageAnchorExternalIds") = 0');
+  });
+
+  it("reopens cutoff proofs that never durably reached the required boundary", () => {
+    const sql = readFileSync(
+      path.resolve("packages/db/prisma/migrations/20260903_reopen_unproven_cutoff_recovery/migration.sql"),
+      "utf8",
+    );
+    expect(sql).toContain('recovery."verificationMethod" = \'CUTOFF\'::"CoverageVerificationMethod"');
+    expect(sql).toContain('recovery."oldestObservedAt" > recovery."requiredCutoffAt"');
+    expect(sql).toContain('"status" = \'PENDING\'::"CoverageRecoveryStatus"');
+    expect(sql).toContain('seen."firstSeenAt" <= reopened."persistedBoundaryAt"');
+    expect(sql).toContain('"lastPage" = 1');
+  });
+
+  it("keeps multi-category migration additive and constrains durable category state", () => {
+    const foundation = readFileSync(
+      path.resolve("packages/db/prisma/migrations/20260904_multi_category_marketplace/migration.sql"),
+      "utf8",
+    );
+    const invariants = readFileSync(
+      path.resolve("packages/db/prisma/migrations/20260904_z_multi_category_invariants/migration.sql"),
+      "utf8",
+    );
+    expect(foundation).toContain('ADD COLUMN IF NOT EXISTS "categoryKey"');
+    expect(foundation).not.toMatch(/DROP\s+(?:COLUMN|TABLE)/iu);
+    expect(invariants).toContain('"source_search_states_parser_health_check"');
+    expect(invariants).toContain("'electronics.laptop'");
+    expect(invariants).toContain("'mixed'");
+  });
 });

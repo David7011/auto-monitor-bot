@@ -1,4 +1,5 @@
 import type { ListingSource } from "../types/listing.js";
+import type { MarketplaceCategoryKey, UnknownFilterPolicy } from "../types/category.js";
 import { getCityById, normalizeCityIds, normalizeRegionIds } from "../data/ukraine-regions.js";
 import { normalizeText } from "./normalize.js";
 import { normalizeVehicleText } from "./vehicle-attributes.js";
@@ -7,6 +8,11 @@ export type FilterHygieneCandidate = {
   id: string;
   name: string;
   enabled: boolean;
+  categoryKey?: MarketplaceCategoryKey | string;
+  categorySchemaVersion?: number;
+  categoryCriteria?: unknown;
+  unknownPolicy?: UnknownFilterPolicy | string;
+  shadowMode?: boolean;
   sources: readonly ListingSource[];
   autoRiaCategoryId?: number | null;
   autoRiaMarkId?: number | null;
@@ -92,7 +98,13 @@ const EXACT_SCALAR_FIELDS = [
 
 /** A stable signature of every field that changes which listings match. */
 export function effectiveFilterSignature(filter: FilterHygieneCandidate): string {
-  const normalized: Record<string, unknown> = {};
+  const normalized: Record<string, unknown> = {
+    categoryKey: filter.categoryKey ?? "vehicle.car",
+    categorySchemaVersion: filter.categorySchemaVersion ?? 1,
+    categoryCriteria: stableJsonValue(filter.categoryCriteria ?? {}),
+    unknownPolicy: filter.unknownPolicy ?? "MAX_COVERAGE",
+    shadowMode: filter.shadowMode ?? false,
+  };
   for (const field of EXACT_ARRAY_FIELDS) normalized[field] = normalizedList(filter[field]);
   for (const field of EXACT_TEXT_FIELDS) normalized[field] = normalizedValue(filter[field]);
   for (const field of EXACT_SCALAR_FIELDS) normalized[field] = filter[field] ?? null;
@@ -168,6 +180,7 @@ export function filtersMateriallyOverlap(
   left: FilterHygieneCandidate,
   right: FilterHygieneCandidate,
 ): boolean {
+  if ((left.categoryKey ?? "vehicle.car") !== (right.categoryKey ?? "vehicle.car")) return false;
   if (!listConstraintsOverlap(left.sources, right.sources)) return false;
   if (!scalarConstraintsOverlap(left.autoRiaCategoryId, right.autoRiaCategoryId)) return false;
   if (!scalarConstraintsOverlap(left.autoRiaMarkId, right.autoRiaMarkId)) return false;
@@ -193,6 +206,16 @@ export function filtersMateriallyOverlap(
   if (!geoConstraintsOverlap(left, right)) return false;
   if (!listConstraintsOverlap(left.keywords, right.keywords)) return false;
   return !requiredKeywordsAreExcluded(left, right) && !requiredKeywordsAreExcluded(right, left);
+}
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, stableJsonValue(entry)]),
+  );
 }
 
 function modelConstraintsOverlap(left: FilterHygieneCandidate, right: FilterHygieneCandidate): boolean {

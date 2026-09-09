@@ -234,12 +234,17 @@ export default function DashboardPage() {
               tone={toneForLatency(telegramMs, 30 * 1000)}
             />
             <MeterBar
-              label="Длительность сбора"
-              valueLabel={formatMs(metrics?.collectorDurationMs.p95 ?? null)}
-              ratio={ratioAgainst(metrics?.collectorDurationMs.p95 ?? null, 15 * 1000)}
+              label="Realtime-сбор"
+              valueLabel={formatMs(metrics?.collectorRealtimeDurationMs.p95 ?? null)}
+              ratio={ratioAgainst(metrics?.collectorRealtimeDurationMs.p95 ?? null, 2 * 1000)}
               target={0.5}
-              tone={toneForLatency(metrics?.collectorDurationMs.p95 ?? null, 15 * 1000)}
+              tone={toneForLatency(metrics?.collectorRealtimeDurationMs.p95 ?? null, 2 * 1000)}
             />
+            <div className="grid grid-cols-3 gap-2 border-t border-line pt-3 text-center">
+              <MiniValue label="REALTIME P95" value={formatMs(laneDurationP95(metrics, "REALTIME"))} />
+              <MiniValue label="BACKFILL P95" value={formatMs(laneDurationP95(metrics, "BACKFILL"))} />
+              <MiniValue label="COVERAGE P95" value={formatMs(laneDurationP95(metrics, "COVERAGE"))} />
+            </div>
             <div className="grid grid-cols-3 gap-2 border-t border-line pt-3 text-center">
               <MiniValue label="START → OLX" value={formatMs(metrics?.currentSession.startupToFirstOlxSuccessMs ?? null)} />
               <MiniStat label="CATCH-UP" value={metrics?.currentSession.catchUp.observations ?? 0} />
@@ -379,6 +384,13 @@ function MiniValue({ label, value }: { label: string; value: string }) {
       <div className="text-[10px] tracking-widest text-muted uppercase">{label}</div>
     </div>
   )
+}
+
+function laneDurationP95(
+  metrics: MetricsResponse | undefined,
+  lane: "REALTIME" | "BACKFILL" | "COVERAGE",
+): number | null {
+  return metrics?.collectorDurationByLane.find((item) => item.lane === lane)?.durationMs.p95 ?? null
 }
 
 function LaneRow({ lane, max }: { lane: MetricsResponse["laneRunsToday"][number]; max: number }) {

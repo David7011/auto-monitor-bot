@@ -1,18 +1,18 @@
 # Восстановление зашифрованного бэкапа PostgreSQL
 
-Проект больше не создаёт приватные ZIP. База хранится только в `.runtime\backups\database-*.7z`, зашифрованном AES-256 с зашифрованными именами файлов.
+Новые резервные копии базы хранятся в `.runtime\backups\database-*.ambbak`. Это потоковый контейнер проекта с AES-256-GCM, уникальными salt/nonce, ключом из scrypt и аутентифицированным заголовком. Старые `.7z` не удаляются, но автоматическая проверка восстановления использует только новый формат.
 
 Перед восстановлением нужны:
 
-- соответствующий `.7z` и его `.sha256`/`.json`;
+- соответствующий `.ambbak` и его `.sha256`/`.json`;
 - `BACKUP_ENCRYPTION_PASSWORD` из сохранённого локального `.env`;
-- 7-Zip и `pg_restore.exe`;
+- закреплённый Node.js runtime проекта и `pg_restore.exe`;
 - остановленный worker/API, чтобы база не менялась во время восстановления.
 
 ## 1. Проверить целостность архива
 
 ```powershell
-$archive = 'D:\auto-monitor-bot\.runtime\backups\database-YYYYMMDD-HHMMSS.7z'
+$archive = 'D:\auto-monitor-bot\.runtime\backups\database-YYYYMMDD-HHMMSS.ambbak'
 $expected = (Get-Content "$archive.sha256" -Raw).Split(' ')[0].Trim()
 $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw 'SHA-256 backup mismatch' }
@@ -20,7 +20,7 @@ if ($actual -ne $expected) { throw 'SHA-256 backup mismatch' }
 
 ## 2. Извлечь dump во временный каталог
 
-Не печатайте пароль в консоль и не сохраняйте его в отдельный текстовый файл.
+Не печатайте пароль в консоль, не сохраняйте его в отдельный текстовый файл и не передавайте аргументом процесса: аргументы доступны локальной диагностике. Проектный helper передаёт пароль закреплённому Node.js через закрытый standard input.
 
 ```powershell
 $line = Get-Content D:\auto-monitor-bot\.env -Encoding UTF8 |
@@ -29,10 +29,12 @@ $line = Get-Content D:\auto-monitor-bot\.env -Encoding UTF8 |
 $password = ($line -split '=', 2)[1].Trim().Trim('"').Trim("'")
 $restoreDir = 'D:\auto-monitor-bot\.runtime\restore-staging'
 [IO.Directory]::CreateDirectory($restoreDir) | Out-Null
-& 'C:\Program Files\7-Zip\7z.exe' t "-p$password" $archive
-if ($LASTEXITCODE -ne 0) { throw 'Encrypted backup validation failed' }
-& 'C:\Program Files\7-Zip\7z.exe' x -y "-p$password" "-o$restoreDir" $archive
-if ($LASTEXITCODE -ne 0) { throw 'Backup extraction failed' }
+. D:\auto-monitor-bot\scripts\invoke-backup-crypto.ps1
+$dumpPath = Join-Path $restoreDir 'database.dump'
+Invoke-BackupCrypto `
+  -Operation decrypt -InputPath $archive -OutputPath $dumpPath `
+  -Password $password
+$password = $null
 ```
 
 ## 3. Восстановить PostgreSQL
@@ -43,16 +45,19 @@ if ($LASTEXITCODE -ne 0) { throw 'Backup extraction failed' }
 cd D:\auto-monitor-bot
 .\amb.cmd local:stop
 $dump = Get-ChildItem $restoreDir -Filter 'database-*.dump' | Select-Object -First 1
+$env:PGPASSWORD = '<LOCAL_DATABASE_PASSWORD>'
 & 'D:\PostgreSQL\bin\pg_restore.exe' `
   --clean --if-exists --no-owner --no-privileges `
-  --dbname='postgresql://USER:PASSWORD@127.0.0.1:55432/auto_monitor' `
+  --host=127.0.0.1 --port=55432 --username='<LOCAL_DATABASE_USER>' `
+  --dbname=auto_monitor `
   $dump.FullName
 if ($LASTEXITCODE -ne 0) { throw 'pg_restore failed' }
+$env:PGPASSWORD = $null
 .\amb.cmd db:migrate:deploy
 .\amb.cmd local:start
 ```
 
-Замените `USER:PASSWORD` значениями своей локальной БД. Не публикуйте эту команду с реальным паролем.
+Введите локальные учётные данные только в текущей защищённой сессии PowerShell. Не сохраняйте их в документацию или историю команд. Для регулярной проверки восстановления используйте `.\amb.cmd db:restore:test`: она создаёт изолированную временную базу и удаляет её после проверки.
 
 ## 4. Проверить и убрать открытый dump
 

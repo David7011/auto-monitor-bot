@@ -20,12 +20,12 @@ describe("mock source defaults", () => {
     expect(defaults.find((source) => source.source === "MOCK")?.enabled).toBe(true);
   });
 
-  it("does not enable AUTO_RIA without API key", () => {
+  it("keeps AUTO_RIA public discovery available without an API key", () => {
     const defaults = defaultSourceDefinitions({
       AUTO_RIA_API_KEY: "",
       MOCK_SOURCE_ENABLED: false,
       MONITOR_INTERVAL_SECONDS: 120,
     });
-    expect(defaults.find((source) => source.source === "AUTO_RIA")?.enabled).toBe(false);
+    expect(defaults.find((source) => source.source === "AUTO_RIA")?.enabled).toBe(true);
   });
 });

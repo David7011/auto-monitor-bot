@@ -117,7 +117,14 @@ export async function compactSourceSearchStates(
   );
   if (selection.deleteIds.length === 0) return { deleted: 0, planReady: selection.planReady };
 
-  const deleted = await prisma.sourceSearchState.deleteMany({ where: { id: { in: selection.deleteIds } } });
+  // Cleanup must not cascade-delete durable recovery evidence, even when a
+  // filter was disabled or a planner fingerprint changed. Check at deletion
+  // time rather than trusting a stale selection snapshot.
+  const deleted = await prisma.sourceSearchState.deleteMany({ where: {
+    id: { in: selection.deleteIds },
+    coverageRecoveryPending: false,
+    coverageRecoveryWindows: { none: {} },
+  } });
   return { deleted: deleted.count, planReady: selection.planReady };
 }
 

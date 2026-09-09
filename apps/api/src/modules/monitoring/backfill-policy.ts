@@ -17,12 +17,18 @@ export type BackfillRunEvidence = {
 export type AdaptiveBackfillEvidence = {
   runs: BackfillRunEvidence[];
   unresolvedObservationCount: number;
+  pendingRecoveryCount?: number;
+  unresolvedRecovery?: {
+    count: number;
+    attemptedGeneration: string | null;
+    currentGeneration: string;
+  };
   realtimeAnomalyAt?: Date;
   adverseAuditAt?: Date;
 };
 
 export type AdaptiveBackfillDecision = {
-  mode: "RECOVERY" | "EVIDENCE" | "LEAN" | "PERIODIC_FULL" | "PROTECTION";
+  mode: "RECOVERY" | "EVIDENCE" | "LEAN" | "PERIODIC_FULL" | "PROTECTION" | "UNRESOLVED";
   profile: BackfillProfile;
   intervalSeconds: number;
   reason: string;
@@ -80,7 +86,9 @@ export function decideAdaptiveBackfill(
     const protectionAgeMs = now.getTime() - protectedRun.startedAt.getTime();
     const newerRuns = evidence.runs.filter((run) => run.startedAt > protectedRun.startedAt);
     const newerRecoveredRun = newerRuns.find((run) => run.recoveredCount > 0);
-    if (newerRecoveredRun) {
+    // Finding an advert in a probe does not cancel an origin's protection
+    // cooldown. Honor it before permitting a new full-depth recovery.
+    if (newerRecoveredRun && protectionAgeMs >= PROTECTION_LOOKBACK_MS) {
       return {
         mode: "RECOVERY",
         profile: "FULL",
@@ -109,6 +117,22 @@ export function decideAdaptiveBackfill(
         reason: `${cleanAfterProtection} clean probes after protection; full depth remains deferred until the 6h audit`,
       };
     }
+  }
+
+  if ((evidence.pendingRecoveryCount ?? 0) > 0) {
+    return recoveryDecision(baseInterval, `${evidence.pendingRecoveryCount} durable recovery window(s) pending`);
+  }
+
+  if (evidence.unresolvedRecovery) {
+    if (evidence.unresolvedRecovery.attemptedGeneration !== evidence.unresolvedRecovery.currentGeneration) {
+      return recoveryDecision(baseInterval, "OLX recovery capability generation changed; one new attempt is eligible");
+    }
+    return {
+      mode: "UNRESOLVED",
+      profile: "LIGHT",
+      intervalSeconds: leanIntervalSeconds(baseInterval),
+      reason: `${evidence.unresolvedRecovery.count} historical window(s) unresolved for the current capability generation; duplicate deep scan skipped`,
+    };
   }
 
   if (!latestRun || now.getTime() - latestRun.startedAt.getTime() > 15 * 60 * 1000) {

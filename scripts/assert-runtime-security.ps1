@@ -17,7 +17,7 @@ try {
     exit 1
   }
   if (!$Quiet) {
-    Write-Host "Runtime security check passed: only SYSTEM, Administrators, and the trusted project owner can modify elevated runtime files."
+    Write-Host "Runtime security check passed: protected runtime ACLs and all required SYSTEM task definitions were verified."
   }
   exit 0
 } catch {

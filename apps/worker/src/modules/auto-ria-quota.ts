@@ -35,6 +35,7 @@ export async function consumeAutoRiaQuota(kind: AutoRiaQuotaKind, cost = 1): Pro
     String(env.AUTO_RIA_HOURLY_REQUEST_LIMIT),
     String(env.AUTO_RIA_SOFT_RESERVE),
     String(env.AUTO_RIA_MIN_SEARCH_RESERVE),
+    String(autoRiaHourlySearchBudget()),
     kind,
     String(nowMs),
     String(ROLLING_WINDOW_MS),
@@ -73,7 +74,11 @@ function consumeMemoryQuota(
   const hourlyUsed = memoryRollingRequests.length;
   const reason = quotaDenialReason(kind, cost, totalUsed, hourlyUsed);
   if (reason) {
-    const retryAfterSeconds = reason === "HOURLY_LIMIT" ? rollingRetryAfterSeconds(memoryRollingRequests, nowMs) : undefined;
+    const hourlyKindLimit = kind === "search" ? autoRiaHourlySearchBudget() : env.AUTO_RIA_HOURLY_REQUEST_LIMIT;
+    const expirationsRequired = Math.max(1, hourlyUsed + cost - hourlyKindLimit);
+    const retryAfterSeconds = reason === "HOURLY_LIMIT" || reason === "SEARCH_HOURLY_BUDGET"
+      ? rollingRetryAfterSeconds(memoryRollingRequests, nowMs, expirationsRequired)
+      : undefined;
     return denied(reason, totalUsed, hourlyUsed, retryAfterSeconds);
   }
 
@@ -93,6 +98,7 @@ function quotaDenialReason(kind: AutoRiaQuotaKind, cost: number, totalUsed: numb
   const hourlyAfter = hourlyUsed + cost;
   const remainingAfter = env.AUTO_RIA_TOTAL_REQUEST_LIMIT - totalAfter;
 
+  if (kind === "search" && hourlyAfter > autoRiaHourlySearchBudget()) return "SEARCH_HOURLY_BUDGET";
   if (hourlyAfter > env.AUTO_RIA_HOURLY_REQUEST_LIMIT) return "HOURLY_LIMIT";
   if (totalAfter > env.AUTO_RIA_TOTAL_REQUEST_LIMIT) return "TOTAL_LIMIT";
   if (remainingAfter < env.AUTO_RIA_SOFT_RESERVE) return "SOFT_RESERVE";
@@ -119,10 +125,16 @@ function denied(
   };
 }
 
-function rollingRetryAfterSeconds(timestamps: number[], nowMs: number): number {
-  const oldest = timestamps[0];
-  if (oldest == null) return 1;
-  return Math.max(1, Math.ceil((oldest + ROLLING_WINDOW_MS - nowMs) / 1000));
+function rollingRetryAfterSeconds(timestamps: number[], nowMs: number, expirationsRequired = 1): number {
+  const target = timestamps[Math.max(0, Math.min(timestamps.length - 1, expirationsRequired - 1))];
+  if (target == null) return 1;
+  return Math.max(1, Math.ceil((target + ROLLING_WINDOW_MS - nowMs) / 1000));
+}
+
+export function autoRiaHourlySearchBudget(): number {
+  const hourlyLimit = Math.max(1, env.AUTO_RIA_HOURLY_REQUEST_LIMIT);
+  const detailReserve = Math.min(env.AUTO_RIA_MAX_INFO_PER_SCAN, Math.max(0, hourlyLimit - 1));
+  return Math.max(1, Math.min(env.AUTO_RIA_SEARCH_REQUESTS_PER_HOUR, hourlyLimit - detailReserve));
 }
 
 function secondsUntilMonthAfterNext(now: Date): number {
@@ -136,11 +148,12 @@ local total_limit = tonumber(ARGV[2])
 local hourly_limit = tonumber(ARGV[3])
 local soft_reserve = tonumber(ARGV[4])
 local min_search_reserve = tonumber(ARGV[5])
-local kind = ARGV[6]
-local now_ms = tonumber(ARGV[7])
-local window_ms = tonumber(ARGV[8])
-local total_ttl = tonumber(ARGV[9])
-local member_prefix = ARGV[10]
+local search_hourly_limit = tonumber(ARGV[6])
+local kind = ARGV[7]
+local now_ms = tonumber(ARGV[8])
+local window_ms = tonumber(ARGV[9])
+local total_ttl = tonumber(ARGV[10])
+local member_prefix = ARGV[11]
 
 redis.call("zremrangebyscore", KEYS[2], "-inf", now_ms - window_ms)
 local total_used = tonumber(redis.call("get", KEYS[1]) or "0")
@@ -151,11 +164,21 @@ local remaining_after = total_limit - total_after
 local reason = "OK"
 local retry_after = 0
 
-if hourly_after > hourly_limit then
-  reason = "HOURLY_LIMIT"
-  local oldest = redis.call("zrange", KEYS[2], 0, 0, "WITHSCORES")
-  if oldest[2] then
-    retry_after = math.max(1, math.ceil((tonumber(oldest[2]) + window_ms - now_ms) / 1000))
+local effective_hourly_limit = hourly_limit
+if kind == "search" then
+  effective_hourly_limit = search_hourly_limit
+end
+
+if hourly_after > effective_hourly_limit then
+  if kind == "search" then
+    reason = "SEARCH_HOURLY_BUDGET"
+  else
+    reason = "HOURLY_LIMIT"
+  end
+  local expirations_required = math.max(1, hourly_after - effective_hourly_limit)
+  local target = redis.call("zrange", KEYS[2], expirations_required - 1, expirations_required - 1, "WITHSCORES")
+  if target[2] then
+    retry_after = math.max(1, math.ceil((tonumber(target[2]) + window_ms - now_ms) / 1000))
   else
     retry_after = 1
   end

@@ -113,12 +113,20 @@ enum CoverageRecoveryReason {
 enum CoverageRecoveryStatus {
   PENDING
   VERIFIED
+  UNRESOLVED
 }
 
 enum CoverageVerificationMethod {
   KNOWN_TAIL
   CUTOFF
   EXHAUSTED
+}
+
+enum CoverageRecoveryUnresolvedReason {
+  PUBLIC_OFFSET_CAP
+  UNSTABLE_PAGINATION
+  NON_PARTITIONABLE_RANGE
+  SOURCE_EXHAUSTED_BEFORE_BOUNDARY
 }
 
 enum TelegramNotificationStatus {
@@ -176,6 +184,11 @@ model Filter {
   id              String   @id @default(cuid())
   name            String
   enabled         Boolean  @default(true)
+  categoryKey     String   @default("vehicle.car")
+  categorySchemaVersion Int @default(1)
+  categoryCriteria Json?
+  unknownPolicy   String   @default("MAX_COVERAGE")
+  shadowMode      Boolean  @default(false)
   sources         ListingSource[]
   autoRiaCategoryId Int?
   autoRiaMarkId   Int?
@@ -276,6 +289,9 @@ model Listing {
   id               String        @id @default(cuid())
   source           ListingSource
   externalId       String
+  categoryKey      String        @default("vehicle.car")
+  categorySchemaVersion Int      @default(1)
+  categoryAttributes Json?
   url              String
   canonicalUrl     String        @unique
   title            String?
@@ -319,6 +335,8 @@ model Listing {
   discoveryLane    CollectorLane @default(REALTIME)
   rawData          Json?
   status           ListingStatus @default(NEW)
+  notificationMode String @default("LIVE")
+  provisionalReasons String[] @default([])
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
@@ -331,6 +349,7 @@ model Listing {
   @@index([firstSeenAt])
   @@index([publishedAt])
   @@index([source])
+  @@index([categoryKey, firstSeenAt])
   @@index([status])
   @@index([sellerPhone])
   @@index([vin])
@@ -342,6 +361,9 @@ model SourceSeenListing {
   id                  String              @id @default(cuid())
   source              ListingSource
   externalId          String
+  categoryKey         String              @default("vehicle.car")
+  categorySchemaVersion Int               @default(1)
+  categoryAttributes  Json?
   url                 String
   canonicalUrl        String?
   title               String?
@@ -361,16 +383,21 @@ model SourceSeenListing {
   decision             ObservationDecision @default(PENDING)
   matchedFilterIds     String[]            @default([])
   rejectionReasons    String[]            @default([])
+  evaluationNotes     String[]            @default([])
   filterRevision       String?
   normalizerVersion    Int                 @default(1)
   lastEvaluatedAt      DateTime?
+  filterCompletedAt    DateTime?
   dispatchAttemptedAt  DateTime?
+  telegramRequestedAt  DateTime?
   notifiedAt           DateTime?
   requestStartedAt     DateTime?
   firstByteAt          DateTime?
   hotCandidateAt       DateTime?
   journalPersistedAt   DateTime?            @default(now())
   telegramAcceptedAt   DateTime?
+  enrichmentStartedAt  DateTime?
+  enrichmentCompletedAt DateTime?
   listingId            String?
   evaluationCount      Int                 @default(0)
   firstSeenAt          DateTime             @default(now())
@@ -385,6 +412,7 @@ model SourceSeenListing {
 
   @@unique([source, externalId])
   @@index([source, firstSeenAt])
+  @@index([categoryKey, firstSeenAt])
   @@index([source, firstObservedChannel, firstSeenAt])
   @@index([source, publishedAt])
   @@index([source, journalPersistedAt])
@@ -399,6 +427,11 @@ model SourceSearchState {
   id                     String        @id @default(cuid())
   source                 ListingSource
   fingerprint            String
+  categoryKey           String        @default("vehicle.car")
+  categorySchemaVersion Int           @default(1)
+  sourceCategoryId      Int?
+  sourceCategoryPath    String?
+  plannerVersion        Int           @default(1)
   filterIds              String[]      @default([])
   initialSyncCompletedAt DateTime?
   lastCursor             String?
@@ -424,6 +457,10 @@ model SourceSearchState {
   coverageRecoveryCutoffAt DateTime?
   knownIdsResetAt        DateTime?
   query                  Json?
+  parserHealth           String       @default("UNKNOWN")
+  parserHealthDetails    Json?
+  lastParserHealthyAt    DateTime?
+  shardMetrics           Json?
   createdAt              DateTime      @default(now())
   updatedAt              DateTime      @updatedAt
 
@@ -431,6 +468,7 @@ model SourceSearchState {
 
   @@unique([source, fingerprint])
   @@index([source, nextCheckAt])
+  @@index([source, categoryKey, nextCheckAt])
   @@index([source, latestSeenPublishedAt])
   @@map("source_search_states")
 }
@@ -450,6 +488,13 @@ model CoverageRecoveryWindow {
   verifiedAt            DateTime?
   verifiedRunId         String?
   verificationMethod    CoverageVerificationMethod?
+  unresolvedReason      CoverageRecoveryUnresolvedReason?
+  unresolvedAt          DateTime?
+  attemptGeneration     String?
+  acknowledgedAt        DateTime?
+  acknowledgedBy        String?
+  acknowledgementNote  String?
+  attemptCount          Int                        @default(0)
   oldestObservedAt      DateTime?
   pageCount             Int                        @default(0)
   requestCount          Int                        @default(0)
@@ -600,6 +645,8 @@ model MarketPriceEstimate {
 model CollectorRun {
   id           String             @id @default(cuid())
   source       ListingSource
+  categoryKey String             @default("vehicle.car")
+  searchFingerprint String?
   status       CollectorRunStatus @default(RUNNING)
   lane         CollectorLane      @default(REALTIME)
   trigger      CollectorRunTrigger @default(SCHEDULED)
@@ -621,6 +668,7 @@ model CollectorRun {
   createdAt    DateTime           @default(now())
 
   @@index([source])
+  @@index([source, categoryKey, startedAt])
   @@index([lane, startedAt])
   @@index([source, lane, trigger, startedAt])
   @@index([startedAt])
