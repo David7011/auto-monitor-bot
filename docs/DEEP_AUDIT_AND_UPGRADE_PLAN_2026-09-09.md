@@ -132,6 +132,8 @@ Windows quality job теперь устанавливает только зак�
 
 Следующий clean-run обнаружил ещё два локально скрытых bootstrap-дефекта: Windows `docs:check` зависел от вида перевода строк checkout, а Linux build jobs начинали компиляцию до генерации Prisma client. Генератор документации теперь сохраняет native LF/CRLF, а dashboard/CodeQL jobs явно выполняют `db:generate` перед `build:deploy`; CI-policy контролирует наличие обоих clean-build шагов.
 
+После исправления bootstrap dashboard job дошёл до seed и доказал ещё одну скрытую зависимость: пакет `@amb/db` вызывал `tsx`, но не объявлял его напрямую, поэтому clean pnpm workspace не создавал бинарный link. В пакет добавлен уже используемый и закреплённый в lockfile `tsx 4.23.1`; версия других зависимостей не менялась.
+
 ### P1-4. Резервные копии имеют общую точку отказа с production
 
 Backup шифруется с authenticated AES-256-GCM, проверяется через `pg_restore --list`, хранится 14 дней, а отдельная задача выполняет restore drill. Это сильная реализация. Но `BACKUP_MIRROR_PATH` пуст: production БД и все автоматические копии находятся на одном SSD. Поломка/кража ноутбука или шифрование диска уничтожит обе стороны. CISA рекомендует offline/off-device encrypted backups и регулярные проверки восстановления.[^3]
