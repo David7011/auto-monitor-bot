@@ -130,6 +130,8 @@ Windows quality job теперь устанавливает только зак�
 
 Первый GitHub-run выявил скрытый дефект: `actions/checkout` содержал валидный 40-символьный SHA, принадлежавший другому Action, поэтому все четыре job завершались до checkout. Pin исправлен на официальный immutable commit `actions/checkout` v4.2.2; локальная policy теперь проверяет не только форму SHA, но и точное соответствие каждого Action заранее рассмотренному репозиторию и revision.[^14]
 
+Следующий clean-run обнаружил ещё два локально скрытых bootstrap-дефекта: Windows `docs:check` зависел от вида перевода строк checkout, а Linux build jobs начинали компиляцию до генерации Prisma client. Генератор документации теперь сохраняет native LF/CRLF, а dashboard/CodeQL jobs явно выполняют `db:generate` перед `build:deploy`; CI-policy контролирует наличие обоих clean-build шагов.
+
 ### P1-4. Резервные копии имеют общую точку отказа с production
 
 Backup шифруется с authenticated AES-256-GCM, проверяется через `pg_restore --list`, хранится 14 дней, а отдельная задача выполняет restore drill. Это сильная реализация. Но `BACKUP_MIRROR_PATH` пуст: production БД и все автоматические копии находятся на одном SSD. Поломка/кража ноутбука или шифрование диска уничтожит обе стороны. CISA рекомендует offline/off-device encrypted backups и регулярные проверки восстановления.[^3]

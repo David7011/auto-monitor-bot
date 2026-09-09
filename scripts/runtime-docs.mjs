@@ -185,7 +185,9 @@ function replaceGeneratedBlock(readme, generated) {
   const start = readme.indexOf(startMarker);
   const end = readme.indexOf(endMarker);
   if (start < 0 || end < start) throw new Error("README runtime-config markers are missing or invalid");
-  return `${readme.slice(0, start)}${startMarker}\n${generated}\n${endMarker}${readme.slice(end + endMarker.length)}`;
+  const newline = readme.includes("\r\n") ? "\r\n" : "\n";
+  const nativeGenerated = generated.replaceAll("\n", newline);
+  return `${readme.slice(0, start)}${startMarker}${newline}${nativeGenerated}${newline}${endMarker}${readme.slice(end + endMarker.length)}`;
 }
 
 const exampleText = await readFile(examplePath, "utf8");

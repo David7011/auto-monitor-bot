@@ -13,6 +13,11 @@ assert.match(workflow, /node-version:\s*24\.18\.0/g);
 assert.equal((workflow.match(/node-version:\s*24\.18\.0/g) ?? []).length, 4);
 assert.doesNotMatch(workflow, /version:\s*10\.0\.0/);
 assert.match(workflow, /run:\s*pnpm check:ci/);
+assert.equal(
+  (workflow.match(/run:\s*pnpm db:generate/g) ?? []).length,
+  2,
+  "Every clean Linux build job must generate the Prisma client before build:deploy",
+);
 assert.match(workflow, /image:\s*postgres:18\.6(?:\s|$)/m);
 assert.match(workflow, /image:\s*postgres:18\.6-alpine(?:\s|$)/m);
 assert.match(workflow, /image:\s*redis:8\.8\.0-alpine(?:\s|$)/m);
