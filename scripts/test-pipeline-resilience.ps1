@@ -66,6 +66,12 @@ $PgBin = Split-Path -Parent $PgCtl
 $InitDb = Resolve-Executable "initdb" @((Join-Path $PgBin "initdb.exe"))
 $CreateDb = Resolve-Executable "createdb" @((Join-Path $PgBin "createdb.exe"))
 $Psql = Resolve-Executable "psql" @((Join-Path $PgBin "psql.exe"))
+$ProjectRedis = $null
+$ProjectRedisRoot = Join-Path $ProjectRoot ".runtime\redis-modern"
+if (Test-Path -LiteralPath $ProjectRedisRoot) {
+  $ProjectRedis = Get-ChildItem -LiteralPath $ProjectRedisRoot -Recurse -Filter "redis-server.exe" -File -ErrorAction SilentlyContinue |
+    Sort-Object FullName | Select-Object -ExpandProperty FullName -First 1
+}
 $WingetRedis = $null
 if ($env:LOCALAPPDATA) {
   $WingetRoot = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
@@ -75,7 +81,7 @@ if ($env:LOCALAPPDATA) {
   }
 }
 $RedisServer = Resolve-Executable "redis-server" @(
-  (Join-Path $ProjectRoot ".runtime\redis-modern\redis-server.exe"),
+  $ProjectRedis,
   $WingetRedis,
   "C:\Program Files\Redis\redis-server.exe",
   "D:\Redis\redis-server.exe"

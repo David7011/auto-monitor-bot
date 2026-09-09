@@ -122,7 +122,20 @@ jobs:
       - run: pnpm db:migrate:deploy
       - run: pnpm db:seed
       - run: pnpm auth:seed
-      - run: pnpm exec playwright install --with-deps chromium
+      - name: Install Playwright Chromium with bounded retry
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm exec playwright install --with-deps chromium; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            echo "Playwright dependency install failed on attempt $attempt; refreshing APT metadata"
+            sudo apt-get clean
+            sudo apt-get update -o Acquire::Retries=3 || true
+          done
       - name: Start API and dashboard
         shell: bash
         run: |
