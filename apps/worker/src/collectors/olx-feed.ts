@@ -31,6 +31,8 @@ type OlxFeedMetadata = {
   observationTarget: string;
   requestStartedAt?: Date;
   firstByteAt?: Date;
+  bodyReceivedAt?: Date;
+  parsedAt?: Date;
   cacheAgeSeconds?: number;
   coordinatorWaitMs?: number;
   coordinatorPostFinishQuietMs?: number;
@@ -163,6 +165,8 @@ export async function fetchOlxFeed(
       observationTarget,
       requestStartedAt: apiResult.requestStartedAt ?? htmlResult.requestStartedAt,
       firstByteAt: apiResult.firstByteAt ?? htmlResult.firstByteAt,
+      bodyReceivedAt: apiResult.bodyReceivedAt ?? htmlResult.bodyReceivedAt,
+      parsedAt: apiResult.parsedAt ?? htmlResult.parsedAt,
       coordinatorWaitMs: apiResult.coordinatorWaitMs ?? htmlResult.coordinatorWaitMs,
       coordinatorPostFinishQuietMs:
         apiResult.coordinatorPostFinishQuietMs ?? htmlResult.coordinatorPostFinishQuietMs,
@@ -214,6 +218,8 @@ async function requestOlxApiFeed(
     observationTarget,
     requestStartedAt: response.requestStartedAt,
     firstByteAt: response.firstByteAt,
+    bodyReceivedAt: response.bodyReceivedAt,
+    parsedAt: response.parsedAt,
     cacheAgeSeconds: response.cacheAgeSeconds,
     coordinatorWaitMs: response.coordinatorWaitMs,
     coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
@@ -308,6 +314,7 @@ async function requestOlxHtmlFeed(
       observationTarget,
       requestStartedAt: response.requestStartedAt,
       firstByteAt: response.firstByteAt,
+      bodyReceivedAt: response.bodyReceivedAt,
       cacheAgeSeconds: response.cacheAgeSeconds,
       coordinatorWaitMs: response.coordinatorWaitMs,
       coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
@@ -330,6 +337,7 @@ async function requestOlxHtmlFeed(
       ads.set(String(card.id), card);
     }
     const parserHealth = assessOlxParserHealth(response.body, [...ads.values()]);
+    metadata.parsedAt = new Date();
     if (parserHealth.status === "DEGRADED") {
       return { error: new Error(`PARSER_DEGRADED: ${parserHealth.reason ?? "semantic structure mismatch"}`), ...metadata };
     }

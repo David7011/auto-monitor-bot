@@ -5,7 +5,7 @@ import {
   type NormalizedListing,
 } from "@amb/shared";
 import { matchFiltersDetailed } from "../modules/filter-engine.js";
-import { checkDuplicate } from "../modules/duplicate-guard.js";
+import { findStrongDuplicate } from "../modules/duplicate-guard.js";
 import { enqueue } from "../lib/queues.js";
 import { log } from "../lib/log.js";
 import { env } from "../env.js";
@@ -20,8 +20,9 @@ import { dispatchFirstNotification } from "../modules/first-notification-dispatc
 import {
   buildFilterSetRevision,
   markObservationOutcome,
-  recordPendingObservations,
+  recordPendingObservation,
   recordObservationEvaluation,
+  type PendingObservationState,
 } from "../modules/observation-journal.js";
 
 const FILTER_CACHE_MS = 2_000;
@@ -55,16 +56,17 @@ export type ListingProcessingResult = {
  */
 export async function processListingDetected(job: ListingDetectedJob): Promise<ListingProcessingResult> {
   const discoveryLane = job.discoveryLane ?? "REALTIME";
+  let persistedState: PendingObservationState | undefined;
   // PostgreSQL is the durable recovery boundary. Persist before taking the
   // short-lived Redis claim so a worker crash can never hide an unjournaled
   // advert until the claim TTL expires.
   if (!job.observationPersisted) {
-    await recordPendingObservations([job.listing], discoveryLane);
+    persistedState = await recordPendingObservation(job.listing, discoveryLane);
   }
 
   if (job.bypassHotClaim) {
     try {
-      return await processClaimedListing(job);
+      return await processClaimedListing(job, persistedState);
     } catch (error) {
       await markObservationOutcome(job.listing.source, job.listing.externalId, { decision: "FAILED" }).catch(() => undefined);
       throw error;
@@ -77,7 +79,7 @@ export async function processListingDetected(job: ListingDetectedJob): Promise<L
   }
 
   try {
-    const result = await processClaimedListing(job);
+    const result = await processClaimedListing(job, persistedState);
     if (result.outcome === "REJECTED") await releaseHotListingClaim(claim);
     return result;
   } catch (error) {
@@ -87,13 +89,16 @@ export async function processListingDetected(job: ListingDetectedJob): Promise<L
   }
 }
 
-async function processClaimedListing(job: ListingDetectedJob): Promise<ListingProcessingResult> {
+async function processClaimedListing(
+  job: ListingDetectedJob,
+  persistedState?: PendingObservationState,
+): Promise<ListingProcessingResult> {
   const { listing, filterIds = [], forceSourceMatch = false } = job;
   const discoveryLane = job.discoveryLane ?? "REALTIME";
 
   // Retention removes the heavy listing row but intentionally keeps a compact
   // NOTIFIED observation. Never recreate or re-send such an expired advert.
-  const retainedDedupe = await prisma.sourceSeenListing.findUnique({
+  const retainedDedupe = persistedState ?? await prisma.sourceSeenListing.findUnique({
     where: { source_externalId: { source: listing.source, externalId: listing.externalId } },
     select: { decision: true, listingId: true, matchedFilterIds: true },
   });
@@ -136,8 +141,8 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
   }
 
   // 2. Duplicate guard — never send the same listing twice
-  const dup = await checkDuplicate(listing);
-  if (dup.type === "STRONG") {
+  const dup = await findStrongDuplicate(listing);
+  if (dup) {
     if (dup.matchedListingId) {
       const existingListing = await prisma.listing.update({
         where: { id: dup.matchedListingId },
@@ -203,9 +208,11 @@ async function processClaimedListing(job: ListingDetectedJob): Promise<ListingPr
     refreshedAt: listing.refreshedAt ?? null,
     timestampConfidence: listing.timestampConfidence ?? "UNKNOWN",
     skipReason: listing.skipReason ?? null,
-    possibleDuplicateOfId: dup.type === "POSSIBLE" ? dup.matchedListingId ?? null : null,
-    duplicateConfidence: dup.type === "POSSIBLE" ? dup.confidence : null,
-    duplicateReasons: dup.reasons,
+    // Heuristic possible-duplicate annotation cannot suppress delivery. Run it
+    // during enrichment so it never delays the first Telegram notification.
+    possibleDuplicateOfId: null,
+    duplicateConfidence: null,
+    duplicateReasons: [],
     firstSeenAt: new Date(listing.firstSeenAt),
     discoveryLane,
     rawData: listing.raw as object,

@@ -393,6 +393,8 @@ model SourceSeenListing {
   notifiedAt           DateTime?
   requestStartedAt     DateTime?
   firstByteAt          DateTime?
+  bodyReceivedAt       DateTime?
+  parsedAt             DateTime?
   hotCandidateAt       DateTime?
   journalPersistedAt   DateTime?            @default(now())
   telegramAcceptedAt   DateTime?

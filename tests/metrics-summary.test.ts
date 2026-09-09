@@ -16,6 +16,7 @@ describe("metrics summary", () => {
       max: null,
       p50: null,
       p95: null,
+      p99: null,
     });
   });
 
@@ -27,6 +28,7 @@ describe("metrics summary", () => {
       max: 100,
       p50: 30,
       p95: 100,
+      p99: 100,
     });
   });
 
@@ -53,8 +55,13 @@ describe("metrics summary", () => {
         timestampConfidence: "HIGH",
         requestStartedAt: new Date("2026-07-22T10:00:00.100Z"),
         firstByteAt: new Date("2026-07-22T10:00:00.300Z"),
+        bodyReceivedAt: new Date("2026-07-22T10:00:00.320Z"),
+        parsedAt: new Date("2026-07-22T10:00:00.340Z"),
         hotCandidateAt: new Date("2026-07-22T10:00:00.350Z"),
         journalPersistedAt: new Date("2026-07-22T10:00:00.400Z"),
+        filterCompletedAt: new Date("2026-07-22T10:00:00.500Z"),
+        dispatchAttemptedAt: new Date("2026-07-22T10:00:00.500Z"),
+        telegramRequestedAt: new Date("2026-07-22T10:00:00.650Z"),
         telegramAcceptedAt: new Date("2026-07-22T10:00:00.900Z"),
       },
       {
@@ -84,8 +91,15 @@ describe("metrics summary", () => {
     expect(summary.firstSeenToTelegramMs).toMatchObject({ count: 3, p50: 3_000, p95: 4_000 });
     expect(summary.publicationTimestampToTelegramMs).toMatchObject({ count: 1, p95: 5_000 });
     expect(summary.requestStartToFirstByteMs).toMatchObject({ count: 1, p95: 200 });
+    expect(summary.firstByteToBodyReceivedMs).toMatchObject({ count: 1, p95: 20 });
+    expect(summary.bodyReceivedToParsedMs).toMatchObject({ count: 1, p95: 20 });
+    expect(summary.parsedToHotCandidateMs).toMatchObject({ count: 1, p95: 10 });
     expect(summary.firstByteToHotCandidateMs).toMatchObject({ count: 1, p95: 50 });
     expect(summary.hotCandidateToDurableJournalMs).toMatchObject({ count: 1, p95: 50 });
+    expect(summary.durableJournalToFilterCompletedMs).toMatchObject({ count: 1, p95: 100 });
+    expect(summary.filterCompletedToTelegramRequestMs).toMatchObject({ count: 1, p95: 150 });
+    expect(summary.dispatchAttemptedToTelegramRequestMs).toMatchObject({ count: 1, p95: 150 });
+    expect(summary.telegramRequestToTelegramAcceptanceMs).toMatchObject({ count: 1, p95: 250 });
     expect(summary.durableJournalToTelegramAcceptanceMs).toMatchObject({ count: 1, p95: 500 });
     expect(summary.requestStartToTelegramAcceptanceMs).toMatchObject({ count: 1, p95: 800 });
   });

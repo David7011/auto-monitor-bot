@@ -7,6 +7,7 @@
     "maintenance:retention": "tsx src/maintenance/retention-cli.ts",
     "maintenance:listings": "tsx src/maintenance/listing-retention-cli.ts",
     "metrics:telegram:24h": "tsx src/maintenance/telegram-latency-cli.ts",
+    "metrics:hot-path": "tsx src/maintenance/hot-path-audit-cli.ts",
     "test:olx-parity": "tsx src/maintenance/olx-parity-cli.ts",
     "test:telegram-global-gate": "tsx src/maintenance/telegram-rate-gate-acceptance.ts",
     "dev": "tsx watch src/index.ts",

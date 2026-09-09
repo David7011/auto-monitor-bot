@@ -213,8 +213,15 @@ export type MetricsResponse<DateValue = string> = {
   firstSeenToTelegramMs: MetricSummary;
   publicationTimestampToTelegramMs: MetricSummary;
   requestStartToFirstByteMs: MetricSummary;
+  firstByteToBodyReceivedMs: MetricSummary;
+  bodyReceivedToParsedMs: MetricSummary;
+  parsedToHotCandidateMs: MetricSummary;
   firstByteToHotCandidateMs: MetricSummary;
   hotCandidateToDurableJournalMs: MetricSummary;
+  durableJournalToFilterCompletedMs: MetricSummary;
+  filterCompletedToTelegramRequestMs: MetricSummary;
+  dispatchAttemptedToTelegramRequestMs: MetricSummary;
+  telegramRequestToTelegramAcceptanceMs: MetricSummary;
   durableJournalToTelegramAcceptanceMs: MetricSummary;
   requestStartToTelegramAcceptanceMs: MetricSummary;
   /** @deprecated Compatibility alias for publicationTimestampToFirstSeenMs. */
@@ -230,8 +237,15 @@ export type MetricsResponse<DateValue = string> = {
     firstSeenToTelegramMs: MetricSummary;
     publicationTimestampToTelegramMs: MetricSummary;
     requestStartToFirstByteMs: MetricSummary;
+    firstByteToBodyReceivedMs: MetricSummary;
+    bodyReceivedToParsedMs: MetricSummary;
+    parsedToHotCandidateMs: MetricSummary;
     firstByteToHotCandidateMs: MetricSummary;
     hotCandidateToDurableJournalMs: MetricSummary;
+    durableJournalToFilterCompletedMs: MetricSummary;
+    filterCompletedToTelegramRequestMs: MetricSummary;
+    dispatchAttemptedToTelegramRequestMs: MetricSummary;
+    telegramRequestToTelegramAcceptanceMs: MetricSummary;
     durableJournalToTelegramAcceptanceMs: MetricSummary;
     requestStartToTelegramAcceptanceMs: MetricSummary;
     /** @deprecated Compatibility alias for publicationTimestampToFirstSeenMs. */
@@ -244,8 +258,15 @@ export type MetricsResponse<DateValue = string> = {
     firstSeenToTelegramMs: "FIRST_PERSISTED_OBSERVATION_TO_CONFIRMED_TELEGRAM_SEND";
     publicationTimestampToTelegramMs: "SOURCE_REPORTED_PUBLICATION_TO_CONFIRMED_TELEGRAM_SEND";
     requestStartToFirstByteMs: "SOURCE_HTTP_REQUEST_START_TO_RESPONSE_HEADERS";
+    firstByteToBodyReceivedMs: "SOURCE_RESPONSE_HEADERS_TO_BODY_RECEIVED";
+    bodyReceivedToParsedMs: "SOURCE_BODY_RECEIVED_TO_PARSED";
+    parsedToHotCandidateMs: "SOURCE_PARSED_TO_HOT_CANDIDATE";
     firstByteToHotCandidateMs: "SOURCE_RESPONSE_HEADERS_TO_HOT_CANDIDATE";
     hotCandidateToDurableJournalMs: "HOT_CANDIDATE_TO_DURABLE_JOURNAL";
+    durableJournalToFilterCompletedMs: "DURABLE_JOURNAL_TO_FILTER_COMPLETED";
+    filterCompletedToTelegramRequestMs: "FILTER_COMPLETED_TO_TELEGRAM_REQUEST";
+    dispatchAttemptedToTelegramRequestMs: "DISPATCH_ATTEMPTED_TO_TELEGRAM_REQUEST";
+    telegramRequestToTelegramAcceptanceMs: "TELEGRAM_REQUEST_TO_TELEGRAM_ACCEPTANCE";
     durableJournalToTelegramAcceptanceMs: "DURABLE_JOURNAL_TO_TELEGRAM_ACCEPTANCE";
     requestStartToTelegramAcceptanceMs: "SOURCE_HTTP_REQUEST_START_TO_TELEGRAM_ACCEPTANCE";
   };

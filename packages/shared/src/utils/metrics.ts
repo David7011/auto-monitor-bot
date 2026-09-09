@@ -5,6 +5,7 @@ export type MetricSummary = {
   max: number | null;
   p50: number | null;
   p95: number | null;
+  p99: number | null;
 };
 
 export const TELEGRAM_LATENCY_TARGET_MS = 3_000;
@@ -18,8 +19,13 @@ export type JournalLatencySample = {
   notifiedAt: Date | null;
   requestStartedAt?: Date | null;
   firstByteAt?: Date | null;
+  bodyReceivedAt?: Date | null;
+  parsedAt?: Date | null;
   hotCandidateAt?: Date | null;
   journalPersistedAt?: Date | null;
+  filterCompletedAt?: Date | null;
+  dispatchAttemptedAt?: Date | null;
+  telegramRequestedAt?: Date | null;
   telegramAcceptedAt?: Date | null;
   timestampConfidence: string;
 };
@@ -32,8 +38,15 @@ export type JournalLatencySummary = {
   /** Source-reported publication timestamp to a confirmed Telegram send. */
   publicationTimestampToTelegramMs: MetricSummary;
   requestStartToFirstByteMs: MetricSummary;
+  firstByteToBodyReceivedMs: MetricSummary;
+  bodyReceivedToParsedMs: MetricSummary;
+  parsedToHotCandidateMs: MetricSummary;
   firstByteToHotCandidateMs: MetricSummary;
   hotCandidateToDurableJournalMs: MetricSummary;
+  durableJournalToFilterCompletedMs: MetricSummary;
+  filterCompletedToTelegramRequestMs: MetricSummary;
+  dispatchAttemptedToTelegramRequestMs: MetricSummary;
+  telegramRequestToTelegramAcceptanceMs: MetricSummary;
   durableJournalToTelegramAcceptanceMs: MetricSummary;
   requestStartToTelegramAcceptanceMs: MetricSummary;
 };
@@ -50,7 +63,7 @@ export function groupCount<T extends Record<string, unknown>>(
 
 export function summarizeMetric(values: number[]): MetricSummary {
   if (values.length === 0) {
-    return { count: 0, avg: null, min: null, max: null, p50: null, p95: null };
+    return { count: 0, avg: null, min: null, max: null, p50: null, p95: null, p99: null };
   }
 
   const sorted = [...values].sort((a, b) => a - b);
@@ -62,6 +75,7 @@ export function summarizeMetric(values: number[]): MetricSummary {
     max: sorted[sorted.length - 1] ?? null,
     p50: percentile(sorted, 0.5),
     p95: percentile(sorted, 0.95),
+    p99: percentile(sorted, 0.99),
   };
 }
 
@@ -75,15 +89,29 @@ export function summarizeJournalLatencies(samples: JournalLatencySample[]): Jour
   const firstSeenToTelegram: number[] = [];
   const publicationTimestampToTelegram: number[] = [];
   const requestStartToFirstByte: number[] = [];
+  const firstByteToBodyReceived: number[] = [];
+  const bodyReceivedToParsed: number[] = [];
+  const parsedToHotCandidate: number[] = [];
   const firstByteToHotCandidate: number[] = [];
   const hotCandidateToDurableJournal: number[] = [];
+  const durableJournalToFilterCompleted: number[] = [];
+  const filterCompletedToTelegramRequest: number[] = [];
+  const dispatchAttemptedToTelegramRequest: number[] = [];
+  const telegramRequestToTelegramAcceptance: number[] = [];
   const durableJournalToTelegramAcceptance: number[] = [];
   const requestStartToTelegramAcceptance: number[] = [];
 
   for (const sample of samples) {
     pushDuration(requestStartToFirstByte, sample.requestStartedAt, sample.firstByteAt);
+    pushDuration(firstByteToBodyReceived, sample.firstByteAt, sample.bodyReceivedAt);
+    pushDuration(bodyReceivedToParsed, sample.bodyReceivedAt, sample.parsedAt);
+    pushDuration(parsedToHotCandidate, sample.parsedAt, sample.hotCandidateAt);
     pushDuration(firstByteToHotCandidate, sample.firstByteAt, sample.hotCandidateAt);
     pushDuration(hotCandidateToDurableJournal, sample.hotCandidateAt, sample.journalPersistedAt);
+    pushDuration(durableJournalToFilterCompleted, sample.journalPersistedAt, sample.filterCompletedAt);
+    pushDuration(filterCompletedToTelegramRequest, sample.filterCompletedAt, sample.telegramRequestedAt);
+    pushDuration(dispatchAttemptedToTelegramRequest, sample.dispatchAttemptedAt, sample.telegramRequestedAt);
+    pushDuration(telegramRequestToTelegramAcceptance, sample.telegramRequestedAt, sample.telegramAcceptedAt);
     pushDuration(durableJournalToTelegramAcceptance, sample.journalPersistedAt, sample.telegramAcceptedAt);
     pushDuration(requestStartToTelegramAcceptance, sample.requestStartedAt, sample.telegramAcceptedAt);
     const firstSeenToNotification = durationMs(sample.firstSeenAt, sample.notifiedAt);
@@ -103,8 +131,15 @@ export function summarizeJournalLatencies(samples: JournalLatencySample[]): Jour
     firstSeenToTelegramMs: summarizeMetric(firstSeenToTelegram),
     publicationTimestampToTelegramMs: summarizeMetric(publicationTimestampToTelegram),
     requestStartToFirstByteMs: summarizeMetric(requestStartToFirstByte),
+    firstByteToBodyReceivedMs: summarizeMetric(firstByteToBodyReceived),
+    bodyReceivedToParsedMs: summarizeMetric(bodyReceivedToParsed),
+    parsedToHotCandidateMs: summarizeMetric(parsedToHotCandidate),
     firstByteToHotCandidateMs: summarizeMetric(firstByteToHotCandidate),
     hotCandidateToDurableJournalMs: summarizeMetric(hotCandidateToDurableJournal),
+    durableJournalToFilterCompletedMs: summarizeMetric(durableJournalToFilterCompleted),
+    filterCompletedToTelegramRequestMs: summarizeMetric(filterCompletedToTelegramRequest),
+    dispatchAttemptedToTelegramRequestMs: summarizeMetric(dispatchAttemptedToTelegramRequest),
+    telegramRequestToTelegramAcceptanceMs: summarizeMetric(telegramRequestToTelegramAcceptance),
     durableJournalToTelegramAcceptanceMs: summarizeMetric(durableJournalToTelegramAcceptance),
     requestStartToTelegramAcceptanceMs: summarizeMetric(requestStartToTelegramAcceptance),
   };

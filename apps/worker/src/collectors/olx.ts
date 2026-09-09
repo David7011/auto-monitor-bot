@@ -683,6 +683,8 @@ export class OlxCollector implements SourceCollector {
           observationTarget: feed.observationTarget,
           requestStartedAt: feed.requestStartedAt,
           firstByteAt: feed.firstByteAt,
+          bodyReceivedAt: feed.bodyReceivedAt,
+          parsedAt: feed.parsedAt,
         });
         listings.push(...selection.listings);
         for (const externalId of selection.scannedExternalIds) scannedExternalIds.add(externalId);
@@ -900,6 +902,8 @@ function selectHotOlxCandidates(
       observationTarget: feed.observationTarget,
       requestStartedAt: feed.requestStartedAt,
       firstByteAt: feed.firstByteAt,
+      bodyReceivedAt: feed.bodyReceivedAt,
+      parsedAt: feed.parsedAt,
     });
     candidates.push(...selection.listings);
     if (candidates.length >= options.maxCandidates) break;
@@ -1021,6 +1025,8 @@ export function selectOlxCandidates(
     observationTarget?: string;
     requestStartedAt?: Date;
     firstByteAt?: Date;
+    bodyReceivedAt?: Date;
+    parsedAt?: Date;
     hotCandidateAt?: Date;
     categoryKey?: import("@amb/shared").MarketplaceCategoryKey;
   },
@@ -1097,6 +1103,8 @@ export function selectOlxCandidates(
     listing.observationTarget = options.observationTarget;
     listing.requestStartedAt = options.requestStartedAt;
     listing.firstByteAt = options.firstByteAt;
+    listing.bodyReceivedAt = options.bodyReceivedAt;
+    listing.parsedAt = options.parsedAt;
     listing.hotCandidateAt = options.hotCandidateAt;
     if (beforeCutoff) {
       scannedExternalIds.push(externalId);

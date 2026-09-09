@@ -13,6 +13,7 @@ export type CollectorDurationAggregateRow = {
   maximumMs: number | null;
   p50Ms: number | null;
   p95Ms: number | null;
+  p99Ms: number | null;
 };
 
 export type CollectorDurationMetric = {
@@ -50,9 +51,10 @@ function metricSummary(row: CollectorDurationAggregateRow): MetricSummary {
     max: row.maximumMs,
     p50: row.p50Ms,
     p95: row.p95Ms,
+    p99: row.p99Ms,
   };
 }
 
 function emptyMetricSummary(): MetricSummary {
-  return { count: 0, avg: null, min: null, max: null, p50: null, p95: null };
+  return { count: 0, avg: null, min: null, max: null, p50: null, p95: null, p99: null };
 }

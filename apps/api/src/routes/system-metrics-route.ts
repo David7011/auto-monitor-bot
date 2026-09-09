@@ -59,6 +59,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
           ROUND(MAX(duration_ms))::integer AS "maximumMs",
           ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY duration_ms))::integer AS "p50Ms",
           ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms))::integer AS "p95Ms"
+          , ROUND(percentile_cont(0.99) WITHIN GROUP (ORDER BY duration_ms))::integer AS "p99Ms"
         FROM durations
         GROUP BY GROUPING SETS (("lane"), ("source", "lane"))
         ORDER BY "lane", "source" NULLS FIRST
@@ -77,8 +78,13 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
           notifiedAt: true,
           requestStartedAt: true,
           firstByteAt: true,
+          bodyReceivedAt: true,
+          parsedAt: true,
           hotCandidateAt: true,
           journalPersistedAt: true,
+          filterCompletedAt: true,
+          dispatchAttemptedAt: true,
+          telegramRequestedAt: true,
           telegramAcceptedAt: true,
           timestampConfidence: true,
         },
@@ -152,6 +158,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         maximumMs: number;
         p50Ms: number;
         p95Ms: number;
+        p99Ms: number;
       }>>(Prisma.sql`
         SELECT
           "categoryKey" AS "categoryKey",
@@ -161,6 +168,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
           ROUND(MAX(EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000))::integer AS "maximumMs",
           ROUND(percentile_cont(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000))::integer AS "p50Ms",
           ROUND(percentile_cont(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000))::integer AS "p95Ms"
+          , ROUND(percentile_cont(0.99) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM ("finishedAt" - "startedAt")) * 1000))::integer AS "p99Ms"
         FROM "collector_runs"
         WHERE "lane" = 'REALTIME'::"CollectorLane"
           AND "finishedAt" IS NOT NULL
@@ -239,6 +247,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
           max: duration.maximumMs,
           p50: duration.p50Ms,
           p95: duration.p95Ms,
+          p99: duration.p99Ms,
         } : summarizeMetric([]),
         durableJournalToTelegramAcceptanceMs: categoryLatency.durableJournalToTelegramAcceptanceMs,
         observations: observations.length,
@@ -286,8 +295,15 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         firstSeenToTelegramMs: "FIRST_PERSISTED_OBSERVATION_TO_CONFIRMED_TELEGRAM_SEND" as const,
         publicationTimestampToTelegramMs: "SOURCE_REPORTED_PUBLICATION_TO_CONFIRMED_TELEGRAM_SEND" as const,
         requestStartToFirstByteMs: "SOURCE_HTTP_REQUEST_START_TO_RESPONSE_HEADERS" as const,
+        firstByteToBodyReceivedMs: "SOURCE_RESPONSE_HEADERS_TO_BODY_RECEIVED" as const,
+        bodyReceivedToParsedMs: "SOURCE_BODY_RECEIVED_TO_PARSED" as const,
+        parsedToHotCandidateMs: "SOURCE_PARSED_TO_HOT_CANDIDATE" as const,
         firstByteToHotCandidateMs: "SOURCE_RESPONSE_HEADERS_TO_HOT_CANDIDATE" as const,
         hotCandidateToDurableJournalMs: "HOT_CANDIDATE_TO_DURABLE_JOURNAL" as const,
+        durableJournalToFilterCompletedMs: "DURABLE_JOURNAL_TO_FILTER_COMPLETED" as const,
+        filterCompletedToTelegramRequestMs: "FILTER_COMPLETED_TO_TELEGRAM_REQUEST" as const,
+        dispatchAttemptedToTelegramRequestMs: "DISPATCH_ATTEMPTED_TO_TELEGRAM_REQUEST" as const,
+        telegramRequestToTelegramAcceptanceMs: "TELEGRAM_REQUEST_TO_TELEGRAM_ACCEPTANCE" as const,
         durableJournalToTelegramAcceptanceMs: "DURABLE_JOURNAL_TO_TELEGRAM_ACCEPTANCE" as const,
         requestStartToTelegramAcceptanceMs: "SOURCE_HTTP_REQUEST_START_TO_TELEGRAM_ACCEPTANCE" as const,
       },

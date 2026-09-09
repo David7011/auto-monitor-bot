@@ -1,0 +1,68 @@
+import { closeDatabase, prisma } from "@amb/db";
+import { summarizeJournalLatencies } from "@amb/shared";
+
+const hoursArgument = process.argv.slice(2).find((value) => /^\d+$/u.test(value));
+const hours = Math.max(1, Math.min(24 * 30, Number(hoursArgument ?? 24)));
+const legacySchema = process.argv.includes("--legacy-schema");
+const until = new Date();
+const since = new Date(until.getTime() - hours * 60 * 60 * 1_000);
+
+try {
+  const common = {
+    where: {
+      source: "OLX",
+      discoveryLane: "REALTIME",
+      firstSeenAt: { gte: since, lte: until },
+    },
+  } as const;
+  const observations = legacySchema
+    ? await prisma.sourceSeenListing.findMany({
+      ...common,
+      select: {
+        source: true,
+        publishedAt: true,
+        firstSeenAt: true,
+        notifiedAt: true,
+        timestampConfidence: true,
+        requestStartedAt: true,
+        firstByteAt: true,
+        hotCandidateAt: true,
+        journalPersistedAt: true,
+        filterCompletedAt: true,
+        dispatchAttemptedAt: true,
+        telegramRequestedAt: true,
+        telegramAcceptedAt: true,
+      },
+    })
+    : await prisma.sourceSeenListing.findMany({
+      ...common,
+      select: {
+      source: true,
+      publishedAt: true,
+      firstSeenAt: true,
+      notifiedAt: true,
+      timestampConfidence: true,
+      requestStartedAt: true,
+      firstByteAt: true,
+      bodyReceivedAt: true,
+      parsedAt: true,
+      hotCandidateAt: true,
+      journalPersistedAt: true,
+      filterCompletedAt: true,
+      dispatchAttemptedAt: true,
+      telegramRequestedAt: true,
+      telegramAcceptedAt: true,
+      },
+    });
+  console.log(JSON.stringify({
+    generatedAt: until,
+    since,
+    source: "OLX",
+    lane: "REALTIME",
+    observations: observations.length,
+    legacySchema,
+    stages: summarizeJournalLatencies(observations),
+  }, null, 2));
+} finally {
+  await closeDatabase();
+}

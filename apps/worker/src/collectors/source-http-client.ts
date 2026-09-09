@@ -41,6 +41,10 @@ export type SourceHttpTextResult = {
   coordinatorPostFinishQuietMs?: number;
   requestStartedAt?: Date;
   firstByteAt?: Date;
+  /** Instant the complete bounded response body has been read and decoded. */
+  bodyReceivedAt?: Date;
+  /** Instant JSON parsing completes; HTML parsers set this at their call site. */
+  parsedAt?: Date;
   cacheAgeSeconds?: number;
   status: number;
   contentType: string;
@@ -209,6 +213,7 @@ export class SourceHttpClient {
 
       const encoding = options.encoding ?? (contentType.toLowerCase().includes("windows-1251") ? "windows-1251" : "utf8");
       const body = new TextDecoder(encoding).decode(buffer);
+      const bodyReceivedAt = new Date();
       const { classification, detector } = classifyResponse(
         response.status,
         contentType,
@@ -221,6 +226,7 @@ export class SourceHttpClient {
         requestId,
         requestStartedAt,
         firstByteAt,
+        bodyReceivedAt,
         status: response.status,
         contentType,
         body,
@@ -259,7 +265,8 @@ export class SourceHttpClient {
     if (!text.body.trim()) return { ...text, classification: "EMPTY_RESULT" };
 
     try {
-      return { ...text, data: JSON.parse(text.body) as T };
+      const data = JSON.parse(text.body) as T;
+      return { ...text, data, parsedAt: new Date() };
     } catch (error) {
       return {
         ...text,

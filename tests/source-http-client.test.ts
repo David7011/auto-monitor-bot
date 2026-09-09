@@ -22,6 +22,8 @@ describe("SourceHttpClient", () => {
     expect(result.requestId).toMatch(/^olx-/);
     expect(result.requestStartedAt).toBeInstanceOf(Date);
     expect(result.firstByteAt).toBeInstanceOf(Date);
+    expect(result.bodyReceivedAt).toBeInstanceOf(Date);
+    expect(result.bodyReceivedAt!.getTime()).toBeGreaterThanOrEqual(result.firstByteAt!.getTime());
     expect(result.firstByteAt!.getTime()).toBeGreaterThanOrEqual(result.requestStartedAt!.getTime());
     expect(result.coordinatorQueuedAt).toBeInstanceOf(Date);
     expect(result.coordinatorStartedAt).toBeInstanceOf(Date);

@@ -2,14 +2,16 @@ import { spawn, spawnSync } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { appendFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { prisma, compactSourceSearchStates } from "@amb/db";
-import { QUEUE_NAMES, olxRecoveryAttemptGeneration, type NormalizedListing } from "@amb/shared";
+import { QUEUE_NAMES, olxRecoveryAttemptGeneration, summarizeMetric, type NormalizedListing } from "@amb/shared";
 import { fetchOlxApiFeed, isAdsResult } from "../../apps/worker/src/collectors/olx-feed.js";
 import { selectOlxCandidates } from "../../apps/worker/src/collectors/olx.js";
 import { closeSourceHttpClient } from "../../apps/worker/src/collectors/source-http-client.js";
 import { closeQueues, getQueue } from "../../apps/worker/src/lib/queues.js";
 import { configureTelegramApiRootForIntegrationTest, sendListingLink, stageListingForFlash, createTelegramFlashBundle, sendTelegramFlashBundle } from "../../apps/worker/src/modules/telegram-service.js";
-import { recordPendingObservations } from "../../apps/worker/src/modules/observation-journal.js";
+import { recordPendingObservation, recordPendingObservations } from "../../apps/worker/src/modules/observation-journal.js";
+import { checkDuplicate, findStrongDuplicate } from "../../apps/worker/src/modules/duplicate-guard.js";
 import {
   buildSourceSearchPlan,
   buildSearchContextFromFilter,
@@ -56,10 +58,15 @@ async function main(): Promise<void> {
   configureTelegramApiRootForIntegrationTest(fakeRoot);
 
   const checks: string[] = [];
+  let dbHotPathBenchmark: Awaited<ReturnType<typeof benchmarkDbHotPath>> | undefined;
   try {
     progress("reset and seed");
     await resetDatabase();
     await seedCatchAllFilter();
+
+    progress("database hot-path benchmark");
+    dbHotPathBenchmark = await benchmarkDbHotPath();
+    checks.push("A/B database hot path: legacy redundant read + possible duplicate versus optimized durable upsert state + strong duplicate only");
 
     progress("category shadow isolation and promotion");
     await assertCategoryShadowIsolation();
@@ -141,6 +148,7 @@ async function main(): Promise<void> {
       expectedIds,
       olxRequests: Object.fromEntries(olxRequests),
       telegramDeliveries: Object.fromEntries(telegramDeliveries),
+      dbHotPathBenchmark,
       checks,
     }, null, 2));
   } finally {
@@ -153,6 +161,50 @@ async function main(): Promise<void> {
     fakeServer.closeAllConnections();
     await within(once(fakeServer, "close").catch(() => undefined), 2_000, undefined);
   }
+}
+
+async function benchmarkDbHotPath(iterations = 40) {
+  const legacyMs: number[] = [];
+  const optimizedMs: number[] = [];
+  for (let index = 0; index < iterations; index += 1) {
+    for (const variant of index % 2 === 0 ? ["legacy", "optimized"] : ["optimized", "legacy"]) {
+      const externalId = `benchmark-${variant}-${index}`;
+      const listing: NormalizedListing = {
+        source: "OLX",
+        externalId,
+        url: `https://example.test/${externalId}`,
+        canonicalUrl: `https://example.test/${externalId}`,
+        title: `Benchmark vehicle ${index}`,
+        year: 2019,
+        priceOriginal: 12_345 + index,
+        priceNormalized: 300 + index,
+        photoUrls: [],
+        firstSeenAt: new Date(),
+        raw: { benchmark: true },
+      };
+      const startedAt = performance.now();
+      if (variant === "legacy") {
+        await recordPendingObservations([listing], "REALTIME");
+        await prisma.sourceSeenListing.findUnique({
+          where: { source_externalId: { source: listing.source, externalId } },
+          select: { decision: true, listingId: true, matchedFilterIds: true },
+        });
+        await checkDuplicate(listing);
+        legacyMs.push(performance.now() - startedAt);
+      } else {
+        await recordPendingObservation(listing, "REALTIME");
+        await findStrongDuplicate(listing);
+        optimizedMs.push(performance.now() - startedAt);
+      }
+    }
+  }
+  return {
+    iterations,
+    legacySqlRoundTrips: 4,
+    optimizedSqlRoundTrips: 2,
+    legacyMs: summarizeMetric(legacyMs),
+    optimizedMs: summarizeMetric(optimizedMs),
+  };
 }
 
 async function assertDurableUnresolvedRecoveryWindow(): Promise<void> {
@@ -381,6 +433,8 @@ async function fetchKnownListing(id: string): Promise<NormalizedListing> {
     observationTarget: feed.observationTarget,
     requestStartedAt: feed.requestStartedAt,
     firstByteAt: feed.firstByteAt,
+    bodyReceivedAt: feed.bodyReceivedAt,
+    parsedAt: feed.parsedAt,
   });
   const listing = selected.listings[0];
   if (!listing) throw new Error(`Fake OLX advert ${id} did not normalize`);
@@ -423,6 +477,8 @@ async function assertStageTimestamps(externalId: string): Promise<void> {
   const row = await pipelineRow(externalId);
   assert(Boolean(row?.requestStartedAt), `${externalId} has no requestStartedAt`);
   assert(Boolean(row?.firstByteAt), `${externalId} has no firstByteAt`);
+  assert(Boolean(row?.bodyReceivedAt), `${externalId} has no bodyReceivedAt`);
+  assert(Boolean(row?.parsedAt), `${externalId} has no parsedAt`);
   assert(Boolean(row?.hotCandidateAt), `${externalId} has no hotCandidateAt`);
   assert(Boolean(row?.journalPersistedAt), `${externalId} has no journalPersistedAt`);
   assert(Boolean(row?.telegramAcceptedAt), `${externalId} has no telegramAcceptedAt`);
@@ -430,6 +486,8 @@ async function assertStageTimestamps(externalId: string): Promise<void> {
   const stages = [
     row!.requestStartedAt!,
     row!.firstByteAt!,
+    row!.bodyReceivedAt!,
+    row!.parsedAt!,
     row!.hotCandidateAt!,
     row!.journalPersistedAt!,
     row!.telegramAcceptedAt!,
@@ -488,6 +546,8 @@ async function pipelineRow(externalId: string) {
     notification_status: string | null;
     request_started_at: Date | null;
     first_byte_at: Date | null;
+    body_received_at: Date | null;
+    parsed_at: Date | null;
     hot_candidate_at: Date | null;
     journal_persisted_at: Date | null;
     telegram_accepted_at: Date | null;
@@ -498,6 +558,8 @@ async function pipelineRow(externalId: string) {
            notification.status::text AS notification_status,
            seen."requestStartedAt" AS request_started_at,
            seen."firstByteAt" AS first_byte_at,
+           seen."bodyReceivedAt" AS body_received_at,
+           seen."parsedAt" AS parsed_at,
            seen."hotCandidateAt" AS hot_candidate_at,
            seen."journalPersistedAt" AS journal_persisted_at,
            seen."telegramAcceptedAt" AS telegram_accepted_at,
@@ -513,6 +575,8 @@ async function pipelineRow(externalId: string) {
     notificationStatus: row.notification_status,
     requestStartedAt: row.request_started_at,
     firstByteAt: row.first_byte_at,
+    bodyReceivedAt: row.body_received_at,
+    parsedAt: row.parsed_at,
     hotCandidateAt: row.hot_candidate_at,
     journalPersistedAt: row.journal_persisted_at,
     telegramAcceptedAt: row.telegram_accepted_at,

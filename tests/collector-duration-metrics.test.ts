@@ -33,6 +33,7 @@ describe("collector duration metrics", () => {
       max: null,
       p50: null,
       p95: null,
+      p99: null,
     });
   });
 });
@@ -52,5 +53,6 @@ function row(
     maximumMs: p95Ms,
     p50Ms: p95Ms,
     p95Ms,
+    p99Ms: p95Ms,
   };
 }

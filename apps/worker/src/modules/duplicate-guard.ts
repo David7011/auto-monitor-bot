@@ -26,7 +26,7 @@ export async function checkDuplicate(listing: NormalizedListing): Promise<Duplic
   return { type: "NONE", reasons: [], confidence: 0 };
 }
 
-async function findStrongDuplicate(listing: NormalizedListing): Promise<DuplicateDecision | null> {
+export async function findStrongDuplicate(listing: NormalizedListing): Promise<DuplicateDecision | null> {
   const raw = listing.raw as { vin?: string; plateNormalized?: string } | null | undefined;
   const vin = listing.vin ?? raw?.vin;
   const plateNormalized = listing.plateNormalized ?? raw?.plateNormalized;
@@ -67,7 +67,16 @@ async function findStrongDuplicate(listing: NormalizedListing): Promise<Duplicat
   return null;
 }
 
-async function findPossibleDuplicate(listing: NormalizedListing): Promise<DuplicateDecision | null> {
+export async function findPossibleDuplicate(
+  listing: {
+    categoryKey?: NormalizedListing["categoryKey"];
+    title?: string | null;
+    year?: number | null;
+    priceNormalized?: number | null;
+    priceOriginal?: number | null;
+  },
+  excludeListingId?: string,
+): Promise<DuplicateDecision | null> {
   if (marketplaceCategoryKey(listing.categoryKey) !== "vehicle.car") return null;
   if (!listing.title || listing.year == null || (listing.priceNormalized ?? listing.priceOriginal) == null) return null;
 
@@ -79,6 +88,7 @@ async function findPossibleDuplicate(listing: NormalizedListing): Promise<Duplic
       : { priceOriginal: listing.priceOriginal };
   const candidates = await prisma.listing.findMany({
     where: {
+      ...(excludeListingId ? { id: { not: excludeListingId } } : {}),
       year: listing.year,
       ...priceMatch,
     },
@@ -89,7 +99,7 @@ async function findPossibleDuplicate(listing: NormalizedListing): Promise<Duplic
 }
 
 export function findTitlePriceYearPossibleDuplicate(
-  listing: Pick<NormalizedListing, "title">,
+  listing: { title?: string | null },
   candidates: Array<{ id: string; title: string | null }>,
 ): DuplicateDecision | null {
   if (!listing.title) return null;

@@ -1,0 +1,3 @@
+ALTER TABLE "source_seen_listings"
+  ADD COLUMN IF NOT EXISTS "bodyReceivedAt" TIMESTAMP(3),
+  ADD COLUMN IF NOT EXISTS "parsedAt" TIMESTAMP(3);

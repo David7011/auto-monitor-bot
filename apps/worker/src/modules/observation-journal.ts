@@ -51,6 +51,20 @@ export async function recordPendingObservations(
   }
 }
 
+export type PendingObservationState = {
+  decision: ObservationDecision;
+  listingId: string | null;
+  matchedFilterIds: string[];
+};
+
+/** Persist one hot candidate and return retained dedupe state in one round trip. */
+export async function recordPendingObservation(
+  listing: NormalizedListing,
+  lane: ListingDiscoveryLane,
+): Promise<PendingObservationState> {
+  return upsertObservation(listing, lane);
+}
+
 export async function recordObservationEvaluation(
   listing: NormalizedListing,
   lane: ListingDiscoveryLane,
@@ -208,6 +222,8 @@ export function deserializeNormalizedListing(value: Prisma.JsonValue): Normalize
     firstSeenAt: dateValue(data.firstSeenAt) ?? new Date(),
     requestStartedAt: dateValue(data.requestStartedAt),
     firstByteAt: dateValue(data.firstByteAt),
+    bodyReceivedAt: dateValue(data.bodyReceivedAt),
+    parsedAt: dateValue(data.parsedAt),
     hotCandidateAt: dateValue(data.hotCandidateAt),
     observationChannel: stringValue(data.observationChannel) as NormalizedListing["observationChannel"],
     observationTarget: stringValue(data.observationTarget),
@@ -215,11 +231,15 @@ export function deserializeNormalizedListing(value: Prisma.JsonValue): Normalize
   };
 }
 
-async function upsertObservation(listing: NormalizedListing, lane: ListingDiscoveryLane): Promise<void> {
-  await prisma.sourceSeenListing.upsert({
+async function upsertObservation(
+  listing: NormalizedListing,
+  lane: ListingDiscoveryLane,
+): Promise<PendingObservationState> {
+  return prisma.sourceSeenListing.upsert({
     where: { source_externalId: { source: listing.source, externalId: listing.externalId } },
     create: observationData(listing, lane),
     update: observationUpdateData(listing),
+    select: { decision: true, listingId: true, matchedFilterIds: true },
   });
 }
 
@@ -250,6 +270,8 @@ function observationData(listing: NormalizedListing, lane: ListingDiscoveryLane)
     firstSeenAt: new Date(listing.firstSeenAt),
     requestStartedAt: listing.requestStartedAt ?? null,
     firstByteAt: listing.firstByteAt ?? null,
+    bodyReceivedAt: listing.bodyReceivedAt ?? null,
+    parsedAt: listing.parsedAt ?? null,
     hotCandidateAt: listing.hotCandidateAt ?? null,
     lastSeenAt: new Date(),
     discoveryLane: lane,

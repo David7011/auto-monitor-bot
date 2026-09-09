@@ -28,6 +28,8 @@ describe("observation journal serialization", () => {
       firstSeenAt: new Date("2026-07-14T08:00:05.000Z"),
       requestStartedAt: new Date("2026-07-14T08:00:01.000Z"),
       firstByteAt: new Date("2026-07-14T08:00:02.000Z"),
+      bodyReceivedAt: new Date("2026-07-14T08:00:02.500Z"),
+      parsedAt: new Date("2026-07-14T08:00:02.700Z"),
       hotCandidateAt: new Date("2026-07-14T08:00:03.000Z"),
       observationChannel: "OLX_HTML_COVERAGE",
       observationTarget: "region:21;city:121;page:1;owner:all",
@@ -53,6 +55,8 @@ describe("observation journal serialization", () => {
     expect(restored?.publishedAt?.toISOString()).toBe(publishedAt.toISOString());
     expect(restored?.requestStartedAt?.toISOString()).toBe("2026-07-14T08:00:01.000Z");
     expect(restored?.firstByteAt?.toISOString()).toBe("2026-07-14T08:00:02.000Z");
+    expect(restored?.bodyReceivedAt?.toISOString()).toBe("2026-07-14T08:00:02.500Z");
+    expect(restored?.parsedAt?.toISOString()).toBe("2026-07-14T08:00:02.700Z");
     expect(restored?.hotCandidateAt?.toISOString()).toBe("2026-07-14T08:00:03.000Z");
   });
 });

@@ -30,6 +30,7 @@ export async function fetchHtml(
   retryAfterSeconds?: number;
   requestStartedAt?: Date;
   firstByteAt?: Date;
+  bodyReceivedAt?: Date;
   cacheAgeSeconds?: number;
   coordinatorWaitMs?: number;
   coordinatorPostFinishQuietMs?: number;
@@ -58,6 +59,7 @@ export async function fetchHtml(
     retryAfterSeconds: response.retryAfterSeconds,
     requestStartedAt: response.requestStartedAt,
     firstByteAt: response.firstByteAt,
+    bodyReceivedAt: response.bodyReceivedAt,
     cacheAgeSeconds: response.cacheAgeSeconds,
     coordinatorWaitMs: response.coordinatorWaitMs,
     coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
