@@ -95,6 +95,26 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       discoveryShards: new Set(states.map((state) => `${state.source}:${state.fingerprint}`)).size,
     };
     const latestRecovery = recoveryWindows.find((window) => window.status !== "VERIFIED") ?? recoveryWindows[0];
+    const olxHotPathSampleCount = monitoringState
+      ? (await prisma.sourceSeenListing.findMany({
+        where: {
+          source: "OLX",
+          discoveryLane: "REALTIME",
+          firstSeenAt: { gte: monitoringState.olxCanaryQualificationStartedAt },
+          requestStartedAt: { not: null },
+          firstByteAt: { not: null },
+          bodyReceivedAt: { not: null },
+          parsedAt: { not: null },
+          hotCandidateAt: { not: null },
+          journalPersistedAt: { not: null },
+          telegramRequestedAt: { not: null },
+          telegramAcceptedAt: { not: null },
+        },
+        orderBy: { firstSeenAt: "desc" },
+        take: env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
+        select: { id: true },
+      })).length
+      : 0;
 
     return {
       generatedAt: now.toISOString(),
@@ -110,6 +130,8 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
         canaryJitterSeconds: env.OLX_CADENCE_CANARY_JITTER_SECONDS,
         qualificationRuns: monitoringState?.olxCanaryCleanRunCount ?? 0,
         qualificationRunsRequired: env.OLX_CADENCE_CANARY_QUALIFICATION_RUNS,
+        hotPathSamples: olxHotPathSampleCount,
+        hotPathSamplesRequired: env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
         promotionRuns: monitoringState?.olxCanaryRunCount ?? 0,
         promotionRunsRequired: env.OLX_CADENCE_CANARY_PROMOTION_RUNS,
         qualificationMaximumP95Ms: env.OLX_CADENCE_CANARY_QUALIFICATION_MAX_P95_MS,

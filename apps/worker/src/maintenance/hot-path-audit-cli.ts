@@ -54,12 +54,34 @@ try {
       telegramAcceptedAt: true,
       },
     });
+  const completeAcceptedHotPathSamples = legacySchema ? 0 : observations.filter((sample) =>
+    sample.requestStartedAt
+    && sample.firstByteAt
+    && "bodyReceivedAt" in sample && sample.bodyReceivedAt
+    && "parsedAt" in sample && sample.parsedAt
+    && sample.hotCandidateAt
+    && sample.journalPersistedAt
+    && sample.telegramRequestedAt
+    && sample.telegramAcceptedAt,
+  ).length;
+  const monitoringState = await prisma.monitoringState.findUnique({ where: { id: "singleton" } });
   console.log(JSON.stringify({
     generatedAt: until,
     since,
     source: "OLX",
     lane: "REALTIME",
     observations: observations.length,
+    completeAcceptedHotPathSamples,
+    cadenceCanary: monitoringState ? {
+      mode: monitoringState.olxCanaryMode,
+      qualificationRuns: monitoringState.olxCanaryCleanRunCount,
+      canaryRuns: monitoringState.olxCanaryRunCount,
+      qualificationStartedAt: monitoringState.olxCanaryQualificationStartedAt,
+      canaryStartedAt: monitoringState.olxCanaryStartedAt,
+      baselineP95Ms: monitoringState.olxCanaryBaselineP95Ms,
+      currentP95Ms: monitoringState.olxCanaryCurrentP95Ms,
+      rollbackReason: monitoringState.olxCanaryRollbackReason,
+    } : null,
     legacySchema,
     stages: summarizeJournalLatencies(observations),
   }, null, 2));

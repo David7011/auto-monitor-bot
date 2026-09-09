@@ -387,6 +387,8 @@ export type SearchPlanResponse<DateValue = string> = {
     canaryJitterSeconds: number;
     qualificationRuns: number;
     qualificationRunsRequired: number;
+    hotPathSamples: number;
+    hotPathSamplesRequired: number;
     promotionRuns: number;
     promotionRunsRequired: number;
     qualificationMaximumP95Ms: number;

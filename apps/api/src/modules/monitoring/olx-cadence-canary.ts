@@ -29,7 +29,7 @@ export async function evaluateOlxCadenceCanary(input: {
     env.OLX_CADENCE_CANARY_PROMOTION_RUNS,
     env.OLX_CADENCE_CANARY_P95_MIN_SAMPLES,
   ) + 10;
-  const [runs, queueOverflow] = await Promise.all([
+  const [runs, hotPathSamples, queueOverflow] = await Promise.all([
     prisma.collectorRun.findMany({
       where: {
         source: "OLX",
@@ -49,8 +49,27 @@ export async function evaluateOlxCadenceCanary(input: {
         errorMessage: true,
       },
     }),
+    prisma.sourceSeenListing.findMany({
+      where: {
+        source: "OLX",
+        discoveryLane: "REALTIME",
+        firstSeenAt: { gte: state.olxCanaryQualificationStartedAt },
+        requestStartedAt: { not: null },
+        firstByteAt: { not: null },
+        bodyReceivedAt: { not: null },
+        parsedAt: { not: null },
+        hotCandidateAt: { not: null },
+        journalPersistedAt: { not: null },
+        telegramRequestedAt: { not: null },
+        telegramAcceptedAt: { not: null },
+      },
+      orderBy: { firstSeenAt: "desc" },
+      take: env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
+      select: { id: true },
+    }),
     hotPathQueueOverflow(env.OLX_CADENCE_CANARY_QUEUE_DEPTH_LIMIT),
   ]);
+  const hotPathSampleCount = hotPathSamples.length;
   const exactBaselineConfigured = input.baseIntervalSeconds === env.LIVE_OLX_INTERVAL_SECONDS
     && input.baseJitterSeconds === env.LIVE_OLX_JITTER_SECONDS;
   const decision = decideOlxCadenceCanary({
@@ -65,6 +84,7 @@ export async function evaluateOlxCadenceCanary(input: {
       enabled: env.OLX_CADENCE_CANARY_ENABLED && exactBaselineConfigured,
       qualificationRuns: env.OLX_CADENCE_CANARY_QUALIFICATION_RUNS,
       promotionRuns: env.OLX_CADENCE_CANARY_PROMOTION_RUNS,
+      hotPathMinimumSamples: env.OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES,
       p95MinimumSamples: env.OLX_CADENCE_CANARY_P95_MIN_SAMPLES,
       qualificationMaximumP95Ms: env.OLX_CADENCE_CANARY_QUALIFICATION_MAX_P95_MS,
       maximumP95Ms: env.OLX_CADENCE_CANARY_MAX_P95_MS,
@@ -75,6 +95,7 @@ export async function evaluateOlxCadenceCanary(input: {
       canaryJitterSeconds: env.OLX_CADENCE_CANARY_JITTER_SECONDS,
     },
     runs,
+    hotPathSampleCount,
     protectionActive: input.protectionActive,
     queueOverflow,
     now: input.now,

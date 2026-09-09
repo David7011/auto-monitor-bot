@@ -24,6 +24,7 @@ export type OlxCadenceCanaryConfig = {
   enabled: boolean;
   qualificationRuns: number;
   promotionRuns: number;
+  hotPathMinimumSamples: number;
   p95MinimumSamples: number;
   qualificationMaximumP95Ms: number;
   maximumP95Ms: number;
@@ -60,6 +61,7 @@ export function decideOlxCadenceCanary(input: {
   state: OlxCadenceCanaryState;
   config: OlxCadenceCanaryConfig;
   runs: readonly OlxCadenceRunEvidence[];
+  hotPathSampleCount: number;
   protectionActive: boolean;
   queueOverflow: boolean;
   now?: Date;
@@ -71,6 +73,17 @@ export function decideOlxCadenceCanary(input: {
   }
 
   const accelerated = input.state.mode === "CANARY" || input.state.mode === "PROMOTED";
+  if (accelerated && input.hotPathSampleCount < input.config.hotPathMinimumSamples) {
+    const rollbackReason = `complete OLX hot-path samples ${input.hotPathSampleCount}/${input.config.hotPathMinimumSamples}`;
+    return {
+      ...base,
+      mode: "ROLLED_BACK",
+      qualificationStartedAt: now,
+      rollbackReason,
+      transition: "ROLLBACK",
+      reason: `automatic rollback: ${rollbackReason}`,
+    };
+  }
   if (accelerated) return evaluateAccelerated(input, base, now);
 
   const qualificationRuns = consecutiveCleanRuns(
@@ -86,6 +99,14 @@ export function decideOlxCadenceCanary(input: {
       cleanRunCount: qualificationRuns.length,
       currentP95Ms: baselineP95Ms,
       reason: `qualification blocked: ${blockedReason}`,
+    };
+  }
+  if (input.hotPathSampleCount < input.config.hotPathMinimumSamples) {
+    return {
+      ...base,
+      cleanRunCount: qualificationRuns.length,
+      currentP95Ms: baselineP95Ms,
+      reason: `complete OLX hot-path samples ${input.hotPathSampleCount}/${input.config.hotPathMinimumSamples}`,
     };
   }
   if (qualificationRuns.length < required) {

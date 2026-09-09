@@ -284,9 +284,10 @@ export default function PlannerPage() {
               OLX cadence canary: <span className="font-mono text-foreground">{data?.olxCadenceCanary.mode ?? "BASELINE"}</span>. Чистые baseline-проходы:{" "}
               <span className="font-mono text-foreground">{data?.olxCadenceCanary.qualificationRuns ?? 0}/{data?.olxCadenceCanary.qualificationRunsRequired ?? 100}</span>; режим{" "}
               <span className="font-mono text-foreground">
-                {data?.olxCadenceCanary.baseIntervalSeconds ?? 20}±{data?.olxCadenceCanary.baseJitterSeconds ?? 4} → {data?.olxCadenceCanary.canaryIntervalSeconds ?? 15}±{data?.olxCadenceCanary.canaryJitterSeconds ?? 3} с
+                {data?.olxCadenceCanary.baseIntervalSeconds ?? 20}±{data?.olxCadenceCanary.baseJitterSeconds ?? 4} → {data?.olxCadenceCanary.canaryIntervalSeconds ?? 18}±{data?.olxCadenceCanary.canaryJitterSeconds ?? 3} с
               </span>. Baseline/current p95:{" "}
               <span className="font-mono text-foreground">{data?.olxCadenceCanary.baselineP95Ms ?? "—"}/{data?.olxCadenceCanary.currentP95Ms ?? "—"} мс</span>.
+              {" "}Полные live hot-path: <span className="font-mono text-foreground">{data?.olxCadenceCanary.hotPathSamples ?? 0}/{data?.olxCadenceCanary.hotPathSamplesRequired ?? 30}</span>.
               {data?.olxCadenceCanary.rollbackReason ? ` Rollback: ${data.olxCadenceCanary.rollbackReason}.` : ""}
             </div>
             <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">

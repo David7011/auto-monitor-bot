@@ -11,6 +11,7 @@ const config: OlxCadenceCanaryConfig = {
   enabled: true,
   qualificationRuns: 100,
   promotionRuns: 100,
+  hotPathMinimumSamples: 30,
   p95MinimumSamples: 10,
   qualificationMaximumP95Ms: 8_000,
   maximumP95Ms: 12_000,
@@ -59,6 +60,7 @@ function decide(input: {
     state: input.current ?? state(),
     config: input.configuration ?? config,
     runs: input.runs ?? [],
+    hotPathSampleCount: 30,
     protectionActive: input.protectionActive ?? false,
     queueOverflow: input.queueOverflow ?? false,
     now: input.now ?? new Date("2026-08-30T11:00:00.000Z"),
@@ -78,6 +80,39 @@ describe("OLX cadence canary policy", () => {
       baselineP95Ms: 4_000,
       intervalSeconds: 15,
       jitterSeconds: 3,
+    });
+  });
+
+  it("does not accelerate before a complete accepted hot-path sample exists", () => {
+    const waiting = decideOlxCadenceCanary({
+      state: state(),
+      config,
+      runs: cleanRuns(100),
+      hotPathSampleCount: 29,
+      protectionActive: false,
+      queueOverflow: false,
+    });
+    expect(waiting).toMatchObject({ mode: "BASELINE", intervalSeconds: 20, jitterSeconds: 4 });
+    expect(waiting.reason).toBe("complete OLX hot-path samples 29/30");
+  });
+
+  it("rolls an already accelerated cadence back when complete live evidence is insufficient", () => {
+    const current = state({ mode: "PROMOTED", canaryStartedAt: epoch, baselineP95Ms: 4_000 });
+    const decision = decideOlxCadenceCanary({
+      state: current,
+      config,
+      runs: cleanRuns(100),
+      hotPathSampleCount: 3,
+      protectionActive: false,
+      queueOverflow: false,
+      now: new Date("2026-08-30T12:00:00.000Z"),
+    });
+    expect(decision).toMatchObject({
+      mode: "ROLLED_BACK",
+      transition: "ROLLBACK",
+      intervalSeconds: 20,
+      jitterSeconds: 4,
+      rollbackReason: "complete OLX hot-path samples 3/30",
     });
   });
 

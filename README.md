@@ -134,10 +134,11 @@ Health:    http://127.0.0.1:4000/health
 |---|---|---:|---|
 | OLX realtime | `LIVE_OLX_INTERVAL_SECONDS` | `20` | Интервал быстрого OLX-прохода |
 | OLX realtime | `LIVE_OLX_JITTER_SECONDS` | `4` | Случайный разброс быстрого прохода |
-| OLX canary | `OLX_CADENCE_CANARY_ENABLED` | `true` | Автоматический переход 20±4 → 15±3 |
+| OLX canary | `OLX_CADENCE_CANARY_ENABLED` | `true` | Автоматический осторожный переход 20±4 → 18±3 |
 | OLX canary | `OLX_CADENCE_CANARY_QUALIFICATION_RUNS` | `100` | Чистых baseline-проходов до canary |
 | OLX canary | `OLX_CADENCE_CANARY_PROMOTION_RUNS` | `100` | Чистых canary-проходов до promotion |
-| OLX canary | `OLX_CADENCE_CANARY_INTERVAL_SECONDS` | `15` | Интервал экспериментального realtime |
+| OLX canary | `OLX_CADENCE_CANARY_HOT_PATH_MIN_SAMPLES` | `30` | Полных live-путей до допуска к canary |
+| OLX canary | `OLX_CADENCE_CANARY_INTERVAL_SECONDS` | `18` | Интервал экспериментального realtime |
 | OLX canary | `OLX_CADENCE_CANARY_JITTER_SECONDS` | `3` | Jitter экспериментального realtime |
 | OLX canary | `OLX_CADENCE_CANARY_QUALIFICATION_MAX_P95_MS` | `8000` | Максимальный baseline p95 для допуска |
 | OLX canary | `OLX_CADENCE_CANARY_MAX_P95_MS` | `12000` | Жёсткий latency rollback-порог |
