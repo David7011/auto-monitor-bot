@@ -354,7 +354,12 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
   const existing = await prisma.telegramFlashBundle.findUnique({ where: { id: flashBundleId } });
   if (!existing) throw new Error(`Telegram flash bundle not found: ${flashBundleId}`);
   if (existing.messageId && existing.acceptedAt) {
-    await syncAcceptedFlashBundle(flashBundleId, existing.listingIds, existing.acceptedAt);
+    await syncAcceptedFlashBundle(
+      flashBundleId,
+      existing.listingIds,
+      existing.acceptedAt,
+      existing.lastAttemptAt ?? existing.processingStartedAt ?? existing.acceptedAt,
+    );
     return existing.listingIds;
   }
   if (existing.status === "PROCESSING" && existing.leaseExpiresAt && existing.leaseExpiresAt > now) return [];
@@ -415,6 +420,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
 
   try {
     await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.FLASH, Number.NEGATIVE_INFINITY);
+    const telegramRequestedAt = new Date();
     const sent = await telegramBot.api.sendMessage(chatId, existing.lastText, {
       parse_mode: "HTML",
       link_preview_options: { is_disabled: true },
@@ -436,7 +442,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
           lastErrorMessage: null,
         },
       });
-    await syncAcceptedFlashBundle(flashBundleId, existing.listingIds, acceptedAt);
+    await syncAcceptedFlashBundle(flashBundleId, existing.listingIds, acceptedAt, telegramRequestedAt);
     return existing.listingIds;
   } catch (error) {
     await deferGlobalTelegramGate(error);
@@ -738,7 +744,12 @@ async function syncAcceptedListing(listingId: string, acceptedAt: Date): Promise
   ]);
 }
 
-async function syncAcceptedFlashBundle(flashBundleId: string, listingIds: string[], acceptedAt: Date): Promise<void> {
+async function syncAcceptedFlashBundle(
+  flashBundleId: string,
+  listingIds: string[],
+  acceptedAt: Date,
+  requestedAt: Date,
+): Promise<void> {
   await prisma.$transaction([
     prisma.telegramNotification.updateMany({ where: { flashBundleId, status: "FLASH_PENDING" }, data: { status: "PENDING", acceptedAt } }),
     prisma.listing.updateMany({
@@ -747,6 +758,7 @@ async function syncAcceptedFlashBundle(flashBundleId: string, listingIds: string
     }),
     prisma.sourceSeenListing.updateMany({ where: { listingId: { in: listingIds } }, data: { decision: "NOTIFIED" } }),
     prisma.sourceSeenListing.updateMany({ where: { listingId: { in: listingIds }, notifiedAt: null }, data: { notifiedAt: acceptedAt } }),
+    prisma.sourceSeenListing.updateMany({ where: { listingId: { in: listingIds }, telegramRequestedAt: null }, data: { telegramRequestedAt: requestedAt } }),
     prisma.sourceSeenListing.updateMany({ where: { listingId: { in: listingIds }, telegramAcceptedAt: null }, data: { telegramAcceptedAt: acceptedAt } }),
   ]);
 }
