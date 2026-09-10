@@ -367,6 +367,22 @@ Rollback: один маленький commit на seam, легко revert без
 
 Текущий production можно оставлять работающим на baseline `20±4 с`: OLX здоров, автоматический rollback сработал, очереди не забиты. Но называть систему «идеальной» до прохождения этапов 1–6 нельзя.
 
+### P1-3 follow-up: clean-runner portability
+
+Финальный clean-runner выявил две инфраструктурные зависимости, которых не было на
+рабочем HP. Обе устранены без изменения production hot-path:
+
+- загрузчик закреплённого Node.js теперь считает SHA-256 напрямую через .NET и не
+  зависит от module autoload/`PSModulePath` для `Get-FileHash`;
+- Playwright загружает только закреплённый Chromium. Системные библиотеки уже входят
+  в GitHub-hosted Ubuntu image, поэтому CI больше не обновляет все сторонние APT
+  sources через `--with-deps` и не зависит от рассинхронизированного Google Chrome
+  repository index;
+- policy tests запрещают вернуть обе хрупкие зависимости.
+
+Это hardening тестового контура, а не ослабление acceptance: браузерный E2E и
+crash/replay сценарии остаются обязательными и должны фактически пройти.
+
 ## Источники
 
 [^1]: Telegram, “Bots FAQ — Broadcasting to Users”: рекомендация не превышать примерно одно сообщение в секунду в одном чате. https://core.telegram.org/bots/faq

@@ -122,20 +122,12 @@ jobs:
       - run: pnpm db:migrate:deploy
       - run: pnpm db:seed
       - run: pnpm auth:seed
-      - name: Install Playwright Chromium with bounded retry
+      - name: Install Playwright Chromium browser
         shell: bash
-        run: |
-          for attempt in 1 2 3; do
-            if pnpm exec playwright install --with-deps chromium; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            echo "Playwright dependency install failed on attempt $attempt; refreshing APT metadata"
-            sudo apt-get clean
-            sudo apt-get update -o Acquire::Retries=3 || true
-          done
+        # GitHub-hosted Ubuntu runners already include Playwright's Linux system
+        # libraries. Avoid `--with-deps`: it refreshes every configured APT source,
+        # so an unrelated third-party repository can make browser installation fail.
+        run: pnpm exec playwright install chromium
       - name: Start API and dashboard
         shell: bash
         run: |

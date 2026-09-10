@@ -18,6 +18,14 @@ Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "scripts") -Filter "*.ps1" -F
 
 if ($failed) { exit 1 }
 
+$nodeRuntimeBootstrap = Get-Content -LiteralPath (Join-Path $PSScriptRoot "ensure-node-runtime.ps1") -Raw
+if ($nodeRuntimeBootstrap -match '(?m)^\s*\(?\s*Get-FileHash\s') {
+  throw "Pinned Node bootstrap must not depend on module-autoloaded Get-FileHash in minimal CI/service environments"
+}
+if ($nodeRuntimeBootstrap -notmatch '\[Security\.Cryptography\.SHA256\]::Create\(\)') {
+  throw "Pinned Node bootstrap must verify downloads with the in-process SHA-256 implementation"
+}
+
 $runtimeIntentTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("amb-runtime-intent-" + [guid]::NewGuid().ToString("N"))
 try {
   New-Item -ItemType Directory -Force -Path $runtimeIntentTestRoot | Out-Null

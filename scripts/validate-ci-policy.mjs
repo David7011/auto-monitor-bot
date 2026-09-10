@@ -22,6 +22,12 @@ assert.match(workflow, /image:\s*postgres:18\.6(?:\s|$)/m);
 assert.match(workflow, /image:\s*postgres:18\.6-alpine(?:\s|$)/m);
 assert.match(workflow, /image:\s*redis:8\.8\.0-alpine(?:\s|$)/m);
 assert.doesNotMatch(workflow, /android|gradle|mobile-android|\.apk|\.aab/i);
+assert.match(workflow, /run:\s*pnpm exec playwright install chromium/);
+assert.doesNotMatch(
+  workflow,
+  /playwright install --with-deps/,
+  "Dashboard E2E must not depend on refreshing unrelated runner APT repositories",
+);
 
 const externalActions = [...workflow.matchAll(/^\s*-\s+uses:\s*([^\s#]+)/gm)].map((match) => match[1]);
 assert.ok(externalActions.length > 0, "CI workflow must contain external actions");

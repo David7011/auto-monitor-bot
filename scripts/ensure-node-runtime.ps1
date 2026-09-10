@@ -35,6 +35,20 @@ function Add-RuntimePath([string]$Path) {
   if (!$present) { $env:PATH = "$Path;$env:PATH" }
 }
 
+function Get-Sha256Hex([string]$Path) {
+  # Use the .NET primitive instead of Get-FileHash. Minimal Windows CI/service
+  # environments can have module auto-loading disabled or an incomplete
+  # PSModulePath even though PowerShell itself is available.
+  $stream = [IO.File]::OpenRead($Path)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+    $stream.Dispose()
+  }
+}
+
 function Unblock-RuntimeFiles {
   # Do not recursively touch the whole runtime on every boot. Besides slowing down
   # startup, that pattern makes endpoint protection rescan thousands of files. The
@@ -62,12 +76,12 @@ function Install-NodeRuntime {
   $expectedHash = ($checksumLine -split "\s+")[0].ToLowerInvariant()
 
   $archiveValid = (Test-Path -LiteralPath $archivePath) -and
-    (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant() -eq $expectedHash
+    (Get-Sha256Hex $archivePath) -eq $expectedHash
   if (!$archiveValid) {
     $downloadPath = "$archivePath.download-$([guid]::NewGuid().ToString('N'))"
     try {
       Invoke-WebRequest -Uri "$baseUrl/$archiveName" -OutFile $downloadPath -UseBasicParsing
-      $downloadHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+      $downloadHash = Get-Sha256Hex $downloadPath
       if ($downloadHash -ne $expectedHash) { throw "Downloaded Node.js archive checksum mismatch" }
       Move-Item -LiteralPath $downloadPath -Destination $archivePath -Force
     } finally {
@@ -79,7 +93,7 @@ function Install-NodeRuntime {
   # before extraction so child files do not inherit it.
   Unblock-File -LiteralPath $archivePath -ErrorAction SilentlyContinue
 
-  $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $actualHash = Get-Sha256Hex $archivePath
   if ($actualHash -ne $expectedHash) {
     Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
     throw "Node.js archive checksum mismatch"
