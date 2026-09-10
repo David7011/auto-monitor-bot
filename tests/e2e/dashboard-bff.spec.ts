@@ -50,6 +50,11 @@ test("mobile dashboard exposes full navigation and touch actions", async ({ page
   await expect(page).toHaveURL(/\/filters$/u);
   await expect(page.getByRole("heading", { name: /Фильтры поиска/i })).toBeVisible();
   const editFilter = page.getByRole("button", { name: /Редактировать/i }).first();
+  if ((await editFilter.count()) === 0) {
+    // A clean database intentionally has no runtime filters. Build the fixture
+    // through the same mobile UI/BFF path instead of depending on user data.
+    await page.getByRole("button", { name: /Создать фильтр/i }).click();
+  }
   await expect(editFilter).toBeVisible();
   await editFilter.click();
   await expect(page.getByLabel("Название")).not.toHaveValue("");

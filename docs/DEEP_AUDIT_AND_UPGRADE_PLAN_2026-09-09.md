@@ -380,6 +380,8 @@ Rollback: один маленький commit на seam, легко revert без
   repository index;
 - browser install и тест используют один явный repository-local
   `PLAYWRIGHT_BROWSERS_PATH`, исключая расхождение с default cache path runner-а;
+- mobile BFF E2E сам создаёт фильтр через UI на чистой изолированной БД, вместо
+  скрытой зависимости от пользовательских production-данных;
 - policy tests запрещают вернуть обе хрупкие зависимости.
 
 Это hardening тестового контура, а не ослабление acceptance: браузерный E2E и
