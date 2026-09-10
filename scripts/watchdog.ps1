@@ -63,6 +63,17 @@ function Test-SupervisorHeartbeatFresh {
   }
 }
 
+function Wait-SupervisorActivation([int]$TimeoutSeconds = 10) {
+  $deadline = (Get-Date).AddSeconds([Math]::Max(1, $TimeoutSeconds))
+  do {
+    if ((Test-LockHeld $SupervisorLockPath) -and (Test-SupervisorHeartbeatFresh)) {
+      return $true
+    }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $deadline)
+  return $false
+}
+
 function Read-WatchdogState {
   if (!(Test-Path -LiteralPath $StatePath)) {
     return [pscustomobject]@{
@@ -348,6 +359,9 @@ try {
         Start-Sleep -Seconds 1
       }
       Start-ScheduledTask -TaskName $SupervisorTaskName -ErrorAction Stop
+      if (!(Wait-SupervisorActivation 10)) {
+        throw "scheduled supervisor did not publish a fresh heartbeat"
+      }
       Write-WatchdogLog "scheduled supervisor task started"
     } catch {
       Write-WatchdogLog "scheduled supervisor restart failed; using direct fallback: $($_.Exception.Message)"
@@ -358,6 +372,10 @@ try {
         "-ExecutionPolicy", "Bypass",
         "-File", $SupervisorScript
       ) | Out-Null
+      if (!(Wait-SupervisorActivation 10)) {
+        throw "direct supervisor fallback did not publish a fresh heartbeat"
+      }
+      Write-WatchdogLog "direct supervisor fallback started"
     }
   }
 } finally {
