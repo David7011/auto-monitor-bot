@@ -111,6 +111,30 @@ The dashboard and audit CLI now expose:
 
 This separation is essential: the former `firstByte → hotCandidate` number combined network body transfer, decode, HTML/JSON parsing and candidate selection. A parser rewrite or worker thread is justified only if the new `bodyReceived → parsed` p95/p99 becomes material.
 
+### P1 network decomposition stage — 2026-09-10
+
+The worker now observes the OLX transport through Undici diagnostic channels and persists a bounded numeric sample for every collector pass, including passes that discover no new advert. The official Undici diagnostics API exposes request creation, connection start/completion, header send, response headers, received body chunks, trailers and request errors. Its subscribers run synchronously, so every subscriber is deliberately constant-time, catches its own errors and never performs database or network I/O ([Undici Diagnostics Channel](https://github.com/nodejs/undici/blob/main/docs/docs/api/DiagnosticsChannel.md)).
+
+The new `metrics:hot-path` network section reports p50/p95/p99 for:
+
+- dispatcher wait: Undici request creation → request headers sent;
+- new-connection setup: connect start → connected, combining DNS, TCP and TLS;
+- wire TTFB: request headers sent → response headers received;
+- body download: response headers → response trailers;
+- observed response bytes and connection-reuse percentage.
+
+Connection setup is intentionally reported as one combined phase. Splitting DNS, TCP and TLS would require replacing or wrapping the production connector and could change the very transport being measured. That deeper instrumentation is justified only if fresh samples show new-connection setup is material. The existing bounded Undici `Agent` remains unchanged; its pool is designed to reuse connections to the same origin ([Undici Pool](https://github.com/nodejs/undici/blob/main/docs/docs/api/Pool.md)). Response bodies continue to be fully consumed, which Undici requires for connection reuse.
+
+Privacy and rollback properties:
+
+- persisted samples contain only durations, byte counts and a reuse boolean;
+- URL, query parameters, headers and request IDs are never stored in telemetry;
+- the raw per-run list is capped at 50 samples;
+- there is no database migration, dependency change, cadence change, concurrency change or dispatcher tuning in this stage;
+- the immutable rollback tag `pre-hotpath-audit-20260909` remains untouched.
+
+Decision gate: collect at least 100 representative realtime requests before changing transport settings. If reuse is low and connection setup dominates, investigate idle lifetime and upstream connection closure. If reuse is high but wire TTFB dominates, local runtime or language changes cannot remove that remote wait. If download dominates, evaluate response size and content encoding without adding speculative requests. Any later canary must retain immediate rollback on 403/429/CAPTCHA.
+
 ## OLX architecture findings
 
 ### What is already correct

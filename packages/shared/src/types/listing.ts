@@ -82,6 +82,14 @@ export type NormalizedListing = {
   parsedAt?: Date;
   /** Instant a new OLX candidate is ready for the progressive hot handoff. */
   hotCandidateAt?: Date;
+  networkTelemetry?: {
+    dispatcherWaitMs?: number;
+    connectionSetupMs?: number;
+    connectionReused?: boolean;
+    wireTtfbMs?: number;
+    downloadMs?: number;
+    responseBytes?: number;
+  };
   observationChannel?: ListingObservationChannel;
   observationTarget?: string;
 

@@ -31,6 +31,14 @@ describe("observation journal serialization", () => {
       bodyReceivedAt: new Date("2026-07-14T08:00:02.500Z"),
       parsedAt: new Date("2026-07-14T08:00:02.700Z"),
       hotCandidateAt: new Date("2026-07-14T08:00:03.000Z"),
+      networkTelemetry: {
+        dispatcherWaitMs: 4.5,
+        connectionSetupMs: 0,
+        connectionReused: true,
+        wireTtfbMs: 812.25,
+        downloadMs: 301.75,
+        responseBytes: 123_456,
+      },
       observationChannel: "OLX_HTML_COVERAGE",
       observationTarget: "region:21;city:121;page:1;owner:all",
       raw: { huge: "source payload" },
@@ -58,5 +66,6 @@ describe("observation journal serialization", () => {
     expect(restored?.bodyReceivedAt?.toISOString()).toBe("2026-07-14T08:00:02.500Z");
     expect(restored?.parsedAt?.toISOString()).toBe("2026-07-14T08:00:02.700Z");
     expect(restored?.hotCandidateAt?.toISOString()).toBe("2026-07-14T08:00:03.000Z");
+    expect(restored?.networkTelemetry).toEqual(listing.networkTelemetry);
   });
 });

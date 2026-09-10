@@ -225,10 +225,30 @@ export function deserializeNormalizedListing(value: Prisma.JsonValue): Normalize
     bodyReceivedAt: dateValue(data.bodyReceivedAt),
     parsedAt: dateValue(data.parsedAt),
     hotCandidateAt: dateValue(data.hotCandidateAt),
+    networkTelemetry: networkTelemetryValue(data.networkTelemetry),
     observationChannel: stringValue(data.observationChannel) as NormalizedListing["observationChannel"],
     observationTarget: stringValue(data.observationTarget),
     raw: { replayedFromObservation: true },
   };
+}
+
+function networkTelemetryValue(value: Prisma.JsonValue | undefined): NormalizedListing["networkTelemetry"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const data = value as Record<string, Prisma.JsonValue>;
+  const telemetry: NonNullable<NormalizedListing["networkTelemetry"]> = {};
+  const dispatcherWaitMs = numberValue(data.dispatcherWaitMs);
+  const connectionSetupMs = numberValue(data.connectionSetupMs);
+  const connectionReused = booleanValue(data.connectionReused);
+  const wireTtfbMs = numberValue(data.wireTtfbMs);
+  const downloadMs = numberValue(data.downloadMs);
+  const responseBytes = numberValue(data.responseBytes);
+  if (dispatcherWaitMs != null) telemetry.dispatcherWaitMs = dispatcherWaitMs;
+  if (connectionSetupMs != null) telemetry.connectionSetupMs = connectionSetupMs;
+  if (connectionReused != null) telemetry.connectionReused = connectionReused;
+  if (wireTtfbMs != null) telemetry.wireTtfbMs = wireTtfbMs;
+  if (downloadMs != null) telemetry.downloadMs = downloadMs;
+  if (responseBytes != null) telemetry.responseBytes = responseBytes;
+  return Object.keys(telemetry).length > 0 ? telemetry : undefined;
 }
 
 async function upsertObservation(

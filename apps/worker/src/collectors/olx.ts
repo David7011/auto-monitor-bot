@@ -51,6 +51,7 @@ import {
   newestOlxVisibilityAt,
   planOlxFreshnessHedge,
 } from "./olx-freshness-hedge.js";
+import { OlxNetworkMetrics } from "./olx-network-metrics.js";
 
 export {
   buildOlxFeedTargets,
@@ -149,6 +150,7 @@ export class OlxCollector implements SourceCollector {
     const hotDispatchedExternalIds = new Set<string>();
     const now = new Date();
     const semanticWarnings: string[] = [];
+    const networkMetrics = new OlxNetworkMetrics();
     const coverageOnly = Boolean(scan.coverageOnly);
     const suppressBackground = Boolean(scan.olxProtectionCooling || scan.olxProtectionProbe);
     const resolvedLocations = suppressBackground
@@ -285,6 +287,7 @@ export class OlxCollector implements SourceCollector {
           freshnessHedgeOnlyObserved: 0,
           freshnessHedgeOutcome,
           freshnessHedgePrimaryAgeSeconds,
+          ...networkMetrics.coverageMetrics(),
           ...coordinatorCoverageMetrics(),
         },
       };
@@ -377,6 +380,9 @@ export class OlxCollector implements SourceCollector {
             dispatchHotFeedResult,
           );
       const directRequestCount = directResults.reduce((total, result) => total + result.requestCount, 0);
+      for (const result of directResults) {
+        if (result.requestCount > 0) for (const sample of result.networkSamples ?? []) networkMetrics.record(sample);
+      }
       const primaryIds = new Set(
         directResults.filter(isAdsResult).flatMap((result) => result.ads.map((ad) => String(ad.id))),
       );
@@ -416,6 +422,9 @@ export class OlxCollector implements SourceCollector {
           `${hedgeTarget.observationTarget}:freshness-hedge`,
           "REALTIME",
         );
+        if (hedgeResult.requestCount > 0) {
+          for (const sample of hedgeResult.networkSamples ?? []) networkMetrics.record(sample);
+        }
         hedgeRequestCountThisPage = hedgeResult.requestCount;
         freshnessHedgeRequests += hedgeResult.requestCount;
         if (isAdsResult(hedgeResult)) {
@@ -455,6 +464,7 @@ export class OlxCollector implements SourceCollector {
           requestCount,
           observedCount,
           semanticWarnings,
+          coverageMetrics: networkMetrics.coverageMetrics(),
         };
       }
 
@@ -480,6 +490,9 @@ export class OlxCollector implements SourceCollector {
             regionalRequestClass,
           )));
       regionalFeedRequests += regionalResults.reduce((total, result) => total + result.requestCount, 0);
+      for (const result of regionalResults) {
+        if (result.requestCount > 0) for (const sample of result.networkSamples ?? []) networkMetrics.record(sample);
+      }
       if (coverageOnly && coverageDue && page === 1) lastRegionalCoverageAt = now;
       requestCount += regionalResults.reduce((total, result) => total + result.requestCount, 0);
       for (const result of regionalResults) {
@@ -516,6 +529,9 @@ export class OlxCollector implements SourceCollector {
             "COVERAGE",
           )),
         );
+        for (const result of htmlResults) {
+          if (result.requestCount > 0) for (const sample of result.networkSamples ?? []) networkMetrics.record(sample);
+        }
         requestCount += htmlResults.reduce((total, result) => total + result.requestCount, 0);
         htmlFeedRequests += htmlResults.reduce((total, result) => total + result.requestCount, 0);
         for (const result of htmlResults) {
@@ -565,6 +581,9 @@ export class OlxCollector implements SourceCollector {
             "COVERAGE",
           )),
         );
+        for (const result of privateResults) {
+          if (result.requestCount > 0) for (const sample of result.networkSamples ?? []) networkMetrics.record(sample);
+        }
         privateFeedRequests += privateResults.reduce((total, result) => total + result.requestCount, 0);
         requestCount += privateResults.reduce((total, result) => total + result.requestCount, 0);
         for (const result of privateResults) {
@@ -621,6 +640,7 @@ export class OlxCollector implements SourceCollector {
               freshnessHedgeOnlyObserved,
               freshnessHedgeOutcome,
               freshnessHedgePrimaryAgeSeconds,
+              ...networkMetrics.coverageMetrics(),
               ...coordinatorCoverageMetrics(),
             },
           };
@@ -635,6 +655,7 @@ export class OlxCollector implements SourceCollector {
             requestCount,
             observedCount,
             semanticWarnings,
+            coverageMetrics: networkMetrics.coverageMetrics(),
           };
         }
 
@@ -685,6 +706,7 @@ export class OlxCollector implements SourceCollector {
           firstByteAt: feed.firstByteAt,
           bodyReceivedAt: feed.bodyReceivedAt,
           parsedAt: feed.parsedAt,
+          networkTelemetry: feed.network,
         });
         listings.push(...selection.listings);
         for (const externalId of selection.scannedExternalIds) scannedExternalIds.add(externalId);
@@ -839,6 +861,7 @@ export class OlxCollector implements SourceCollector {
         recoveryTermination: coverageUnresolvedReason ?? null,
         recoveryAttemptGeneration: coverageUnresolvedReason ? recoveryAttemptGeneration : null,
         effectiveOffsetCap: env.OLX_API_MAX_OFFSET,
+        ...networkMetrics.coverageMetrics(),
         ...coordinatorCoverageMetrics(),
       },
       parserHealth: parserDegraded ? "DEGRADED" : "HEALTHY",
@@ -904,6 +927,7 @@ function selectHotOlxCandidates(
       firstByteAt: feed.firstByteAt,
       bodyReceivedAt: feed.bodyReceivedAt,
       parsedAt: feed.parsedAt,
+      networkTelemetry: feed.network,
     });
     candidates.push(...selection.listings);
     if (candidates.length >= options.maxCandidates) break;
@@ -1028,6 +1052,7 @@ export function selectOlxCandidates(
     bodyReceivedAt?: Date;
     parsedAt?: Date;
     hotCandidateAt?: Date;
+    networkTelemetry?: NormalizedListing["networkTelemetry"];
     categoryKey?: import("@amb/shared").MarketplaceCategoryKey;
   },
 ): {
@@ -1106,6 +1131,7 @@ export function selectOlxCandidates(
     listing.bodyReceivedAt = options.bodyReceivedAt;
     listing.parsedAt = options.parsedAt;
     listing.hotCandidateAt = options.hotCandidateAt;
+    listing.networkTelemetry = options.networkTelemetry;
     if (beforeCutoff) {
       scannedExternalIds.push(externalId);
       continue;

@@ -7,6 +7,10 @@ import {
   olxRequestCoordinator,
   type OlxRequestClass,
 } from "../modules/olx-request-coordinator.js";
+import {
+  takeSourceNetworkTelemetry,
+  type SourceNetworkTelemetry,
+} from "./source-http-network-telemetry.js";
 
 export type SourceHttpClassification =
   | "SUCCESS"
@@ -53,6 +57,7 @@ export type SourceHttpTextResult = {
   detector?: string;
   retryAfterSeconds?: number;
   errorMessage?: string;
+  network?: SourceNetworkTelemetry;
 };
 
 export type SourceHttpJsonResult<T> = Omit<SourceHttpTextResult, "body"> & {
@@ -214,6 +219,7 @@ export class SourceHttpClient {
       const encoding = options.encoding ?? (contentType.toLowerCase().includes("windows-1251") ? "windows-1251" : "utf8");
       const body = new TextDecoder(encoding).decode(buffer);
       const bodyReceivedAt = new Date();
+      const network = takeSourceNetworkTelemetry(requestId);
       const { classification, detector } = classifyResponse(
         response.status,
         contentType,
@@ -234,6 +240,7 @@ export class SourceHttpClient {
         detector,
         retryAfterSeconds,
         cacheAgeSeconds: parseCacheAge(response.headers.get("age")),
+        network,
       };
     } catch (error) {
       if (preemptionSignal?.aborted) {
@@ -249,6 +256,7 @@ export class SourceHttpClient {
         body: "",
         classification: isAbortLike(error) ? "TIMEOUT" : "NETWORK_ERROR",
         errorMessage: networkErrorMessage(error),
+        network: takeSourceNetworkTelemetry(requestId),
       };
     } finally {
       clearTimeout(timeout);

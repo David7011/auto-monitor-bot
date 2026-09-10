@@ -4,6 +4,7 @@ import {
   type SourceHttpClassification,
 } from "./source-http-client.js";
 import type { OlxRequestClass } from "../modules/olx-request-coordinator.js";
+import type { SourceNetworkTelemetry } from "./source-http-network-telemetry.js";
 
 export type BlockedHtmlResult = {
   rateLimited?: boolean;
@@ -34,6 +35,7 @@ export async function fetchHtml(
   cacheAgeSeconds?: number;
   coordinatorWaitMs?: number;
   coordinatorPostFinishQuietMs?: number;
+  network?: SourceNetworkTelemetry;
   classification: SourceHttpClassification;
   detector?: string;
 }> {
@@ -63,6 +65,7 @@ export async function fetchHtml(
     cacheAgeSeconds: response.cacheAgeSeconds,
     coordinatorWaitMs: response.coordinatorWaitMs,
     coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
+    network: response.network,
     classification: response.classification,
     detector: response.detector,
   };

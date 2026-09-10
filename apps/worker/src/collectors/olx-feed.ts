@@ -36,6 +36,8 @@ type OlxFeedMetadata = {
   cacheAgeSeconds?: number;
   coordinatorWaitMs?: number;
   coordinatorPostFinishQuietMs?: number;
+  network?: import("./source-http-network-telemetry.js").SourceNetworkTelemetry;
+  networkSamples?: import("./source-http-network-telemetry.js").SourceNetworkTelemetry[];
 };
 
 export type OlxFeedResult = (
@@ -170,9 +172,15 @@ export async function fetchOlxFeed(
       coordinatorWaitMs: apiResult.coordinatorWaitMs ?? htmlResult.coordinatorWaitMs,
       coordinatorPostFinishQuietMs:
         apiResult.coordinatorPostFinishQuietMs ?? htmlResult.coordinatorPostFinishQuietMs,
+      network: apiResult.network ?? htmlResult.network,
+      networkSamples: [...htmlResult.networkSamples ?? [], ...apiResult.networkSamples ?? []],
     };
   }
-  return { ...apiResult, requestCount: apiResult.requestCount + htmlResult.requestCount };
+  return {
+    ...apiResult,
+    requestCount: apiResult.requestCount + htmlResult.requestCount,
+    networkSamples: [...htmlResult.networkSamples ?? [], ...apiResult.networkSamples ?? []],
+  };
 }
 
 function htmlChannelFor(channel: ListingObservationChannel): ListingObservationChannel {
@@ -223,6 +231,8 @@ async function requestOlxApiFeed(
     cacheAgeSeconds: response.cacheAgeSeconds,
     coordinatorWaitMs: response.coordinatorWaitMs,
     coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
+    network: response.network,
+    networkSamples: response.network ? [response.network] : [],
   };
 
   if (response.classification === "RATE_LIMITED") {
@@ -318,6 +328,8 @@ async function requestOlxHtmlFeed(
       cacheAgeSeconds: response.cacheAgeSeconds,
       coordinatorWaitMs: response.coordinatorWaitMs,
       coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,
+      network: response.network,
+      networkSamples: response.network ? [response.network] : [],
     };
     const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds, response);
     if (blocked.rateLimited || blocked.captchaDetected) return { blocked, ...metadata };
