@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [string]$ArchivePath
+  [string]$ArchivePath,
+  [switch]$LocalOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,7 +47,20 @@ function Get-Sha256Hex([string]$Path) {
 
 New-Item -ItemType Directory -Force -Path $DrillRoot | Out-Null
 if (!$ArchivePath) {
-  $ArchivePath = Get-ChildItem -LiteralPath $BackupRoot -Filter "database-*.ambbak" -File |
+  $mirrorRoot = if ($LocalOnly) { "" } else { Get-DotEnvValue "BACKUP_MIRROR_PATH" }
+  $restoreSource = if ($mirrorRoot) {
+    $resolvedMirror = [IO.Path]::GetFullPath($mirrorRoot)
+    $localVolume = [IO.Path]::GetPathRoot($BackupRoot)
+    $mirrorVolume = [IO.Path]::GetPathRoot($resolvedMirror)
+    if ($localVolume -and $mirrorVolume -and $localVolume.Equals($mirrorVolume, [StringComparison]::OrdinalIgnoreCase)) {
+      throw "BACKUP_MIRROR_PATH must be on a different volume or UNC destination"
+    }
+    if (!(Test-Path -LiteralPath $resolvedMirror)) { throw "Configured backup mirror is unavailable" }
+    $resolvedMirror
+  } else {
+    $BackupRoot
+  }
+  $ArchivePath = Get-ChildItem -LiteralPath $restoreSource -Filter "database-*.ambbak" -File |
     Sort-Object LastWriteTime -Descending | Select-Object -ExpandProperty FullName -First 1
 }
 if (!$ArchivePath -or !(Test-Path -LiteralPath $ArchivePath)) { throw "No encrypted database backup is available" }
@@ -112,6 +126,7 @@ try {
     listings = [int]$parts[2]
     durationSeconds = [Math]::Round(((Get-Date) - $startedAt).TotalSeconds, 2)
     result = "PASS"
+    source = if ($mirrorRoot) { "INDEPENDENT_MIRROR" } else { "LOCAL" }
   } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DrillRoot "latest.json") -Encoding UTF8
   Write-Host "Restore drill passed: $($parts[1]) filters and $($parts[2]) listings restored into an isolated temporary database."
 } finally {

@@ -196,6 +196,42 @@ if ($latestBackup) {
   Write-Host "No encrypted backup found"
 }
 
+$mirrorLine = Get-Content -LiteralPath (Join-Path $ProjectRoot ".env") -Encoding UTF8 -ErrorAction SilentlyContinue |
+  Where-Object { $_ -match '^\s*BACKUP_MIRROR_PATH\s*=' } | Select-Object -Last 1
+$mirrorRoot = if ($mirrorLine) { (($mirrorLine -split '=', 2)[1].Trim() -replace '^[''\"]|[''\"]$', '') } else { "" }
+if (!$mirrorRoot) {
+  Write-Warning "Independent backup mirror is NOT CONFIGURED; production and backups share drive C:."
+} else {
+  try {
+    $mirrorFullPath = [IO.Path]::GetFullPath($mirrorRoot)
+    $localVolume = [IO.Path]::GetPathRoot((Join-Path $ProjectRoot ".runtime\backups"))
+    $mirrorVolume = [IO.Path]::GetPathRoot($mirrorFullPath)
+    if ($localVolume -and $mirrorVolume -and $localVolume.Equals($mirrorVolume, [StringComparison]::OrdinalIgnoreCase)) {
+      throw "mirror is on the production volume"
+    }
+    $latestMirror = Get-ChildItem -LiteralPath $mirrorFullPath -Filter "database-*.ambbak" -File -ErrorAction Stop |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (!$latestMirror -or !(Test-Path -LiteralPath "$($latestMirror.FullName).sha256")) {
+      throw "no mirrored archive with checksum sidecar"
+    }
+    $expectedMirrorHash = ((Get-Content -LiteralPath "$($latestMirror.FullName).sha256" -Raw) -split '\s+', 2)[0].Trim().ToLowerInvariant()
+    $mirrorStream = [IO.File]::OpenRead($latestMirror.FullName)
+    $mirrorSha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+      $actualMirrorHash = ([BitConverter]::ToString($mirrorSha256.ComputeHash($mirrorStream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $mirrorSha256.Dispose()
+      $mirrorStream.Dispose()
+    }
+    if ($actualMirrorHash -ne $expectedMirrorHash) { throw "mirrored archive checksum mismatch" }
+    if ($latestMirror.LastWriteTime -lt (Get-Date).AddHours(-26)) { throw "latest mirrored archive is older than 26 hours" }
+    Write-Host "Independent backup mirror: OK ($($latestMirror.LastWriteTime))"
+  } catch {
+    Write-Warning "Independent backup mirror: UNHEALTHY ($($_.Exception.Message))"
+    $Failed = $true
+  }
+}
+
 Write-Host ""
 Write-Host "Monitoring:"
 try {

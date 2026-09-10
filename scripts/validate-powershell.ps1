@@ -26,6 +26,16 @@ if ($nodeRuntimeBootstrap -notmatch '\[Security\.Cryptography\.SHA256\]::Create\
   throw "Pinned Node bootstrap must verify downloads with the in-process SHA-256 implementation"
 }
 
+$backupScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot "backup-database.ps1") -Raw
+if ($backupScript -notmatch 'Backup mirror verification failed after copy' -or
+    $backupScript -notmatch 'Publish the archive last') {
+  throw "Backup mirror must verify the copied archive and publish it only after sidecars"
+}
+$restoreScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot "test-database-restore.ps1") -Raw
+if ($restoreScript -notmatch 'INDEPENDENT_MIRROR' -or $restoreScript -notmatch 'Configured backup mirror is unavailable') {
+  throw "Scheduled restore drill must prefer and require a configured independent mirror"
+}
+
 $runtimeIntentTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("amb-runtime-intent-" + [guid]::NewGuid().ToString("N"))
 try {
   New-Item -ItemType Directory -Force -Path $runtimeIntentTestRoot | Out-Null

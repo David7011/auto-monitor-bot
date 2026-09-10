@@ -133,8 +133,24 @@ try {
         throw "BACKUP_MIRROR_PATH must be on a different volume or UNC destination"
       }
       New-Item -ItemType Directory -Force -Path $mirrorFullPath | Out-Null
-      foreach ($item in @($archivePath, $hashPath, $metadataPath)) {
-        Copy-Item -LiteralPath $item -Destination (Join-Path $mirrorFullPath ([IO.Path]::GetFileName($item))) -Force
+      $mirrorStaging = Join-Path $mirrorFullPath (".amb-mirror-" + [guid]::NewGuid().ToString("N"))
+      New-Item -ItemType Directory -Path $mirrorStaging | Out-Null
+      try {
+        foreach ($item in @($archivePath, $hashPath, $metadataPath)) {
+          Copy-Item -LiteralPath $item -Destination (Join-Path $mirrorStaging ([IO.Path]::GetFileName($item)))
+        }
+        $stagedArchive = Join-Path $mirrorStaging ([IO.Path]::GetFileName($archivePath))
+        if ((Get-Sha256Hex $stagedArchive) -ne $hash) {
+          throw "Backup mirror verification failed after copy"
+        }
+        # Publish the archive last. Consumers therefore never observe a new
+        # archive before its checksum and metadata sidecars are durable.
+        foreach ($item in @($hashPath, $metadataPath, $archivePath)) {
+          $name = [IO.Path]::GetFileName($item)
+          Move-Item -LiteralPath (Join-Path $mirrorStaging $name) -Destination (Join-Path $mirrorFullPath $name) -Force
+        }
+      } finally {
+        Remove-Item -LiteralPath $mirrorStaging -Recurse -Force -ErrorAction SilentlyContinue
       }
       $mirrorCutoff = (Get-Date).AddDays(-[Math]::Max(1, $RetentionDays))
       Get-ChildItem -LiteralPath $mirrorFullPath -File -ErrorAction SilentlyContinue |
@@ -146,7 +162,8 @@ try {
             throw "Refusing to remove a path outside the mirror directory: $resolvedMirrorItem"
           }
           Remove-Item -LiteralPath $resolvedMirrorItem -Force
-        }
+      }
+      Write-Host "Verified encrypted backup mirror created on independent storage."
     }
   } finally {
     $env:PGPASSWORD = $previousPassword
