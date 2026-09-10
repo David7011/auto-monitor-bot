@@ -23,6 +23,11 @@ assert.match(workflow, /image:\s*postgres:18\.6-alpine(?:\s|$)/m);
 assert.match(workflow, /image:\s*redis:8\.8\.0-alpine(?:\s|$)/m);
 assert.doesNotMatch(workflow, /android|gradle|mobile-android|\.apk|\.aab/i);
 assert.match(workflow, /run:\s*pnpm exec playwright install chromium/);
+assert.match(
+  workflow,
+  /PLAYWRIGHT_BROWSERS_PATH:\s*\$\{\{ github\.workspace \}\}\/\.runtime\/playwright-browsers/,
+  "Playwright install and test must share the repository-local browser path",
+);
 assert.doesNotMatch(
   workflow,
   /playwright install --with-deps/,

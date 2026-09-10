@@ -378,6 +378,8 @@ Rollback: один маленький commit на seam, легко revert без
   в GitHub-hosted Ubuntu image, поэтому CI больше не обновляет все сторонние APT
   sources через `--with-deps` и не зависит от рассинхронизированного Google Chrome
   repository index;
+- browser install и тест используют один явный repository-local
+  `PLAYWRIGHT_BROWSERS_PATH`, исключая расхождение с default cache path runner-а;
 - policy tests запрещают вернуть обе хрупкие зависимости.
 
 Это hardening тестового контура, а не ослабление acceptance: браузерный E2E и
