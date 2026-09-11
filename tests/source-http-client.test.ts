@@ -115,6 +115,53 @@ describe("SourceHttpClient", () => {
     expect(result.detector).toBe("cloudflare-cf-mitigated");
   });
 
+  it("classifies a bare HTTP 403 as ACCESS_DENIED without claiming a CAPTCHA", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("Forbidden", {
+        status: 403,
+        headers: { "content-type": "text/plain" },
+      })),
+    );
+
+    const result = await freshSourceHttpClient().text("https://example.test/list", { source: "CARS_UA" });
+    expect(result.classification).toBe("ACCESS_DENIED");
+    expect(result.detector).toBeUndefined();
+  });
+
+  it("opens the OLX circuit as ACCESS_DENIED and prevents an immediate retry storm", async () => {
+    const fetchMock = vi.fn(async () => new Response("Forbidden", {
+      status: 403,
+      headers: { "content-type": "text/plain" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = freshSourceHttpClient();
+    const first = await client.text("https://example.test/list", { source: "OLX", requestClass: "REALTIME" });
+    const fenced = await client.text("https://example.test/list", { source: "OLX", requestClass: "REALTIME" });
+
+    expect(first.classification).toBe("ACCESS_DENIED");
+    expect(fenced).toMatchObject({
+      classification: "ACCESS_DENIED",
+      detector: "olx-local-circuit-breaker",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies an access-denied document as ACCESS_DENIED rather than CHALLENGE", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("<html><title>Access denied</title></html>", {
+        status: 403,
+        headers: { "content-type": "text/html" },
+      })),
+    );
+
+    const result = await freshSourceHttpClient().text("https://example.test/list", { source: "CARS_UA" });
+    expect(result.classification).toBe("ACCESS_DENIED");
+    expect(result.detector).toBe("access-denied-document");
+  });
+
   it("enforces response size limit before parsing", async () => {
     vi.stubGlobal(
       "fetch",

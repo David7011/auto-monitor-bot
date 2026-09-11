@@ -9,6 +9,8 @@ import type { SourceNetworkTelemetry } from "./source-http-network-telemetry.js"
 export type BlockedHtmlResult = {
   rateLimited?: boolean;
   captchaDetected?: boolean;
+  /** The source refused this request, but no interactive challenge was proven. */
+  accessDenied?: boolean;
   limitedReason?: string;
   detector?: string;
   retryAfterSeconds?: number;
@@ -87,8 +89,16 @@ export function isBlockedHtml(
     };
   }
 
-  const signal = upstream?.classification === "CHALLENGE" || upstream?.classification === "RATE_LIMITED"
-    ? { classification: upstream.classification, detector: upstream.detector ?? "source-http-classification" }
+  const signal = upstream?.classification === "CHALLENGE"
+      || upstream?.classification === "RATE_LIMITED"
+      || upstream?.classification === "ACCESS_DENIED"
+    ? {
+        classification: upstream.classification,
+        detector: upstream.detector
+          ?? (upstream.classification === "ACCESS_DENIED" && status === 403
+            ? "http-403-access-denied"
+            : "source-http-classification"),
+      }
     : detectBodyProtection(upstream?.contentType ?? "text/html", body);
   if (signal?.classification === "CHALLENGE") return {
     captchaDetected: true,
@@ -103,12 +113,22 @@ export function isBlockedHtml(
     retryAfterSeconds,
     responseStatus: status,
   };
+  if (signal?.classification === "ACCESS_DENIED") return {
+    rateLimited: true,
+    accessDenied: true,
+    detector: signal.detector ?? "http-403-access-denied",
+    limitedReason: status === 403
+      ? "Источник вернул HTTP 403 без подтверждённой CAPTCHA; включена безопасная пауза без агрессивных повторов."
+      : `Источник отклонил доступ без подтверждённой CAPTCHA (${signal.detector ?? "access-denied"}); включена безопасная пауза.`,
+    responseStatus: status,
+  };
 
   if (status === 403) {
     return {
-      captchaDetected: true,
-      detector: "http-403",
-      limitedReason: "Источник вернул защитный ответ HTTP 403 и поставлен на паузу.",
+      rateLimited: true,
+      accessDenied: true,
+      detector: "http-403-access-denied",
+      limitedReason: "Источник вернул HTTP 403 без подтверждённой CAPTCHA; включена безопасная пауза без агрессивных повторов.",
       responseStatus: status,
     };
   }

@@ -220,6 +220,7 @@ export class SourceHttpClient {
       const body = new TextDecoder(encoding).decode(buffer);
       const bodyReceivedAt = new Date();
       const network = takeSourceNetworkTelemetry(requestId);
+      if (network) network.responseBytes = buffer.byteLength;
       const { classification, detector } = classifyResponse(
         response.status,
         contentType,
@@ -372,7 +373,7 @@ function contentTypeAllowed(contentType: string, accepted: string[]): boolean {
 }
 
 export type BodyProtectionSignal = {
-  classification: "CHALLENGE" | "RATE_LIMITED";
+  classification: "CHALLENGE" | "RATE_LIMITED" | "ACCESS_DENIED";
   detector: string;
 };
 
@@ -403,7 +404,7 @@ export function detectBodyProtection(contentType: string, body: string): BodyPro
     };
   }
   if (ACCESS_DENIED_TEXT.test(headingText)) {
-    return { classification: "CHALLENGE", detector: "access-denied-document" };
+    return { classification: "ACCESS_DENIED", detector: "access-denied-document" };
   }
   if (RATE_LIMIT_TEXT.test(headingText)) {
     return { classification: "RATE_LIMITED", detector: "rate-limit-document" };

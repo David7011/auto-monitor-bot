@@ -17,7 +17,9 @@ if ($systemTask -and !$isAdministrator) {
   if ($Elevated) { throw 'Windows did not grant the required process-control rights.' }
   Write-Host 'The project runs as SYSTEM. Windows elevation is required to control its processes.'
   $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  $process = Start-Process -FilePath $windowsPowerShell -Verb RunAs -WindowStyle Hidden -PassThru -ArgumentList @(
+  # Keep the elevated helper visible: this is an interactive lifecycle action
+  # and the operator must be able to see both UAC and any startup failure.
+  $process = Start-Process -FilePath $windowsPowerShell -Verb RunAs -WindowStyle Normal -PassThru -ArgumentList @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), '-Action', $Action, '-Elevated'
   )
   $process.WaitForExit()

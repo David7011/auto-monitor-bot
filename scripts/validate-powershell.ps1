@@ -45,7 +45,10 @@ try {
   if (!(Test-AmbRunIntent)) { throw "A current-boot run request was not recognized" }
   Clear-AmbRunIntent
   if (Test-AmbRunIntent) { throw "A cleared run request remained active" }
-  $staleIntent = @{ requestedAt = [DateTime]::UtcNow.AddDays(-2).ToString("o"); requestedByPid = 1 } | ConvertTo-Json -Compress
+  # A fixed "now minus N days" is not guaranteed to predate boot on a
+  # long-running production laptop. Anchor the fixture to the actual boot
+  # boundary so this assertion remains deterministic regardless of uptime.
+  $staleIntent = @{ requestedAt = (Get-AmbBootTimeUtc).AddMinutes(-1).ToString("o"); requestedByPid = 1 } | ConvertTo-Json -Compress
   [IO.File]::WriteAllText($script:AmbRunIntentPath, $staleIntent, [Text.UTF8Encoding]::new($false))
   if (Test-AmbRunIntent) { throw "A pre-boot run request was incorrectly recognized" }
   Clear-AmbRunIntent
