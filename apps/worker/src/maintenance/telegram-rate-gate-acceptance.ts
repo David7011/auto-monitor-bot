@@ -37,12 +37,47 @@ try {
     throw new Error(`Shared retry_after cooldown ended too early: ${deferWaitMs}ms`);
   }
 
+  await redisClients[0]?.del(key);
+  await deferGate.waitForSlot();
+  let entered!: () => void;
+  let release!: () => void;
+  const firstSleepEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const firstSleepReleased = new Promise<void>((resolve) => { release = resolve; });
+  let firstSleep = true;
+  const lateFollower = new TelegramSendGate(intervalMs, {
+    redis: redisClients[2]!, key,
+    sleep: async (milliseconds) => {
+      if (firstSleep) {
+        firstSleep = false;
+        entered();
+        await firstSleepReleased;
+      }
+      await new Promise((resolve) => setTimeout(resolve, milliseconds));
+    },
+  });
+  const follower = lateFollower.waitForSlot();
+  // Attach immediately so a failed Redis call cannot become unhandled.
+  void follower.catch(() => undefined);
+  await Promise.race([
+    firstSleepEntered,
+    follower.then(() => { throw new Error("Follower unexpectedly admitted without waiting"); }),
+  ]);
+  await deferGate.deferFor(600);
+  const extendedAt = performance.now();
+  release();
+  await follower;
+  const extendedCooldownWaitMs = performance.now() - extendedAt;
+  if (extendedCooldownWaitMs < 585) {
+    throw new Error(`Already waiting follower ignored new cooldown: ${extendedCooldownWaitMs}ms`);
+  }
+
   console.log(JSON.stringify({
     status: "OK",
     independentRedisClients: redisClients.length,
     intervalMs,
     observedStartGapsMs: gaps.map((gap) => Math.round(gap)),
     sharedCooldownWaitMs: Math.round(deferWaitMs),
+    alreadyWaitingExtendedCooldownMs: Math.round(extendedCooldownWaitMs),
   }));
 } finally {
   await redisClients[0]?.del(key).catch(() => undefined);

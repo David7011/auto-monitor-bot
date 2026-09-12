@@ -163,10 +163,57 @@ describe("Telegram send gate", () => {
     await expect(gate.waitForSlot()).rejects.toThrow("redis unavailable");
   });
 
+  it("rechecks a cooldown extended by another process while already waiting", async () => {
+    let now = 1_000;
+    const redis = fakeTelegramRedis(() => now);
+    const other = new TelegramSendGate(1_100, { redis, key: "telegram:shared", now: () => now });
+    await other.waitForSlot();
+    const sleeps: number[] = [];
+    const waiting = new TelegramSendGate(1_100, {
+      redis, key: "telegram:shared", now: () => now,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        if (sleeps.length === 1) await other.deferFor(5_000);
+        now += milliseconds;
+      },
+    });
+    await waiting.waitForSlot();
+    expect(now).toBeGreaterThanOrEqual(6_000);
+    expect(sleeps).toEqual([1_100, 3_900]);
+  });
+
   it("uses bot id and chat id without putting the bot secret in Redis keys", () => {
     const key = telegramRateGateKey("123456:super-secret", "-100987");
     expect(key).toBe("amb:telegram:rate:v1:123456:-100987");
     expect(key).not.toContain("super-secret");
+  });
+
+  it("fails closed if Redis disappears during an already waiting send", async () => {
+    let calls = 0;
+    const gate = new TelegramSendGate(1_100, {
+      key: "telegram:shared",
+      redis: { eval: async () => {
+        if (calls++ === 0) return 250;
+        throw new Error("redis disconnected during cooldown");
+      } },
+      sleep: async () => {},
+    });
+    await expect(gate.waitForSlot()).rejects.toThrow("redis disconnected during cooldown");
+  });
+
+  it("does not shorten an existing cooldown or prebook overlapping future starts", async () => {
+    let now = 1_000;
+    const redis = fakeTelegramRedis(() => now);
+    const dependencies = { redis, key: "telegram:shared", now: () => now,
+      sleep: async (milliseconds: number) => { now += milliseconds; } };
+    const first = new TelegramSendGate(1_100, dependencies);
+    const second = new TelegramSendGate(1_100, dependencies);
+    await first.deferFor(5_000);
+    await second.deferFor(100);
+    await second.waitForSlot();
+    expect(now).toBe(6_000);
+    await first.waitForSlot();
+    expect(now).toBe(7_100);
   });
 });
 
@@ -179,9 +226,9 @@ function fakeTelegramRedis(now: () => number): TelegramRateGateRedis {
         nextSlotAt = Math.max(nextSlotAt, now() + delay);
         return Math.max(0, nextSlotAt - now());
       }
-      const slot = Math.max(now(), nextSlotAt);
-      nextSlotAt = slot + delay;
-      return slot - now();
+      if (nextSlotAt > now()) return nextSlotAt - now();
+      nextSlotAt = now() + delay;
+      return 0;
     },
   };
 }

@@ -11,6 +11,8 @@ describe("watchdog Telegram global rate gate", () => {
     expect(waitDefinition).toBeGreaterThanOrEqual(0);
     expect(source).toContain('"amb:telegram:rate:v1:$botId`:$safeChatId"');
     expect(source).toContain('redis.call("TIME")');
+    expect(source).toContain('if c>n then return c-n end');
+    expect(source).toContain('while ($delayMs -gt 0)');
     expect(waitCall).toBeGreaterThan(waitDefinition);
     expect(sendCall).toBeGreaterThan(waitCall);
   });

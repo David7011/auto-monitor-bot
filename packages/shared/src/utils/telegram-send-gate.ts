@@ -18,16 +18,17 @@ type GateWaiter = {
 };
 
 export const TELEGRAM_RATE_GATE_RESERVE_LUA = `
--- amb-telegram-rate-gate-reserve-v1
+-- amb-telegram-rate-gate-reserve-v2
 local time = redis.call("TIME")
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local interval = math.max(0, tonumber(ARGV[1]) or 0)
 local current = tonumber(redis.call("GET", KEYS[1])) or 0
-local slot = math.max(now, current)
-local nextSlot = slot + interval
-local ttl = math.max(5000, nextSlot - now + interval * 4)
+-- Never grant a future slot: every waiter must recheck new retry_after.
+if current > now then return current - now end
+local nextSlot = now + interval
+local ttl = math.max(5000, interval * 5)
 redis.call("SET", KEYS[1], tostring(nextSlot), "PX", tostring(ttl))
-return slot - now
+return 0
 `;
 
 export const TELEGRAM_RATE_GATE_DEFER_LUA = `
@@ -115,7 +116,13 @@ export class TelegramSendGate {
             Math.max(0, Math.trunc(this.minimumIntervalMs)),
           );
           const globalDelay = redisInteger(rawDelay, "Telegram global rate gate returned an invalid delay");
-          if (globalDelay > 0) await this.sleep(globalDelay);
+          if (globalDelay > 0) {
+            // Re-select priorities and atomically recheck admission after sleep.
+            // A different process may have extended cooldown in the meantime.
+            await this.sleep(globalDelay);
+            this.waiters.push(waiter);
+            continue;
+          }
           this.nextLocalSelectionAt = this.now() + Math.max(0, this.minimumIntervalMs);
           waiter.resolve();
         } catch (error) {

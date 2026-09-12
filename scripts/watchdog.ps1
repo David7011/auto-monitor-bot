@@ -157,7 +157,7 @@ function Wait-TelegramGlobalSlot([string]$Token, [string]$ChatId) {
     $safeChatId = ($ChatId -replace "[^0-9-]", "_")
     if (!$safeChatId) { $safeChatId = "unconfigured" }
     $key = "amb:telegram:rate:v1:$botId`:$safeChatId"
-    $lua = 'local t=redis.call("TIME"); local n=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000); local i=math.max(0,tonumber(ARGV[1]) or 0); local c=tonumber(redis.call("GET",KEYS[1])) or 0; local s=math.max(n,c); local x=s+i; local ttl=math.max(5000,x-n+i*4); redis.call("SET",KEYS[1],tostring(x),"PX",tostring(ttl)); return s-n'
+    $lua = 'local t=redis.call("TIME"); local n=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000); local i=math.max(0,tonumber(ARGV[1]) or 0); local c=tonumber(redis.call("GET",KEYS[1])) or 0; if c>n then return c-n end; local x=n+i; local ttl=math.max(5000,i*5); redis.call("SET",KEYS[1],tostring(x),"PX",tostring(ttl)); return 0'
     $arguments = @("--raw", "--no-auth-warning", "-h", $uri.Host, "-p", $port, "-n", $database)
     $previousRedisAuth = $env:REDISCLI_AUTH
     try {
@@ -168,16 +168,18 @@ function Wait-TelegramGlobalSlot([string]$Token, [string]$ChatId) {
           $env:REDISCLI_AUTH = [Uri]::UnescapeDataString($credentials[1])
         }
       }
-      $result = & $redisCli @arguments "EVAL" $lua 1 $key $intervalMs 2>&1
-      if ($LASTEXITCODE -ne 0) { throw ($result | Out-String) }
+      do {
+        $result = & $redisCli @arguments "EVAL" $lua 1 $key $intervalMs 2>&1
+        if ($LASTEXITCODE -ne 0) { throw ($result | Out-String) }
+        $delayMs = 0
+        if (![int]::TryParse(($result | Select-Object -Last 1), [ref]$delayMs) -or $delayMs -lt 0) {
+          throw "invalid Redis rate-gate response"
+        }
+        if ($delayMs -gt 0) { Start-Sleep -Milliseconds $delayMs }
+      } while ($delayMs -gt 0)
     } finally {
       $env:REDISCLI_AUTH = $previousRedisAuth
     }
-    $delayMs = 0
-    if (![int]::TryParse(($result | Select-Object -Last 1), [ref]$delayMs)) {
-      throw "invalid Redis rate-gate response"
-    }
-    if ($delayMs -gt 0) { Start-Sleep -Milliseconds $delayMs }
     return $true
   } catch {
     # Ordinary API/worker sends fail closed when Redis is unavailable. The

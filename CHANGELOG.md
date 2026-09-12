@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-13 — Telegram lease and late-cooldown safety
+
+- Reproduced stale card/flash send ownership and late cross-process cooldown failures before fixing them.
+- Renew existing notification attempts every 15 seconds and verify fenced ownership immediately before HTTP send; a losing attempt cannot reset the new owner's retry state.
+- Redis grants only current admissions; already waiting workers and watchdog recheck extended cooldown instead of spending prebooked future slots.
+- Added fake-clock lease regressions and real three-client Redis late-defer acceptance. OLX pressure, delivery intervals, schema and dependencies remain unchanged.
+- This closes identified coordination races, not the unavoidable remote-acceptance/local-receipt ambiguity of Telegram sendMessage.
+
 ## 2026-09-13 — coverage minimum and backup mirror readiness
 
 - Added AST-based CI enforcement of the exact collector-run.ts coverage minimum 80/80/85/80, including include/exclude matching and mutation regressions.

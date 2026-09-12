@@ -6,6 +6,7 @@ import { env } from "../env.js";
 import { log } from "../lib/log.js";
 import { redisConnection } from "../lib/queues.js";
 import { TelegramSendGate, telegramRateGateKey } from "./telegram-send-gate.js";
+import { withRenewableTelegramLease } from "./telegram-send-lease.js";
 import {
   clampTelegramText,
   enrichedMessageText,
@@ -178,51 +179,64 @@ export async function sendListingLink(
   }
 
   try {
-    await listingSendGate.waitForSlot(
-      listingTelegramPriority(listing.discoveryLane),
-      listingTelegramFreshnessRank(listing),
-    );
-    await prisma.sourceSeenListing.updateMany({
-      where: { listingId, telegramRequestedAt: null },
-      data: { telegramRequestedAt: new Date() },
+    await withRenewableTelegramLease(async () => {
+      const now = new Date();
+      const renewed = await prisma.telegramNotification.updateMany({
+        where: {
+          id: reservation.notificationId, attemptCount: reservation.attemptCount,
+          status: "PROCESSING", messageId: null, leaseExpiresAt: { gt: now },
+        },
+        data: { leaseExpiresAt: new Date(now.getTime() + TELEGRAM_SEND_LEASE_MS) },
+      });
+      return renewed.count === 1;
+    }, async (assertOwned) => {
+      await listingSendGate.waitForSlot(
+        listingTelegramPriority(listing.discoveryLane),
+        listingTelegramFreshnessRank(listing),
+      );
+      await prisma.sourceSeenListing.updateMany({
+        where: { listingId, telegramRequestedAt: null },
+        data: { telegramRequestedAt: new Date() },
+      });
+      await assertOwned();
+      const sent = await telegramBot.api.sendMessage(chatId, text, {
+        link_preview_options: { is_disabled: true },
+        reply_markup: telegramListingKeyboard(
+          listing.url,
+          listing.id,
+          null,
+          env.LISTING_FAVORITE_RETENTION_DAYS,
+        ),
+      }, options.signal);
+
+      // A resolved sendMessage call is Telegram Bot API acceptance. Keep this
+      // separate from queue reservation and later local persistence.
+      const acceptedAt = new Date();
+      const sentAt = acceptedAt;
+      const firstAcceptedAt = reservation.acceptedAt ?? acceptedAt;
+
+      await prisma.telegramNotification.update({
+        where: { id: reservation.notificationId },
+        data: {
+          chatId,
+          messageId: String(sent.message_id),
+          status: "SENT",
+          lastText: text,
+          leaseExpiresAt: null,
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          sentAt,
+          acceptedAt: firstAcceptedAt,
+          deleteAfter: new Date(sentAt.getTime() + env.LISTING_RETENTION_HOURS * 60 * 60 * 1000),
+          favoritedAt: null,
+          retainUntil: null,
+          retentionPolicyAppliedAt: sentAt,
+          cleanupAttemptedAt: null,
+        },
+      });
+
+      await syncAcceptedListing(listingId, firstAcceptedAt);
     });
-    const sent = await telegramBot.api.sendMessage(chatId, text, {
-      link_preview_options: { is_disabled: true },
-      reply_markup: telegramListingKeyboard(
-        listing.url,
-        listing.id,
-        null,
-        env.LISTING_FAVORITE_RETENTION_DAYS,
-      ),
-    }, options.signal);
-
-    // A resolved sendMessage call is Telegram Bot API acceptance. Keep this
-    // separate from queue reservation and later local persistence.
-    const acceptedAt = new Date();
-    const sentAt = acceptedAt;
-    const firstAcceptedAt = reservation.acceptedAt ?? acceptedAt;
-
-    await prisma.telegramNotification.update({
-      where: { id: reservation.notificationId },
-      data: {
-        chatId,
-        messageId: String(sent.message_id),
-        status: "SENT",
-        lastText: text,
-        leaseExpiresAt: null,
-        lastErrorCode: null,
-        lastErrorMessage: null,
-        sentAt,
-        acceptedAt: firstAcceptedAt,
-        deleteAfter: new Date(sentAt.getTime() + env.LISTING_RETENTION_HOURS * 60 * 60 * 1000),
-        favoritedAt: null,
-        retainUntil: null,
-        retentionPolicyAppliedAt: sentAt,
-        cleanupAttemptedAt: null,
-      },
-    });
-
-    await syncAcceptedListing(listingId, firstAcceptedAt);
   } catch (err) {
     await deferGlobalTelegramGate(err);
     const message = err instanceof Error ? err.message : String(err);
@@ -231,7 +245,7 @@ export async function sendListingLink(
     await prisma.telegramNotification.updateMany({
       // A journal transaction can fail after the acceptance receipt committed.
       // Never erase SENT / messageId or let a losing sender reopen that receipt.
-      where: { id: reservation.notificationId, status: "PROCESSING", messageId: null },
+      where: { id: reservation.notificationId, attemptCount: reservation.attemptCount, status: "PROCESSING", messageId: null },
       data: {
         status: "RETRY_PENDING",
         leaseExpiresAt: null,
@@ -383,6 +397,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
   const reserved = await prisma.telegramFlashBundle.updateMany({
     where: {
       id: flashBundleId,
+      attemptCount: existing.attemptCount,
       messageId: null,
       status: { not: "SENT" },
       OR: [
@@ -419,17 +434,29 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
   }
 
   try {
-    await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.FLASH, Number.NEGATIVE_INFINITY);
-    const telegramRequestedAt = new Date();
-    const sent = await telegramBot.api.sendMessage(chatId, existing.lastText, {
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-    });
-    const acceptedAt = new Date();
-    const sentAt = acceptedAt;
-    // Commit the Telegram receipt separately before updating local projections.
-    // Retrying a projection after a DB fault must never resend the flash.
-    await prisma.telegramFlashBundle.update({
+    return await withRenewableTelegramLease(async () => {
+      const now = new Date();
+      const renewed = await prisma.telegramFlashBundle.updateMany({
+        where: {
+          id: flashBundleId, attemptCount: existing.attemptCount + 1,
+          status: "PROCESSING", messageId: null, leaseExpiresAt: { gt: now },
+        },
+        data: { leaseExpiresAt: new Date(now.getTime() + TELEGRAM_FLASH_SEND_LEASE_MS) },
+      });
+      return renewed.count === 1;
+    }, async (assertOwned) => {
+      await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.FLASH, Number.NEGATIVE_INFINITY);
+      await assertOwned();
+      const telegramRequestedAt = new Date();
+      const sent = await telegramBot.api.sendMessage(chatId, existing.lastText, {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+      });
+      const acceptedAt = new Date();
+      const sentAt = acceptedAt;
+      // Commit the Telegram receipt separately before updating local projections.
+      // Retrying a projection after a DB fault must never resend the flash.
+      await prisma.telegramFlashBundle.update({
         where: { id: flashBundleId },
         data: {
           chatId,
@@ -442,14 +469,15 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
           lastErrorMessage: null,
         },
       });
-    await syncAcceptedFlashBundle(flashBundleId, existing.listingIds, acceptedAt, telegramRequestedAt);
-    return existing.listingIds;
+      await syncAcceptedFlashBundle(flashBundleId, existing.listingIds, acceptedAt, telegramRequestedAt);
+      return existing.listingIds;
+    });
   } catch (error) {
     await deferGlobalTelegramGate(error);
     const message = error instanceof Error ? error.message : String(error);
     const retryAfterSeconds = telegramRetryAfterSeconds(error);
     await prisma.telegramFlashBundle.updateMany({
-      where: { id: flashBundleId, status: "PROCESSING", messageId: null },
+      where: { id: flashBundleId, attemptCount: existing.attemptCount + 1, status: "PROCESSING", messageId: null },
       data: {
         status: "RETRY_PENDING",
         leaseExpiresAt: null,
@@ -669,7 +697,7 @@ async function reserveTelegramNotification(
   chatId: string,
   text: string,
 ): Promise<
-  | { kind: "reserved"; notificationId: string; acceptedAt: Date | null }
+  | { kind: "reserved"; notificationId: string; acceptedAt: Date | null; attemptCount: number }
   | { kind: "already-sent"; acceptedAt: Date | null }
   | { kind: "locked" }
 > {
@@ -689,6 +717,7 @@ async function reserveTelegramNotification(
       const reserved = await prisma.telegramNotification.updateMany({
         where: {
           id: existing.id,
+          attemptCount: existing.attemptCount,
           messageId: null,
           status: { notIn: ["SENT", "UPDATED"] },
           OR: [
@@ -710,7 +739,7 @@ async function reserveTelegramNotification(
         },
       });
       if (reserved.count !== 1) return { kind: "locked" };
-      return { kind: "reserved", notificationId: existing.id, acceptedAt: existing.acceptedAt };
+      return { kind: "reserved", notificationId: existing.id, acceptedAt: existing.acceptedAt, attemptCount: existing.attemptCount + 1 };
     }
 
     const created = await prisma.telegramNotification.create({
@@ -725,7 +754,7 @@ async function reserveTelegramNotification(
         leaseExpiresAt,
       },
     });
-    return { kind: "reserved", notificationId: created.id, acceptedAt: created.acceptedAt };
+    return { kind: "reserved", notificationId: created.id, acceptedAt: created.acceptedAt, attemptCount: created.attemptCount };
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") return { kind: "locked" };
     throw err;

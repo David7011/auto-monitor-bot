@@ -3,21 +3,25 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => {
   const receipt = {
     id: "notification-1", listingId: "listing-1", status: "PENDING", messageId: null as string | null,
-    acceptedAt: null as Date | null, sentAt: null as Date | null, leaseExpiresAt: null as Date | null,
+    acceptedAt: null as Date | null, sentAt: null as Date | null, leaseExpiresAt: null as Date | null, attemptCount: 0,
   };
   const flash = { ...receipt, id: "flash-1", listingIds: ["listing-1"], lastText: "a listing" };
   const notificationFind = vi.fn(async () => ({ ...receipt }));
   const flashFind = vi.fn(async () => ({ ...flash }));
   const updateReceipt = vi.fn(async (args: { data: object }) => Object.assign(receipt, args.data));
   const updateFlash = vi.fn(async (args: { data: object }) => Object.assign(flash, args.data));
-  function updateMatching(row: typeof receipt, args: { where: { messageId?: null; status?: string | object }; data: object }) {
+  function updateMatching(row: typeof receipt, args: { where: { messageId?: null; status?: string | object; attemptCount?: number; leaseExpiresAt?: { gt: Date } }; data: object }) {
     if (args.where.messageId === null && row.messageId !== null) return { count: 0 };
     if (typeof args.where.status === "string" && row.status !== args.where.status) return { count: 0 };
-    Object.assign(row, args.data);
+    if (args.where.attemptCount != null && row.attemptCount !== args.where.attemptCount) return { count: 0 };
+    if (args.where.leaseExpiresAt?.gt && (!row.leaseExpiresAt || row.leaseExpiresAt <= args.where.leaseExpiresAt.gt)) return { count: 0 };
+    const data = args.data as { attemptCount?: { increment: number } };
+    const attemptCount = data.attemptCount ? row.attemptCount + data.attemptCount.increment : row.attemptCount;
+    Object.assign(row, args.data, { attemptCount });
     return { count: 1 };
   }
   return {
-    receipt, flash, notificationFind, flashFind, updateReceipt, updateFlash,
+    receipt, flash, notificationFind, flashFind, updateReceipt, updateFlash, waitGate: vi.fn(async () => {}),
     send: vi.fn(async () => ({ message_id: 123 })),
     transaction: vi.fn(async (operations: unknown[]) => Promise.all(operations)),
     notificationUpdateMany: vi.fn(async (args: Parameters<typeof updateMatching>[1]) => updateMatching(receipt, args)),
@@ -44,7 +48,7 @@ vi.mock("../apps/worker/src/lib/log.js", () => ({ log: { warn: vi.fn(), error: v
 vi.mock("../apps/worker/src/lib/queues.js", () => ({ redisConnection: {} }));
 vi.mock("../apps/worker/src/modules/telegram-send-gate.js", () => ({
   telegramRateGateKey: () => "test",
-  TelegramSendGate: class { async waitForSlot() {} async defer() {} },
+  TelegramSendGate: class { waitForSlot = mocks.waitGate; async deferFor() {} },
 }));
 vi.mock("../apps/worker/src/modules/telegram-listing-format.js", () => ({
   initialMessageText: () => "a listing", enrichedMessageText: () => "a listing", clampTelegramText: (text: string) => text,
@@ -59,11 +63,12 @@ const snapshot = {
 describe("Telegram acceptance receipt survives local DB projection failures", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.waitGate.mockReset().mockResolvedValue(undefined);
     mocks.notificationFind.mockImplementation(async () => ({ ...mocks.receipt }));
     mocks.flashFind.mockImplementation(async () => ({ ...mocks.flash }));
     mocks.transaction.mockReset().mockImplementation(async (operations) => Promise.all(operations));
     for (const row of [mocks.receipt, mocks.flash]) Object.assign(row, {
-      status: "PENDING", messageId: null, acceptedAt: null, sentAt: null, leaseExpiresAt: null,
+      status: "PENDING", messageId: null, acceptedAt: null, sentAt: null, leaseExpiresAt: null, attemptCount: 0,
     });
   });
 
@@ -114,6 +119,20 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
     expect(mocks.notificationUpdateMany).toHaveBeenCalled();
     expect(mocks.send).toHaveBeenCalledOnce();
     expect(mocks.receipt.status).toBe("SENT");
+  });
+
+  it.each(["card", "flash"])("blocks a stale %s sender after ownership changes during gate wait", async (kind) => {
+    const row = kind === "card" ? mocks.receipt : mocks.flash;
+    mocks.waitGate.mockImplementationOnce(async () => {
+      row.attemptCount += 1;
+      row.status = "PROCESSING";
+      row.leaseExpiresAt = new Date(Date.now() + 60_000);
+    });
+    const send = kind === "card" ? sendListingLink("listing-1", snapshot) : sendTelegramFlashBundle("flash-1");
+    await expect(send).rejects.toThrow(/lease/i);
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(row.status).toBe("PROCESSING");
+    expect(row.attemptCount).toBe(2);
   });
 
   it("persists a flash receipt before projection updates and only replays projections", async () => {
