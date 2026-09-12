@@ -84,7 +84,7 @@ This is isolated database evidence, not a production OLX-to-Telegram percentile.
 | `completeness:check` | PASS: zero `IMPOSSIBLE`; legacy Cars.ua anchors were reported as explicit `RECOVERABLE` evidence. |
 | `test:olx-parity` | SAFE REFUSAL before network I/O: durable OLX pause remains active until 2026-09-13T09:27:52.274Z. |
 | `local:status` before deploy | Core OK, PostgreSQL/Redis/API healthy, two hot replicas redundant, all queues zero, monitoring RUNNING. The old live API still showed the source-pause classification defect that this release changes. |
-| `test:recovery` and post-deploy status | Recorded after controlled deployment. |
+| `test:recovery` and post-deploy status | PASS in the required elevated context: API PID `11020 → 9972`; supervisor detected it at 17:16:45 and completed targeted recovery at 17:16:53 without restarting the healthy workers or Dashboard. Core readiness returned OK, both hot replicas remained redundant, monitoring remained RUNNING, and all queues were zero. |
 
 ## Remaining limitations
 
