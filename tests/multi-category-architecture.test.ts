@@ -124,6 +124,19 @@ describe("multi-category architecture", () => {
     expect(compileSourceSearchPlan("AUTO_RIA", laptops, now)).toEqual([]);
   });
 
+  it("keeps the vehicle shard first under a synthetic multi-category filter load", () => {
+    const olxCategories = MARKETPLACE_CATEGORY_KEYS.filter((categoryKey) =>
+      sourceSupportsCategory("OLX", categoryKey));
+    const filters = olxCategories.flatMap((categoryKey) =>
+      Array.from({ length: 100 }, (_, index) => makeFilter(`${categoryKey}-${index}`, categoryKey)));
+    const plan = compileSourceSearchPlan("OLX", filters, now);
+
+    expect(plan).toHaveLength(olxCategories.length);
+    expect(plan[0]?.categoryKey).toBe("vehicle.car");
+    expect(new Set(plan.map((context) => context.categoryKey)).size).toBe(plan.length);
+    for (const context of plan) expect(context.filterIds).toHaveLength(100);
+  });
+
   it("isolates category fingerprints and preserves nationwide geography", () => {
     const nationwide = makeFilter("all-laptops", "electronics.laptop");
     const city = makeFilter("city-laptops", "electronics.laptop", {}, { regions: ["dnipropetrovska"], cities: ["dnipro"] });

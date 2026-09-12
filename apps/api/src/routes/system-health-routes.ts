@@ -389,7 +389,8 @@ export function sourceHealthEntry(
     : Number.POSITIVE_INFINITY;
   const externallyPaused = row.status === "CAPTCHA_DETECTED"
     || row.status === "RATE_LIMITED"
-    || row.status === "PAUSED";
+    || row.status === "PAUSED"
+    || Boolean(row.pausedUntil && row.pausedUntil > checkedAt);
   const stale = lastCheckedAgeSeconds > staleAfterSeconds;
   const status: HealthStatus = !monitoringRunning
     ? "IDLE"
@@ -403,7 +404,9 @@ export function sourceHealthEntry(
     : status === "FAIL"
       ? `Нет завершённой проверки ${Number.isFinite(lastCheckedAgeSeconds) ? `${lastCheckedAgeSeconds} с` : "с момента запуска"}`
       : status === "WARN"
-        ? `Источник ограничен: ${row.status}`
+        ? row.pausedUntil && row.pausedUntil > checkedAt
+          ? `Защитная пауза до ${row.pausedUntil.toISOString()} (статус источника: ${row.status})`
+          : `Источник ограничен: ${row.status}`
         : `Проверка свежая: ${lastCheckedAgeSeconds} с назад`;
   return {
     source: row.source,

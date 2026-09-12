@@ -65,7 +65,7 @@ No dependency version, lockfile, database schema, production `.env`, cadence, co
 
 The executable contract answers: every normalized `(source, externalId)` received by the pipeline is `NOTIFIED`, `REJECTED`, `DUPLICATE`, `SHADOWED`, `RECOVERY_PENDING`, `FAILED_REPLAYABLE`, or `IMPOSSIBLE`. `IMPOSSIBLE` makes the checker fail. Compact retained `NOTIFIED` tombstones remain valid after normal card cleanup when their acceptance receipt is durable.
 
-The deterministic source covers bursts 1/2/10/50, equal and missing timestamps, duplicates, offset-page motion, empty and partial responses, parser degradation, timeout, reset, 403, 429, CAPTCHA-like body, 500, changing page 1/page 2, recovery depth, and public offset cap. Every ID actually delivered as a normalized candidate is compared against the durable/recoverable ledger.
+The deterministic source covers bursts 1/2/10/50/100, equal and missing timestamps, duplicates, offset-page motion, empty and partial responses, parser degradation, timeout, reset, 403, 429, CAPTCHA-like body, 500, changing page 1/page 2, recovery depth, and public offset cap. Every ID actually delivered as a normalized candidate is compared against the durable/recoverable ledger.
 
 The crash matrix exercises 23 boundaries from HTTP body through state transaction, including callback, observation persistence, Redis claim, filter/listing/match, Telegram reservation/request/acceptance/receipt, enrichment, recovery pages, and boundary update. A complete burst is now journaled before processing item 1, so a mid-burst crash leaves a replayable tail rather than vanished memory.
 
@@ -88,7 +88,7 @@ Before this upgrade, the critical `collector-run.ts` gate was statements 20%, br
 
 The new `collector-run.ts` gate is statements/lines/branches 80%, functions 85%. Lower global and collector-parser percentages reflect broad source/UI/infrastructure surfaces; the P0 critical orchestrator target is met without excluding it from the global gate.
 
-The final full gate executed 98 test files and 532 tests successfully. It also completed Prisma validation/generation, documentation drift checks, TypeScript, ESLint, PowerShell validation, backup cryptography, CI-policy checks, coverage thresholds, and isolated API/Dashboard builds.
+The follow-up full gate executed 98 test files and 549 tests successfully. It also completed Prisma validation/generation, documentation drift checks, TypeScript, ESLint, PowerShell validation, backup cryptography, CI-policy checks, coverage thresholds, and isolated API/Dashboard builds. The Recovery A/B and additional downtime, Telegram lease, history-retention, and category-load evidence is recorded in [ZERO_SILENT_LOSS_FOLLOWUP_2026-09-12.md](./ZERO_SILENT_LOSS_FOLLOWUP_2026-09-12.md).
 
 ## E. Recovery evidence
 

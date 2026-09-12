@@ -8,7 +8,7 @@ import {
 } from "./support/deterministic-marketplace.js";
 
 describe("deterministic newest-first marketplace completeness harness", () => {
-  it.each([1, 2, 10, 50])("journals a burst of %i before processing its first item", (size) => {
+  it.each([1, 2, 10, 50, 100])("journals a burst of %i before processing its first item", (size) => {
     const market = new DeterministicMarketplace();
     market.publish(size, { prefix: `burst-${size}` });
     const page = market.fetchPage(1, 100);

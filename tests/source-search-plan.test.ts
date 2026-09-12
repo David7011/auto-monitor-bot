@@ -230,6 +230,66 @@ describe("source search plan", () => {
     });
   });
 
+  it.each([
+    { label: "5 minutes", offlineMs: 5 * 60_000 },
+    { label: "1 hour", offlineMs: 60 * 60_000 },
+    { label: "several hours", offlineMs: 6 * 60 * 60_000 },
+  ])("opens bounded recovery after intentional downtime of $label without delaying realtime", ({ offlineMs }) => {
+    const now = new Date("2026-09-01T10:00:00.000Z");
+    const boundary = new Date(now.getTime() - offlineMs);
+    const plan = planCoverageRecovery({
+      source: "OLX",
+      lane: "REALTIME",
+      now,
+      lastSuccessfulScanAt: boundary,
+      currentPending: false,
+      coverageGap: false,
+      knownIdsReset: false,
+      outageDetectionSeconds: 120,
+      lookbackHours: 24,
+      safetyOverlapSeconds: 300,
+    });
+
+    expect(plan).toMatchObject({
+      outageDetected: true,
+      requested: true,
+      reason: "OFFLINE_WINDOW",
+      persistedBoundaryAt: boundary,
+    });
+    expect(plan.requiredCutoffAt).toEqual(new Date(boundary.getTime() - 300_000));
+    expect(decideCoverageRecoveryTransition({
+      requested: true,
+      lane: "REALTIME",
+      coverageVerified: true,
+      verificationHasEvidence: true,
+    })).toEqual({ verified: false, unresolved: false, required: true });
+  });
+
+  it("caps recovery exceeding public history and records an honest UNRESOLVED transition", () => {
+    const now = new Date("2026-09-01T10:00:00.000Z");
+    const plan = planCoverageRecovery({
+      source: "OLX",
+      lane: "REALTIME",
+      now,
+      lastSuccessfulScanAt: new Date("2026-08-29T10:00:00.000Z"),
+      currentPending: false,
+      coverageGap: false,
+      knownIdsReset: false,
+      outageDetectionSeconds: 120,
+      lookbackHours: 24,
+      safetyOverlapSeconds: 300,
+    });
+
+    expect(plan.requiredCutoffAt).toEqual(new Date("2026-08-31T10:00:00.000Z"));
+    expect(decideCoverageRecoveryTransition({
+      requested: plan.requested,
+      lane: "BACKFILL",
+      coverageVerified: false,
+      verificationHasEvidence: false,
+      unresolvedReason: "PUBLIC_OFFSET_CAP",
+    })).toEqual({ verified: false, unresolved: true, required: false });
+  });
+
   it("durably requests recovery for realtime overflow even without an outage", () => {
     const boundary = new Date("2026-09-01T09:59:30.000Z");
     const plan = planCoverageRecovery({

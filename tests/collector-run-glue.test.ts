@@ -90,6 +90,8 @@ vi.mock("../apps/worker/src/processors/collector-run-helpers.js", () => ({
   normalizeCollectedBatch: (listings: unknown[]) => listings,
   outageRecoveryListings: (listings: unknown[]) => listings,
   releaseLock: mocks.releaseLock,
+  recoveryContinuationJobId: (input: { source: string; monitoringGeneration?: number; recoveryWindowId: string | null; recoveryAttemptCount: number }) =>
+    `coverage-recovery-${input.source}-${input.monitoringGeneration ?? "unknown-generation"}-${input.recoveryWindowId ?? "legacy-window"}-attempt-${input.recoveryAttemptCount}`,
   renewLock: vi.fn(),
   resolveLane: (job: { lane?: string }) => job.lane ?? "REALTIME",
   resolveTrigger: (job: { trigger?: string }) => job.trigger ?? "SCHEDULED",
@@ -172,6 +174,7 @@ describe("collector.run glue preflight invariants", () => {
       recoveryVerified: false,
       recoveryUnresolved: false,
       recoveryUnresolvedReason: null,
+      recoveryAttemptCount: 0,
       requiredCutoffAt: null,
     });
     mocks.dispatchListings.mockImplementation(async (listings: unknown[]) => listings.map((item) => ({
@@ -362,6 +365,7 @@ describe("collector.run glue preflight invariants", () => {
       recoveryVerified: false,
       recoveryUnresolved: true,
       recoveryUnresolvedReason: "PUBLIC_OFFSET_CAP",
+      recoveryAttemptCount: 1,
       requiredCutoffAt: new Date("2026-09-12T07:00:00Z"),
     });
 
@@ -381,6 +385,7 @@ describe("collector.run glue preflight invariants", () => {
       recoveryVerified: false,
       recoveryUnresolved: false,
       recoveryUnresolvedReason: null,
+      recoveryAttemptCount: 0,
       requiredCutoffAt: new Date("2026-09-12T07:00:00Z"),
     });
 
@@ -390,7 +395,31 @@ describe("collector.run glue preflight invariants", () => {
       "collector.backfill",
       "collect",
       expect.objectContaining({ trigger: "RECOVERY", lane: "BACKFILL", monitoringGeneration: 8 }),
-      expect.objectContaining({ deduplicationId: "coverage-recovery-OLX-8-window-1" }),
+      { jobId: "coverage-recovery-OLX-8-window-1-attempt-0" },
+    );
+  });
+
+  it("queues Recovery B after an incomplete active Recovery A", async () => {
+    mocks.loadSourceSearchState.mockResolvedValueOnce({ ...state, coverageRecoveryPending: true });
+    mocks.markSourceSearchSuccess.mockResolvedValueOnce({
+      recoveryRequired: true,
+      outageDetected: false,
+      recoveryWindowId: "window-1",
+      recoveryWindowOpened: false,
+      recoveryVerified: false,
+      recoveryUnresolved: false,
+      recoveryUnresolvedReason: null,
+      recoveryAttemptCount: 2,
+      requiredCutoffAt: new Date("2026-09-12T07:00:00Z"),
+    });
+
+    await processCollectorRun({ source: "OLX", lane: "BACKFILL", trigger: "RECOVERY", monitoringGeneration: 8 });
+
+    expect(mocks.enqueue).toHaveBeenCalledWith(
+      "collector.backfill",
+      "collect",
+      expect.objectContaining({ trigger: "RECOVERY", lane: "BACKFILL", monitoringGeneration: 8 }),
+      { jobId: "coverage-recovery-OLX-8-window-1-attempt-2" },
     );
   });
 

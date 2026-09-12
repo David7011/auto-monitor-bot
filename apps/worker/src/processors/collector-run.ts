@@ -39,6 +39,7 @@ import {
   normalizeCollectedBatch,
   outageRecoveryListings,
   releaseLock,
+  recoveryContinuationJobId,
   renewLock,
   resolveLane,
   resolveTrigger,
@@ -451,9 +452,10 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         lane === "REALTIME" && stateUpdate.recoveryRequired
       ) || (
         job.trigger === "COVERAGE" && stateUpdate.recoveryRequired
+      ) || (
+        lane === "BACKFILL" && stateUpdate.recoveryRequired
       );
       if (immediateRecoveryRequired) {
-        const recoveryEpoch = stateUpdate.requiredCutoffAt?.getTime() ?? Date.now();
         await enqueue(
           QUEUE_NAMES.COLLECTOR_BACKFILL,
           "collect",
@@ -466,20 +468,16 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
             scheduledAt: new Date().toISOString(),
           },
           {
-            jobId: [
-              "coverage-recovery",
+            // One durable attempt number identifies one required pass. The
+            // same signal coalesces through BullMQ jobId, while an incomplete
+            // active pass commits the next number and cannot swallow its own
+            // continuation.
+            jobId: recoveryContinuationJobId({
               source,
-              job.monitoringGeneration ?? "unknown-generation",
-              stateUpdate.recoveryWindowId ?? "legacy-window",
-              Math.floor(recoveryEpoch / 60_000),
-              Math.floor(Date.now() / 60_000),
-            ].join("-"),
-            deduplicationId: [
-              "coverage-recovery",
-              source,
-              job.monitoringGeneration ?? "unknown-generation",
-              stateUpdate.recoveryWindowId ?? "legacy-window",
-            ].join("-"),
+              monitoringGeneration: job.monitoringGeneration,
+              recoveryWindowId: stateUpdate.recoveryWindowId,
+              recoveryAttemptCount: stateUpdate.recoveryAttemptCount,
+            }),
           },
         );
       }

@@ -189,6 +189,8 @@ export type MetricsResponse<DateValue = string> = {
   };
   olxHotPath: {
     state: "HEALTHY" | "DEGRADED" | "PROTECTED" | "INSUFFICIENT_DATA";
+    operationalState: "HEALTHY" | "DEGRADED" | "PROTECTED";
+    optimizationReadiness: "READY" | "NOT_READY" | "INSUFFICIENT_DATA" | "BLOCKED";
     stateReason: string;
     windowHours: 24;
     cadence: {

@@ -284,7 +284,7 @@ export default function DashboardPage() {
       <HudPanel
         kicker="OLX Hot Path · 24 часа"
         title="Доказуемая задержка и нагрузка"
-        action={<StatusBadge status={metrics?.olxHotPath?.state ?? "INSUFFICIENT_DATA"} />}
+        action={<StatusBadge status={metrics?.olxHotPath?.operationalState ?? metrics?.olxHotPath?.state ?? "INSUFFICIENT_DATA"} />}
       >
         <div className="space-y-4">
           <div className="grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-4">
@@ -292,6 +292,8 @@ export default function DashboardPage() {
               label="Cadence"
               value={metrics?.olxHotPath ? `${metrics.olxHotPath.cadence.mode} · ${metrics.olxHotPath.cadence.intervalSeconds}±${metrics.olxHotPath.cadence.jitterSeconds} с` : "—"}
             />
+            <InfoLine label="Operational health" value={metrics?.olxHotPath?.operationalState ?? "—"} />
+            <InfoLine label="Canary readiness" value={metrics?.olxHotPath?.optimizationReadiness ?? "—"} />
             <InfoLine label="OLX запросов" value={String(metrics?.olxHotPath?.pressure.requests ?? 0)} />
             <InfoLine label="Запросов/час" value={String(metrics?.olxHotPath?.pressure.requestsPerHour ?? 0)} />
             <InfoLine label="Очередь сейчас" value={String(queueLoad)} />

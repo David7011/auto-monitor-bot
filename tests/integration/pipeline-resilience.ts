@@ -324,11 +324,30 @@ async function assertCategoryRecoveryIsolation(): Promise<void> {
   assert(after.parserHealth === "DEGRADED", "Parser degradation was not durable");
   const untouched = await prisma.sourceSearchState.findUniqueOrThrow({ where: { id: car.id } });
   assert(!untouched.knownExternalIds.includes("laptop-tail"), "Laptop anchors entered car state");
+  const completedHistoryState = await prisma.sourceSearchState.create({
+    data: { source: "OLX", fingerprint: "completed-history", filterIds: [], query: {} },
+  });
+  const completedHistoryWindow = await prisma.coverageRecoveryWindow.create({
+    data: {
+      source: "OLX",
+      sourceSearchStateId: completedHistoryState.id,
+      reason: "OFFLINE_WINDOW",
+      status: "VERIFIED",
+      persistedBoundaryAt: new Date(cutoff.getTime() + 300_000),
+      requiredCutoffAt: cutoff,
+      verifiedAt: new Date(),
+      verificationMethod: "CUTOFF",
+    },
+  });
   const beforeWindows = await prisma.coverageRecoveryWindow.count();
   const replacement = await prisma.sourceSearchState.create({ data: { source: "OLX", fingerprint: "cleanup-replacement", filterIds: [carFilter.id], query: {} } });
   await compactSourceSearchStates({ source: "OLX", currentFingerprints: [replacement.fingerprint], preserveStateId: replacement.id });
   assert(await prisma.coverageRecoveryWindow.count() === beforeWindows, "Planner cleanup deleted durable recovery history");
   assert(await prisma.sourceSearchState.count({ where: { id: laptop.id } }) === 1, "Planner cleanup deleted pending category recovery");
+  assert(await prisma.sourceSearchState.count({ where: { id: completedHistoryState.id } }) === 1,
+    "Planner cleanup deleted a state owning completed recovery history");
+  assert(await prisma.coverageRecoveryWindow.count({ where: { id: completedHistoryWindow.id } }) === 1,
+    "Cascade deleted a completed recovery proof");
 }
 
 async function assertConcurrentRecoveryWritersSerialize(): Promise<void> {

@@ -2,6 +2,8 @@
 
 ## Дополнение 12.09.2026 — provable completeness
 
+Follow-up-аудит обнаружил и устранил один реальный coordination risk: активный Recovery A мог коалесцировать обязательный Recovery B под тем же BullMQ deduplication ID. Новый ID привязан к долговечному номеру попытки recovery window; одинаковая попытка по-прежнему дедуплицируется, следующая не теряется. Дополнительно доказаны burst 100, intentional downtime 5 минут/1 час/6 часов, public-cap `UNRESOLVED`, Telegram active/expired lease, multi-category load и сохранность завершённой recovery history. Operational health теперь не смешивается с canary readiness. Полный follow-up: [docs/ZERO_SILENT_LOSS_FOLLOWUP_2026-09-12.md](./docs/ZERO_SILENT_LOSS_FOLLOWUP_2026-09-12.md).
+
 - Архитектура сохранена: PostgreSQL observation остаётся раньше Redis coordination, realtime отделён от recovery/background, Telegram использует единый межпроцессный gate.
 - Устранён внутренний burst-loss path: весь нормализованный результат collector теперь durable до обработки первого кандидата.
 - Добавлены формальный outcome contract, read-only consistency checker, newest-first mutable fake marketplace, 23-point crash matrix и реальный PostgreSQL/Redis acceptance.

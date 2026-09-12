@@ -59,6 +59,8 @@ const snapshot = {
 describe("Telegram acceptance receipt survives local DB projection failures", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.notificationFind.mockImplementation(async () => ({ ...mocks.receipt }));
+    mocks.flashFind.mockImplementation(async () => ({ ...mocks.flash }));
     mocks.transaction.mockReset().mockImplementation(async (operations) => Promise.all(operations));
     for (const row of [mocks.receipt, mocks.flash]) Object.assign(row, {
       status: "PENDING", messageId: null, acceptedAt: null, sentAt: null, leaseExpiresAt: null,
@@ -87,6 +89,31 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
     await sendListingLink("listing-1", snapshot);
     expect(mocks.send).not.toHaveBeenCalled();
     expect(mocks.receipt.messageId).toBe("concurrent");
+  });
+
+  it("does not let a fallback send while the original ambiguous lease is active", async () => {
+    Object.assign(mocks.receipt, {
+      status: "PROCESSING",
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+    });
+
+    await sendListingLink("listing-1", snapshot);
+
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.notificationUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("allows a bounded fallback after the ambiguous lease expires", async () => {
+    Object.assign(mocks.receipt, {
+      status: "PROCESSING",
+      leaseExpiresAt: new Date(Date.now() - 1),
+    });
+
+    await sendListingLink("listing-1", snapshot);
+
+    expect(mocks.notificationUpdateMany).toHaveBeenCalled();
+    expect(mocks.send).toHaveBeenCalledOnce();
+    expect(mocks.receipt.status).toBe("SENT");
   });
 
   it("persists a flash receipt before projection updates and only replays projections", async () => {

@@ -2,6 +2,7 @@
 
 ## Статус 12.09.2026
 
+- Follow-up Zero Silent Loss завершает P0 coordination proof: Recovery B больше не поглощается уже активным Recovery A, а критические deterministic/fault тесты входят в общий `test:coverage`/`check:full`. Следующий допустимый этап остаётся controlled OLX latency optimization только после естественного выхода из protection и достаточной telemetry.
 - P0 provable completeness реализован и проходит deterministic/unit + isolated PostgreSQL/Redis acceptance. Финальный production acceptance выполняется только без обхода активной OLX-защиты.
 - P1 telemetry реализована без изменения cadence: T1–T7, internal end-to-end, 24h origin pressure и sample-qualified p50/p95/p99. Production sample OLX пока `INSUFFICIENT_DATA` из-за внешнего cooldown.
 - Следующий cadence experiment остаётся существующим `20±4 → 18±3` и может начаться только после чистой выборки, отсутствия recovery/protection pressure и автоматического canary допуска. Более быстрый этап не задан и не разрешён.

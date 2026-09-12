@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 const crashPoints = [
+  "HTTP_RESPONSE_RECEIVED",
   "HTTP_BODY_RECEIVED",
   "PARSED",
+  "NORMALIZED_CANDIDATE_CREATED",
   "HOT_CALLBACK_STARTED",
   "BEFORE_OBSERVATION_PERSIST",
   "AFTER_OBSERVATION_PERSIST",
@@ -61,7 +63,7 @@ describe("pipeline crash/replay matrix", () => {
   });
 
   it("covers every mandated checkpoint exactly once", () => {
-    expect(new Set(crashPoints).size).toBe(21);
+    expect(new Set(crashPoints).size).toBe(23);
   });
 });
 
@@ -80,7 +82,7 @@ function stateAt(point: CrashPoint): SimulatedPipeline {
           ? "PENDING"
           : "NONE";
   return {
-    normalized: atLeast("PARSED"),
+    normalized: atLeast("NORMALIZED_CANDIDATE_CREATED"),
     observation,
     listing: atLeast("AFTER_LISTING_CREATE"),
     notification: hasReceipt
@@ -91,7 +93,7 @@ function stateAt(point: CrashPoint): SimulatedPipeline {
           ? "RESERVED"
           : "NONE",
     boundaryAdvanced: point === "AFTER_STATE_TRANSACTION",
-    recoveryRequired: atLeast("PARSED") && !atLeast("AFTER_OBSERVATION_PERSIST"),
+    recoveryRequired: atLeast("NORMALIZED_CANDIDATE_CREATED") && !atLeast("AFTER_OBSERVATION_PERSIST"),
     possibleDuplicate: false,
   };
 }

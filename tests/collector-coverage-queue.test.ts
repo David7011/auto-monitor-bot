@@ -3,6 +3,7 @@ import { QUEUE_NAMES } from "../packages/shared/src/constants/queues.js";
 import {
   collectorLockScope,
   collectorQueueForJob,
+  recoveryContinuationJobId,
   resolveLane,
   resolveTrigger,
   scanOptions,
@@ -57,5 +58,21 @@ describe("durable collector.coverage queue", () => {
     expect(nextCoverageTickAfterAttempt(now, 60).toISOString()).toBe("2026-08-30T10:01:00.000Z");
     expect(coverageJobId(7, now)).toBe("collector-coverage-OLX-7-1788084000000");
     expect(coverageJobId(7, now)).not.toContain(":");
+  });
+
+  it("coalesces one recovery pass but preserves Recovery B after active Recovery A", () => {
+    const base = {
+      source: "OLX" as const,
+      monitoringGeneration: 7,
+      recoveryWindowId: "window-1",
+    };
+    const recoveryA = recoveryContinuationJobId({ ...base, recoveryAttemptCount: 0 });
+    const duplicateSignalForA = recoveryContinuationJobId({ ...base, recoveryAttemptCount: 0 });
+    const recoveryB = recoveryContinuationJobId({ ...base, recoveryAttemptCount: 1 });
+
+    expect(duplicateSignalForA).toBe(recoveryA);
+    expect(recoveryB).not.toBe(recoveryA);
+    expect(recoveryB).toBe("coverage-recovery-OLX-7-window-1-attempt-1");
+    expect(recoveryB).not.toContain(":");
   });
 });

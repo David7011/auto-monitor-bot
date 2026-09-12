@@ -25,3 +25,36 @@ export function deriveOlxProtectionState(
 
   return { protected: false, reason: null };
 }
+
+export function deriveOlxHotPathStates(input: {
+  protected: boolean;
+  sourceStatus: string | null;
+  parserDegraded: boolean;
+  p95Ready: boolean;
+  p95Exceeded: boolean;
+}): {
+  operationalState: "HEALTHY" | "DEGRADED" | "PROTECTED";
+  optimizationReadiness: "READY" | "NOT_READY" | "INSUFFICIENT_DATA" | "BLOCKED";
+  compatibilityState: "HEALTHY" | "DEGRADED" | "PROTECTED" | "INSUFFICIENT_DATA";
+} {
+  const operationalState = input.protected
+    ? "PROTECTED" as const
+    : input.parserDegraded || !input.sourceStatus || !["ACTIVE", "LIMITED"].includes(input.sourceStatus)
+      ? "DEGRADED" as const
+      : "HEALTHY" as const;
+  const optimizationReadiness = input.protected
+    ? "BLOCKED" as const
+    : !input.p95Ready
+      ? "INSUFFICIENT_DATA" as const
+      : input.p95Exceeded
+        ? "NOT_READY" as const
+        : "READY" as const;
+  const compatibilityState = input.protected
+    ? "PROTECTED" as const
+    : !input.p95Ready
+      ? "INSUFFICIENT_DATA" as const
+      : operationalState === "DEGRADED" || input.p95Exceeded
+        ? "DEGRADED" as const
+        : "HEALTHY" as const;
+  return { operationalState, optimizationReadiness, compatibilityState };
+}

@@ -15,7 +15,7 @@ import {
 } from "@amb/shared";
 import { env } from "../env.js";
 import { apiStartedAt } from "../lib/runtime-lifecycle.js";
-import { deriveOlxProtectionState } from "../lib/olx-hot-path-state.js";
+import { deriveOlxHotPathStates, deriveOlxProtectionState } from "../lib/olx-hot-path-state.js";
 import {
   COLLECTOR_DURATION_MIN_SAMPLE_SIZE,
   buildCollectorDurationBreakdown,
@@ -304,13 +304,16 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
     const olxProtection = deriveOlxProtectionState(olxSource, generatedAt);
     const olxProtected = olxProtection.protected;
     const olxParserDegraded = categoryStates.some((state) => state.source === "OLX" && state.parserHealth === "DEGRADED");
-    const olxState = olxProtected
-      ? "PROTECTED" as const
-      : !qualifiedOlxCollector.ready.p95 || !qualifiedOlxInternal.ready.p95
-        ? "INSUFFICIENT_DATA" as const
-        : olxParserDegraded || (qualifiedOlxCollector.p95 ?? 0) > 2_000 || (qualifiedOlxInternal.p95 ?? 0) > 3_000
-          ? "DEGRADED" as const
-          : "HEALTHY" as const;
+    const olxP95Ready = qualifiedOlxCollector.ready.p95 && qualifiedOlxInternal.ready.p95;
+    const olxP95Exceeded = (qualifiedOlxCollector.p95 ?? 0) > 2_000 || (qualifiedOlxInternal.p95 ?? 0) > 3_000;
+    const olxStates = deriveOlxHotPathStates({
+      protected: olxProtected,
+      sourceStatus: olxSource?.status ?? null,
+      parserDegraded: olxParserDegraded,
+      p95Ready: olxP95Ready,
+      p95Exceeded: olxP95Exceeded,
+    });
+    const olxState = olxStates.compatibilityState;
     const olxStateReason = olxProtected
       ? olxProtection.reason ?? "OLX protection is active; no extra traffic is authorized"
       : olxState === "INSUFFICIENT_DATA"
@@ -341,6 +344,8 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
       },
       olxHotPath: {
         state: olxState,
+        operationalState: olxStates.operationalState,
+        optimizationReadiness: olxStates.optimizationReadiness,
         stateReason: olxStateReason,
         windowHours: 24 as const,
         cadence: {

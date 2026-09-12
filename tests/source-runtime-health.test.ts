@@ -31,4 +31,18 @@ describe("source runtime health", () => {
 
     expect(health.status).toBe("FAIL");
   });
+
+  it("reports a retained future protection pause as WARN rather than a crashed worker", () => {
+    const health = sourceHealthEntry({
+      source: "OLX",
+      status: "DISABLED",
+      intervalSeconds: 20,
+      lastCheckedAt: new Date("2026-08-26T12:00:00.000Z"),
+      lastSuccessfulAt: new Date("2026-08-26T12:00:00.000Z"),
+      pausedUntil: new Date("2026-08-28T12:00:00.000Z"),
+    }, checkedAt, true);
+
+    expect(health.status).toBe("WARN");
+    expect(health.message).toContain("2026-08-28T12:00:00.000Z");
+  });
 });

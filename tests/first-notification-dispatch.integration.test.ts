@@ -51,6 +51,32 @@ describe("first notification dispatch integration", () => {
     expect(deps.enqueueTelegram).toHaveBeenCalledWith(TELEGRAM_SEND_PRIORITY);
   });
 
+  it("queues immediately when the attempt fails before Telegram can accept it", async () => {
+    const deps = dependencies();
+    deps.sendInline.mockRejectedValueOnce(new Error("request construction failed before HTTP"));
+
+    await expect(dispatchFirstNotification(realtimeInput, deps)).resolves.toBe("QUEUED");
+    expect(deps.enqueueTelegram).toHaveBeenCalledWith(TELEGRAM_SEND_PRIORITY);
+    expect(deps.enqueueEnrichment).not.toHaveBeenCalled();
+  });
+
+  it("treats an unresolved deadline as ambiguous and never performs an immediate duplicate retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = dependencies();
+      deps.sendInline.mockImplementationOnce(() => new Promise<void>(() => undefined));
+
+      const pending = dispatchFirstNotification({ ...realtimeInput, inlineDeadlineMs: 25 }, deps);
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(pending).resolves.toBe("IN_FLIGHT");
+      expect(deps.enqueueTelegram).toHaveBeenCalledTimes(1);
+      expect(deps.enqueueTelegram).toHaveBeenCalledWith(TELEGRAM_SEND_PRIORITY, 60_250);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps catch-up backfill off the inline slot and uses lower priority", async () => {
     const deps = dependencies();
     const result = await dispatchFirstNotification(

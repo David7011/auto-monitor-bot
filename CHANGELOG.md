@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-12 — zero-silent-loss follow-up
+
+- Recovery continuation now uses the durable recovery-window attempt in its BullMQ job ID. An incomplete active Recovery A can enqueue a distinct Recovery B without losing the newer signal; duplicate scheduling of the same attempt still coalesces.
+- Added burst-100, 23-boundary crash, intentional-downtime/public-cap, Telegram lease ambiguity, completed recovery-history retention, and 100-filter-per-category isolation regressions.
+- Split OLX operational health from acceleration-canary readiness and retained future durable source pauses as WARN/PROTECTED across stop/start display-state changes.
+- Kept OLX cadence, request concurrency, retry/cooldown policy, dependencies, schema, secrets, and Telegram concurrency unchanged.
+
 ## 2026-09-12 — provable completeness and evidence-qualified OLX latency
 
 - Collector durably journals the complete normalized burst before the first Redis claim/filter/dispatch, eliminating the memory-only tail-loss window.

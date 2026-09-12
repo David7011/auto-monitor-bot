@@ -32,7 +32,7 @@
 Проект использует собственные закреплённые Node.js 24.18.0 и pnpm 10.34.5. Глобальный Node не нужен.
 
 ```powershell
-cd D:\auto-monitor-bot
+cd C:\Projects\auto-monitor-bot
 .\amb.cmd local:start
 .\amb.cmd local:status
 ```
@@ -307,4 +307,4 @@ GET /logs?limit=100&cursor=...
 - Для app-layer HTTPS нужен Tailscale-аккаунт с поддержкой TLS certificates; текущий приватный TCP уже защищён самим WireGuard-туннелем.
 - Абсолютную полноту чужой площадки без официального event stream доказать невозможно; `test:olx-parity` количественно сравнивает доступные public/API/HTML/private выдачи с памятью проекта.
 
-Актуальная проверенная оценка и оставшиеся риски находятся в [AUDIT.md](./AUDIT.md).
+Актуальная проверенная оценка и оставшиеся риски находятся в [AUDIT.md](./AUDIT.md). Follow-up 12.09.2026 закрыл гонку `Recovery A ACTIVE → Recovery B required`: continuation получает BullMQ `jobId` из durable recovery-window attempt, поэтому новый подтверждённый сигнал не поглощается активной задачей. Добавлены burst-100, downtime, Telegram lease, completed-history cascade и multi-category load regressions. Operational health отделён от readiness следующего acceleration-canary. Подробности: [docs/ZERO_SILENT_LOSS_FOLLOWUP_2026-09-12.md](./docs/ZERO_SILENT_LOSS_FOLLOWUP_2026-09-12.md).

@@ -574,6 +574,7 @@ export async function markSourceSearchSuccess(
   recoveryVerified: boolean;
   recoveryUnresolved: boolean;
   recoveryUnresolvedReason: OlxRecoveryUnresolvedReason | null;
+  recoveryAttemptCount: number;
   requiredCutoffAt: Date | null;
 }> {
   if (state.fingerprint !== context.fingerprint || state.categoryKey !== context.categoryKey
@@ -602,6 +603,7 @@ export async function markSourceSearchSuccess(
       recoveryVerified: false,
       recoveryUnresolved: false,
       recoveryUnresolvedReason: null,
+      recoveryAttemptCount: 0,
       requiredCutoffAt: null,
     };
     if (current.source !== context.source || current.fingerprint !== context.fingerprint
@@ -835,6 +837,7 @@ export async function markSourceSearchSuccess(
       recoveryVerified,
       recoveryUnresolved,
       recoveryUnresolvedReason: options.coverageUnresolvedReason ?? null,
+      recoveryAttemptCount: recoveryWindow?.attemptCount ?? 0,
       requiredCutoffAt: recoveryRequired || recoveryUnresolved
         ? durableCutoff
         : recoveryWindow?.requiredCutoffAt ?? null,

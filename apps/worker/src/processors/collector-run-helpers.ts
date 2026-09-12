@@ -539,6 +539,21 @@ export function collectorLockScope(job: CollectorRunJob, lane: ListingDiscoveryL
   return job.trigger === "COVERAGE" || lane === "COVERAGE" ? "COVERAGE" : lane;
 }
 
+export function recoveryContinuationJobId(input: {
+  source: ListingSource;
+  monitoringGeneration?: number;
+  recoveryWindowId: string | null;
+  recoveryAttemptCount: number;
+}): string {
+  return [
+    "coverage-recovery",
+    input.source,
+    input.monitoringGeneration ?? "unknown-generation",
+    input.recoveryWindowId ?? "legacy-window",
+    `attempt-${Math.max(0, Math.trunc(input.recoveryAttemptCount))}`,
+  ].join("-");
+}
+
 export function collectorQueueForJob(job: CollectorRunJob, lane: ListingDiscoveryLane) {
   if (job.trigger === "COVERAGE" || lane === "COVERAGE") return QUEUE_NAMES.COLLECTOR_COVERAGE;
   return lane === "BACKFILL" ? QUEUE_NAMES.COLLECTOR_BACKFILL : QUEUE_NAMES.COLLECTOR_RUN;

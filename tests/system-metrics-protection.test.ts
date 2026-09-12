@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveOlxProtectionState } from "../apps/api/src/lib/olx-hot-path-state.js";
+import { deriveOlxHotPathStates, deriveOlxProtectionState } from "../apps/api/src/lib/olx-hot-path-state.js";
 
 describe("OLX hot-path protection state", () => {
   const now = new Date("2026-09-12T13:00:00.000Z");
@@ -23,5 +23,29 @@ describe("OLX hot-path protection state", () => {
 
   it.each(["RATE_LIMITED", "CAPTCHA_DETECTED"])("keeps %s protected without a pause timestamp", (status) => {
     expect(deriveOlxProtectionState({ status, pausedUntil: null }, now).protected).toBe(true);
+  });
+
+  it("separates healthy baseline operation from insufficient canary evidence", () => {
+    expect(deriveOlxHotPathStates({
+      protected: false,
+      sourceStatus: "ACTIVE",
+      parserDegraded: false,
+      p95Ready: false,
+      p95Exceeded: false,
+    })).toEqual({
+      operationalState: "HEALTHY",
+      optimizationReadiness: "INSUFFICIENT_DATA",
+      compatibilityState: "INSUFFICIENT_DATA",
+    });
+  });
+
+  it("blocks optimization while protection is active without calling the local runtime unhealthy", () => {
+    expect(deriveOlxHotPathStates({
+      protected: true,
+      sourceStatus: "DISABLED",
+      parserDegraded: false,
+      p95Ready: true,
+      p95Exceeded: false,
+    })).toMatchObject({ operationalState: "PROTECTED", optimizationReadiness: "BLOCKED" });
   });
 });
