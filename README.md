@@ -225,6 +225,17 @@ Health:    http://127.0.0.1:4000/health
 
 Для второй копии на другом физическом томе или UNC-пути задайте `BACKUP_MIRROR_PATH`. Скрипт намеренно отклоняет mirror на том же диске.
 
+Проверка backup health без записи файлов:
+
+```powershell
+.\amb.cmd db:backup:health
+.\amb.cmd db:mirror:check
+```
+
+Первая команда и `local:status` показывают возраст локальной копии, mirror configured/reachable/independent/writable, SHA-256 verification и источник/результат restore drill. Отсутствующий mirror — `WARN`, настроенный недоступный/повреждённый/не независимый mirror — `FAIL`. Допустимый возраст backup — 26 часов, независимого restore evidence — 168 часов. Writable оценивается read-only по ACL и read-only состоянию диска; на UNC права SMB/share могут дополнительно ограничивать запись, поэтому реальное копирование также обязано пройти.
+
+`db:mirror:check` требует настроенный физически независимый mirror, проверяет полный `.ambbak + .sha256 + .json` set и выполняет authenticated restore только в отдельную временную БД с непустыми `filters`, `listings`, `source_seen_listings`. Нет mirror — ненулевой exit code, без фиктивного пути и без восстановления поверх production. Для temp transport/regression acceptance без настройки production mirror: `.\amb.cmd test:backup-health` и `.\amb.cmd test:backup-mirror:restore`; эти тесты не сертифицируют физическую независимость.
+
 Создание ZIP с секретами запрещено. Обычный исходный архив без `.env`, `.runtime`, БД и ключей можно создать так:
 
 ```powershell
@@ -275,7 +286,9 @@ OLX collector сначала одной batch-операцией сохраня�
 
 `check` и обычный `build` собирают TypeScript и Next.js в изолированные временные каталоги, не меняя запущенные `dist`/`.next`. Рабочие артефакты обновляет только `build:deploy` во время контролируемого старта. Локальный E2E использует отдельный dashboard на `127.0.0.1:3101` и `.next-e2e`, поэтому не останавливает production-сайт на порту 3001.
 
-`check` также запускает V8 coverage для API/worker/shared и применяет минимальные пороги statements/lines 24%, branches 70%, functions 38%. Порог намеренно фиксирует текущий доказанный baseline и не позволяет покрытию тихо ухудшаться.
+`check` также запускает V8 coverage для API/worker/shared и применяет минимальные пороги statements/lines 40%, branches 70%, functions 50%. Порог намеренно фиксирует текущий доказанный baseline и не позволяет покрытию тихо ухудшаться.
+
+CI policy дополнительно разбирает `vitest.config.ts` и требует точный file gate `collector-run.ts` не ниже statements/branches/functions/lines `80/80/85/80`, совпадающий coverage include и отсутствие matching exclude. Vitest остаётся единственным источником измеренного coverage.
 
 Диагностика:
 

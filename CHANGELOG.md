@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-13 — coverage minimum and backup mirror readiness
+
+- Added AST-based CI enforcement of the exact collector-run.ts coverage minimum 80/80/85/80, including include/exclude matching and mutation regressions.
+- Added sanitized read-only backup health, physical-disk independence checks, complete-set/hash/header/age validation, and dedicated mirror restore evidence.
+- Added fail-closed db:mirror:check and isolated backup/ACL/staging/retention/transport/authenticated-restore regressions. Temporary logical mirror acceptance is explicitly not physical independence certification.
+- Preserved staging/publish-archive-last, dependency versions, OLX/Telegram/completeness implementation, cadence, concurrency, retry and protection policy.
+
 ## 2026-09-12 — zero-silent-loss follow-up
 
 - Recovery continuation now uses the durable recovery-window attempt in its BullMQ job ID. An incomplete active Recovery A can enqueue a distinct Recovery B without losing the newer signal; duplicate scheduling of the same attempt still coalesces.

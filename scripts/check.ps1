@@ -41,6 +41,7 @@ try {
     Invoke-Pnpm -Arguments @("lint")
     Invoke-Pnpm -Arguments @("test:powershell")
     Invoke-Pnpm -Arguments @("test:backup-crypto")
+    Invoke-Pnpm -Arguments @("test:backup-health")
     Invoke-Pnpm -Arguments @("test:ci-policy")
     Invoke-Pnpm -Arguments @("test:coverage")
     & (Join-Path $PSScriptRoot "verify-production-build.ps1") -SkipLock

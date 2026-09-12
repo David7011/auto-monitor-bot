@@ -10,6 +10,7 @@ $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $BackupRoot = Join-Path $ProjectRoot ".runtime\backups"
 $LockPath = Join-Path $ProjectRoot ".runtime\database-backup.lock"
 . (Join-Path $PSScriptRoot "invoke-backup-crypto.ps1")
+. (Join-Path $PSScriptRoot "backup-health.ps1")
 
 function Get-DotEnvValue([string]$Key) {
   $envPath = Join-Path $ProjectRoot ".env"
@@ -127,42 +128,15 @@ try {
 
     if ($mirrorRoot) {
       $mirrorFullPath = [System.IO.Path]::GetFullPath($mirrorRoot)
-      $backupVolume = [System.IO.Path]::GetPathRoot($BackupRoot)
-      $mirrorVolume = [System.IO.Path]::GetPathRoot($mirrorFullPath)
-      if ($backupVolume -and $mirrorVolume -and $backupVolume.Equals($mirrorVolume, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "BACKUP_MIRROR_PATH must be on a different volume or UNC destination"
+      if (!(Test-AmbBackupIndependent $BackupRoot $mirrorFullPath)) {
+        throw "BACKUP_MIRROR_PATH must be on a physically independent disk or remote UNC destination"
       }
       New-Item -ItemType Directory -Force -Path $mirrorFullPath | Out-Null
-      $mirrorStaging = Join-Path $mirrorFullPath (".amb-mirror-" + [guid]::NewGuid().ToString("N"))
-      New-Item -ItemType Directory -Path $mirrorStaging | Out-Null
-      try {
-        foreach ($item in @($archivePath, $hashPath, $metadataPath)) {
-          Copy-Item -LiteralPath $item -Destination (Join-Path $mirrorStaging ([IO.Path]::GetFileName($item)))
-        }
-        $stagedArchive = Join-Path $mirrorStaging ([IO.Path]::GetFileName($archivePath))
-        if ((Get-Sha256Hex $stagedArchive) -ne $hash) {
-          throw "Backup mirror verification failed after copy"
-        }
-        # Publish the archive last. Consumers therefore never observe a new
-        # archive before its checksum and metadata sidecars are durable.
-        foreach ($item in @($hashPath, $metadataPath, $archivePath)) {
-          $name = [IO.Path]::GetFileName($item)
-          Move-Item -LiteralPath (Join-Path $mirrorStaging $name) -Destination (Join-Path $mirrorFullPath $name) -Force
-        }
-      } finally {
-        Remove-Item -LiteralPath $mirrorStaging -Recurse -Force -ErrorAction SilentlyContinue
-      }
+      # Preserve staging/verification/publish-archive-last semantics in the
+      # shared helper used by the isolated regression acceptance.
+      Publish-AmbBackupMirror $mirrorFullPath @($archivePath, $hashPath, $metadataPath) $hash
       $mirrorCutoff = (Get-Date).AddDays(-[Math]::Max(1, $RetentionDays))
-      Get-ChildItem -LiteralPath $mirrorFullPath -File -ErrorAction SilentlyContinue |
-          Where-Object { $_.Name -match '^database-\d{8}-\d{6}\.ambbak(?:\.sha256|\.json)?$' -and $_.LastWriteTime -lt $mirrorCutoff } |
-        ForEach-Object {
-          $resolvedMirrorItem = [System.IO.Path]::GetFullPath($_.FullName)
-          $mirrorPrefix = $mirrorFullPath.TrimEnd('\') + '\'
-          if (!$resolvedMirrorItem.StartsWith($mirrorPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to remove a path outside the mirror directory: $resolvedMirrorItem"
-          }
-          Remove-Item -LiteralPath $resolvedMirrorItem -Force
-      }
+      Remove-AmbExpiredBackupSets $mirrorFullPath $mirrorCutoff
       Write-Host "Verified encrypted backup mirror created on independent storage."
     }
   } finally {
@@ -173,9 +147,7 @@ try {
   }
 
   $cutoff = (Get-Date).AddDays(-[Math]::Max(1, $RetentionDays))
-  Get-ChildItem -LiteralPath $BackupRoot -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^database-\d{8}-\d{6}\.ambbak(?:\.sha256|\.json)?$' -and $_.LastWriteTime -lt $cutoff } |
-    ForEach-Object { Remove-BackupItem $_.FullName }
+  Remove-AmbExpiredBackupSets $BackupRoot $cutoff
 
   Write-Host "Authenticated encrypted PostgreSQL backup created: $archivePath"
 } finally {

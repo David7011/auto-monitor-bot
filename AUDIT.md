@@ -1,5 +1,9 @@
 # Глубокий аудит Auto Monitor Bot 0.4.1
 
+## Дополнение 13.09.2026 — backup readiness и immutable coverage minimum
+
+CI policy проверяет AST `vitest.config.ts`: точный `collector-run.ts` gate >=80/80/85/80 нельзя удалить, переименовать, снизить или исключить из calculation незаметно. Read-only backup health теперь классифицирует состояние `OK/WARN/FAIL`, проверяет физическую независимость, complete set, SHA-256, возраст и отдельное independent restore evidence. `db:mirror:check` требует настоящий настроенный mirror и восстанавливает только временную БД. На HP mirror пока отсутствует: `WARN`, single-drive risk остаётся; temp transport/restore PASS не выдаётся за физическую независимость. OLX и Telegram runtime не менялись.
+
 ## Дополнение 12.09.2026 — provable completeness
 
 Follow-up-аудит обнаружил и устранил один реальный coordination risk: активный Recovery A мог коалесцировать обязательный Recovery B под тем же BullMQ deduplication ID. Новый ID привязан к долговечному номеру попытки recovery window; одинаковая попытка по-прежнему дедуплицируется, следующая не теряется. Дополнительно доказаны burst 100, intentional downtime 5 минут/1 час/6 часов, public-cap `UNRESOLVED`, Telegram active/expired lease, multi-category load и сохранность завершённой recovery history. Operational health теперь не смешивается с canary readiness. Полный follow-up: [docs/ZERO_SILENT_LOSS_FOLLOWUP_2026-09-12.md](./docs/ZERO_SILENT_LOSS_FOLLOWUP_2026-09-12.md).

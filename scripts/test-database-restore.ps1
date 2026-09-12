@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
   [string]$ArchivePath,
-  [switch]$LocalOnly
+  [switch]$LocalOnly,
+  [switch]$MirrorOnly,
+  [switch]$RequireNonEmpty
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +11,10 @@ $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $BackupRoot = Join-Path $ProjectRoot ".runtime\backups"
 $DrillRoot = Join-Path $ProjectRoot ".runtime\restore-drills"
 . (Join-Path $PSScriptRoot "invoke-backup-crypto.ps1")
+. (Join-Path $PSScriptRoot "backup-health.ps1")
+if ($LocalOnly -and $MirrorOnly) { throw 'LocalOnly and MirrorOnly are mutually exclusive' }
+$mirrorRoot = if ($LocalOnly) { '' } else { Get-AmbBackupSetting $ProjectRoot 'BACKUP_MIRROR_PATH' }
+if ($MirrorOnly -and !$mirrorRoot) { throw 'Independent mirror restore refused: BACKUP_MIRROR_PATH is not configured' }
 
 function Get-DotEnvValue([string]$Key) {
   $line = Get-Content -LiteralPath (Join-Path $ProjectRoot ".env") -Encoding UTF8 |
@@ -47,24 +53,23 @@ function Get-Sha256Hex([string]$Path) {
 
 New-Item -ItemType Directory -Force -Path $DrillRoot | Out-Null
 if (!$ArchivePath) {
-  $mirrorRoot = if ($LocalOnly) { "" } else { Get-DotEnvValue "BACKUP_MIRROR_PATH" }
   $restoreSource = if ($mirrorRoot) {
     $resolvedMirror = [IO.Path]::GetFullPath($mirrorRoot)
-    $localVolume = [IO.Path]::GetPathRoot($BackupRoot)
-    $mirrorVolume = [IO.Path]::GetPathRoot($resolvedMirror)
-    if ($localVolume -and $mirrorVolume -and $localVolume.Equals($mirrorVolume, [StringComparison]::OrdinalIgnoreCase)) {
-      throw "BACKUP_MIRROR_PATH must be on a different volume or UNC destination"
+    if (!(Test-AmbBackupIndependent $BackupRoot $resolvedMirror)) {
+      throw "BACKUP_MIRROR_PATH must be on a physically independent disk or remote UNC destination"
     }
     if (!(Test-Path -LiteralPath $resolvedMirror)) { throw "Configured backup mirror is unavailable" }
     $resolvedMirror
   } else {
     $BackupRoot
   }
-  $ArchivePath = Get-ChildItem -LiteralPath $restoreSource -Filter "database-*.ambbak" -File |
-    Sort-Object LastWriteTime -Descending | Select-Object -ExpandProperty FullName -First 1
+  $ArchivePath = (Get-AmbBackupSet $restoreSource).path
 }
 if (!$ArchivePath -or !(Test-Path -LiteralPath $ArchivePath)) { throw "No encrypted database backup is available" }
 $ArchivePath = [System.IO.Path]::GetFullPath($ArchivePath)
+$sourceIsMirror = $mirrorRoot -and $ArchivePath.StartsWith(([IO.Path]::GetFullPath($mirrorRoot).TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)
+if ($MirrorOnly -and !$sourceIsMirror) { throw 'Independent mirror restore cannot use a local archive' }
+if ($sourceIsMirror -and !(Test-AmbBackupIndependent $BackupRoot $mirrorRoot)) { throw 'Mirror is not physically independent' }
 if ([IO.Path]::GetExtension($ArchivePath) -cne ".ambbak") {
   throw "Automated restore accepts authenticated .ambbak backups only; legacy .7z archives require controlled manual recovery"
 }
@@ -113,34 +118,59 @@ try {
 
   $validation = & $psql "--host=$($uri.Host)" "--port=$databasePort" "--username=$databaseUser" `
     "--dbname=$databaseName" --tuples-only --no-align --command `
-    "SELECT (to_regclass('public.filters') IS NOT NULL AND to_regclass('public.listings') IS NOT NULL AND to_regclass('public.source_seen_listings') IS NOT NULL)::text || '|' || (SELECT count(*) FROM filters)::text || '|' || (SELECT count(*) FROM listings)::text;"
+    "SELECT (to_regclass('public.filters') IS NOT NULL AND to_regclass('public.listings') IS NOT NULL AND to_regclass('public.source_seen_listings') IS NOT NULL)::text || '|' || (SELECT count(*) FROM filters)::text || '|' || (SELECT count(*) FROM listings)::text || '|' || (SELECT count(*) FROM source_seen_listings)::text;"
   if ($LASTEXITCODE -ne 0 -or !$validation -or !$validation.Trim().StartsWith("true|")) {
     throw "Restored database structural validation failed: $validation"
   }
   $parts = $validation.Trim().Split('|')
-  @{
+  if (($MirrorOnly -or $RequireNonEmpty) -and ([long]$parts[1] -le 0 -or [long]$parts[2] -le 0 -or [long]$parts[3] -le 0)) {
+    throw 'Independent mirror restore must contain real filters, listings and observations'
+  }
+  $receipt = @{
     testedAt = (Get-Date).ToString("o")
     archive = [IO.Path]::GetFileName($ArchivePath)
     sha256 = $actualHash
     filters = [int]$parts[1]
     listings = [int]$parts[2]
+    observations = [long]$parts[3]
     durationSeconds = [Math]::Round(((Get-Date) - $startedAt).TotalSeconds, 2)
     result = "PASS"
-    source = if ($mirrorRoot) { "INDEPENDENT_MIRROR" } else { "LOCAL" }
-  } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DrillRoot "latest.json") -Encoding UTF8
-  Write-Host "Restore drill passed: $($parts[1]) filters and $($parts[2]) listings restored into an isolated temporary database."
+    source = if ($sourceIsMirror) { "INDEPENDENT_MIRROR" } else { "LOCAL" }
+    mirrorIdentity = if ($sourceIsMirror) { Get-AmbMirrorIdentity $mirrorRoot } else { $null }
+  }
+} catch {
+  $failure = @{ testedAt = (Get-Date).ToString('o'); result = 'FAIL'; source = if ($sourceIsMirror) { 'INDEPENDENT_MIRROR' } else { 'LOCAL' }; reason = 'RESTORE_FAILED' }
+  $failure | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DrillRoot 'latest.json') -Encoding UTF8
+  if ($sourceIsMirror) { $failure | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DrillRoot 'latest-mirror.json') -Encoding UTF8 }
+  throw
 } finally {
   if ($created) {
     & $dropdb "--host=$($uri.Host)" "--port=$databasePort" "--username=$databaseUser" --force $databaseName *> $null
+    $dropFailed = $LASTEXITCODE -ne 0
   }
   $env:PGPASSWORD = $previousPassword
   $encryptionPassword = $null
   if (Test-Path -LiteralPath $workDir) {
-    $resolved = [System.IO.Path]::GetFullPath($workDir)
-    $prefix = $DrillRoot.TrimEnd('\') + '\'
-    if (!$resolved.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-      throw "Refusing to remove a path outside the restore-drill directory: $resolved"
+    try {
+      $resolved = [System.IO.Path]::GetFullPath($workDir)
+      $prefix = $DrillRoot.TrimEnd('\') + '\'
+      if (!$resolved.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or
+          ((Get-Item -LiteralPath $resolved).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Unsafe restore cleanup target'
+      }
+      Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+    } catch {
+      $cleanupFailed = $true
     }
-    Remove-Item -LiteralPath $resolved -Recurse -Force
   }
 }
+if ($dropFailed -or $cleanupFailed) {
+  $receipt.result = 'FAIL'
+  $receipt.reason = 'TEMP_RESTORE_CLEANUP_FAILED'
+  $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DrillRoot 'latest.json') -Encoding UTF8
+  if ($sourceIsMirror) { $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DrillRoot 'latest-mirror.json') -Encoding UTF8 }
+  throw 'Temporary restore database cleanup failed; restore acceptance was not published'
+}
+$receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DrillRoot 'latest.json') -Encoding UTF8
+if ($sourceIsMirror) { $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DrillRoot 'latest-mirror.json') -Encoding UTF8 }
+Write-Host "Restore drill passed: $($parts[1]) filters, $($parts[2]) listings and $($parts[3]) observations restored into an isolated temporary database."

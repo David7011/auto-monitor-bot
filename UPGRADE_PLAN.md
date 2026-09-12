@@ -1,5 +1,12 @@
 # План апгрейда Auto Monitor Bot
 
+## Статус 13.09.2026
+
+- Coverage minimum критического collector защищён CI policy и mutation regressions без изменения Vitest thresholds.
+- Backup mirror получил read-only health и strict independent restore acceptance; staging/publish-last и шифрование сохранены.
+- Физический `BACKUP_MIRROR_PATH` должен выбрать владелец. До его настройки и реального `db:mirror:check` single-drive risk НЕ закрыт.
+- OLX baseline `20±4`, canary `18±3`, qualification/promotion 100 runs и p95/p99 30/100 traces не изменены. Ускорение возможно только после естественного выхода из protection и достаточной live evidence.
+
 ## Статус 12.09.2026
 
 - Follow-up Zero Silent Loss завершает P0 coordination proof: Recovery B больше не поглощается уже активным Recovery A, а критические deterministic/fault тесты входят в общий `test:coverage`/`check:full`. Следующий допустимый этап остаётся controlled OLX latency optimization только после естественного выхода из protection и достаточной telemetry.

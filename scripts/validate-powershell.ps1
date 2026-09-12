@@ -27,8 +27,10 @@ if ($nodeRuntimeBootstrap -notmatch '\[Security\.Cryptography\.SHA256\]::Create\
 }
 
 $backupScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot "backup-database.ps1") -Raw
-if ($backupScript -notmatch 'Backup mirror verification failed after copy' -or
-    $backupScript -notmatch 'Publish the archive last') {
+$backupHealthScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'backup-health.ps1') -Raw
+if ($backupScript -notmatch 'Publish-AmbBackupMirror' -or
+    $backupHealthScript -notmatch 'MIRROR_COPY_CHECKSUM_MISMATCH' -or
+    $backupHealthScript -notmatch 'Publish the archive last') {
   throw "Backup mirror must verify the copied archive and publish it only after sidecars"
 }
 $restoreScript = Get-Content -LiteralPath (Join-Path $PSScriptRoot "test-database-restore.ps1") -Raw

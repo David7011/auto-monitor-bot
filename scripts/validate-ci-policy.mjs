@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { validateCollectorCoveragePolicy } from "./collector-coverage-policy.mjs";
 
 const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 const workflowPath = fileURLToPath(new URL("../.github/workflows/ci.yml", import.meta.url));
 const packagePath = fileURLToPath(new URL("../package.json", import.meta.url));
 const workflow = readFileSync(workflowPath, "utf8");
 const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
+validateCollectorCoveragePolicy(readFileSync(new URL('../vitest.config.ts', import.meta.url), 'utf8'));
 
 assert.equal(packageJson.packageManager, "pnpm@10.34.5", "packageManager must remain pinned");
 assert.match(workflow, /node-version:\s*24\.18\.0/g);
