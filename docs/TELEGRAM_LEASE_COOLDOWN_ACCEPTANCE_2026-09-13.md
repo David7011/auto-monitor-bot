@@ -71,4 +71,12 @@ The crash acceptance still uses its existing accelerated storage settings; it pr
 
 ## Deployment truth
 
-Live processes have not been restarted and still use previous loaded artifacts. The full build was isolated. Apply via a controlled SYSTEM restart only; retain STOPPED monitoring and existing source pauses. The Windows lifecycle helper requires interactive UAC when invoked from the current ordinary user token. This acceptance does not claim that live deployment is completed. Rollback tag: pre-telegram-lease-cooldown-20260913 at the baseline commit.
+After explicit owner approval, deployed application commit `25d0d86bfe84f6eaf20d8906187688916c9b3e77` via `amb.cmd local:restart` and the normal Windows UAC lifecycle helper. A fresh encrypted safety backup was created first: database-20260913-012201.ambbak. Pre-restart queues were empty.
+
+The real deployment rebuilt shared/services/dashboard artifacts before the new processes started around 2026-09-12T22:23:01Z. Compiled worker contains the lease keeper/fenced attempt checks, shared gate contains current-time admission v2. New PIDs: API 19116, Dashboard 6972, background 15352, hot-a 18524 (standby), hot-b 8668 (leader); SYSTEM supervisor PID 13628 with fresh heartbeat. All four task definitions remain valid, supervisor Running, watchdog/backup/restore tasks Ready.
+
+Post-restart local:status passed: API/PostgreSQL/Redis and worker readiness available; queues show zero waiting/active/delayed/failed backlog. Business monitoring remains STOPPED, last tick unchanged at 2026-09-12T21:45:20.325Z. OLX pause remains 2026-09-13T09:27:52.274Z; RST pause remains 2026-09-18T08:30:53.395Z. No protection bypass or production monitoring start occurred.
+
+Post-deploy security:check PASS. Actual Redis admission acceptance PASS again: gaps 255/267ms for the 250ms test interval, shared cooldown 416ms for 400ms, already-waiting extended cooldown 616ms for 600ms. Read-only completeness checker still ok=true, impossibleCount=0, recoverableCount=50 at sampleLimit=50 (legacy anchor sample, not total count). Independent backup is still not configured: backup WARN; this separate operational risk is not falsely closed.
+
+This proves deployment/readiness/coordination acceptance, not a new live OLX/Telegram publication-to-delivery E2E under STOPPED monitoring. Rollback tag remains pre-telegram-lease-cooldown-20260913 at the baseline commit. A later documentation-only acceptance commit does not alter the loaded application revision.
