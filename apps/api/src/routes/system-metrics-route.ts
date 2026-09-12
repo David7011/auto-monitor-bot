@@ -15,6 +15,7 @@ import {
 } from "@amb/shared";
 import { env } from "../env.js";
 import { apiStartedAt } from "../lib/runtime-lifecycle.js";
+import { deriveOlxProtectionState } from "../lib/olx-hot-path-state.js";
 import {
   COLLECTOR_DURATION_MIN_SAMPLE_SIZE,
   buildCollectorDurationBreakdown,
@@ -135,6 +136,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
           lastNonEmptyAt: true,
           lastDurationMs: true,
           lastError: true,
+          pausedUntil: true,
         },
       }),
       prisma.sourceSeenListing.groupBy({
@@ -299,7 +301,8 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
     const qualifiedOlxCollector = qualifyMetricSummary(olxCollectorDuration);
     const qualifiedOlxInternal = qualifyMetricSummary(olxLatency.hotCandidateToTelegramAcceptanceMs);
     const olxSource = sourceHealth.find((source) => source.source === "OLX");
-    const olxProtected = olxSource?.status === "RATE_LIMITED" || olxSource?.status === "CAPTCHA_DETECTED";
+    const olxProtection = deriveOlxProtectionState(olxSource, generatedAt);
+    const olxProtected = olxProtection.protected;
     const olxParserDegraded = categoryStates.some((state) => state.source === "OLX" && state.parserHealth === "DEGRADED");
     const olxState = olxProtected
       ? "PROTECTED" as const
@@ -309,7 +312,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
           ? "DEGRADED" as const
           : "HEALTHY" as const;
     const olxStateReason = olxProtected
-      ? `OLX source is ${olxSource?.status ?? "protected"}; no extra traffic is authorized`
+      ? olxProtection.reason ?? "OLX protection is active; no extra traffic is authorized"
       : olxState === "INSUFFICIENT_DATA"
         ? `p95 requires 30 complete samples (collector=${qualifiedOlxCollector.count}, accepted hot path=${qualifiedOlxInternal.count})`
         : olxParserDegraded

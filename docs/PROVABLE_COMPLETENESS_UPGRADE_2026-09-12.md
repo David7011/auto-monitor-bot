@@ -33,6 +33,7 @@ PostgreSQL `INSERT ... ON CONFLICT` is the right retained-observation primitive:
 | `apps/worker/src/maintenance/olx-parity-cli.ts` | Refuses traffic during protection and compares control IDs with durable observations/channel provenance. |
 | `apps/worker/src/maintenance/hot-path-audit-cli.ts` | Emits full raw and evidence-qualified T1–T7 reports. |
 | `apps/api/src/lib/observation-activation.ts` | Derives initial-sync semantics without schema duplication. |
+| `apps/api/src/lib/olx-hot-path-state.ts` | Keeps the dashboard `PROTECTED` when a future durable cooldown survives stop/start even if the display status is `DISABLED`. |
 | `apps/api/src/routes/observations.ts` | Exposes derived activation class. |
 | `apps/api/src/routes/search-plan.ts` | Correct global recovery aggregation and per-shard coverage proof. |
 | `apps/api/src/routes/system-metrics-route.ts` | OLX 24h hot-path, pressure, protection, cadence, and evidence readiness projection. |
@@ -53,6 +54,7 @@ PostgreSQL `INSERT ... ON CONFLICT` is the right retained-observation primitive:
 | `tests/olx-parity-policy.test.ts` | No-network parity protection gate. |
 | `tests/observation-activation.test.ts` | Initial sync versus post-activation semantics. |
 | `tests/metrics-summary.test.ts` | T1–T7, confidence exclusion, 5/30/100 thresholds, deterministic regression gate. |
+| `tests/system-metrics-protection.test.ts` | Future/expired cooldown and explicit protection-status regression cases. |
 | `tests/telegram-flash-policy.test.ts` | Bursts 2/5/10/20 and newest-first first-alert order. |
 | `README.md`, `AUDIT.md`, `UPGRADE_PLAN.md`, `CHANGELOG.md` | Runtime, evidence, rollout, rollback, and known-risk documentation. |
 | `apps/worker/src/env.ts`, `apps/worker/src/collectors/olx.ts`, `apps/worker/src/modules/olx-lane-arbiter.ts` | Remove stale “four-second” comments; no runtime setting changed. |
@@ -75,7 +77,7 @@ Before this upgrade, the critical `collector-run.ts` gate was statements 20%, br
 
 | Module | Statements | Branches | Functions | Lines |
 | --- | ---: | ---: | ---: | ---: |
-| Global | 48.50% | 73.72% | 59.63% | 48.50% |
+| Global | 48.55% | 73.76% | 59.67% | 48.55% |
 | `collector-run.ts` | 97.89% | 83.76% | 100% | 97.89% |
 | `listing-detected.ts` | 75.57% | 91.11% | 58.33% | 75.57% |
 | `observation-replay.ts` | 90.69% | 68.88% | 100% | 90.69% |
@@ -86,7 +88,7 @@ Before this upgrade, the critical `collector-run.ts` gate was statements 20%, br
 
 The new `collector-run.ts` gate is statements/lines/branches 80%, functions 85%. Lower global and collector-parser percentages reflect broad source/UI/infrastructure surfaces; the P0 critical orchestrator target is met without excluding it from the global gate.
 
-The final full gate executed 97 test files and 528 tests successfully. It also completed Prisma validation/generation, documentation drift checks, TypeScript, ESLint, PowerShell validation, backup cryptography, CI-policy checks, coverage thresholds, and isolated API/Dashboard builds.
+The final full gate executed 98 test files and 532 tests successfully. It also completed Prisma validation/generation, documentation drift checks, TypeScript, ESLint, PowerShell validation, backup cryptography, CI-policy checks, coverage thresholds, and isolated API/Dashboard builds.
 
 ## E. Recovery evidence
 
@@ -143,7 +145,7 @@ The new Dashboard reports OLX requests and lane attribution over 24 hours, prote
 
 | Command | Result |
 | --- | --- |
-| `.\amb.cmd check:full` | PASS: 97 files / 528 tests, coverage gates and isolated builds passed. |
+| `.\amb.cmd check:full` | PASS: 98 files / 532 tests, coverage gates and isolated builds passed. |
 | `.\amb.cmd test:e2e` | PASS: 4 passed, 1 intentionally skipped mutating stop/start scenario. The rolling-upgrade compatibility defect discovered by this test was fixed. |
 | `.\amb.cmd audit:prod` | PASS: no known production dependency vulnerabilities. |
 | `.\amb.cmd db:restore:test` | PASS: encrypted backup restored into an isolated PostgreSQL database; 1 filter and 59 listings verified. |
@@ -151,9 +153,9 @@ The new Dashboard reports OLX requests and lane attribution over 24 hours, prote
 | `.\amb.cmd test:olx-parity` | SAFE REFUSAL before network I/O because the durable OLX protection pause remains active until 2026-09-13 12:27 Kyiv. Parity evidence is therefore pending, not falsely reported as PASS. |
 | `.\amb.cmd completeness:check -- --stale-hours 24 --sample-limit 10` | PASS: zero `IMPOSSIBLE`; displayed legacy continuity anchors were explicitly `RECOVERABLE`. |
 | `.\amb.cmd test:pipeline:resilience` | PASS: Redis/PostgreSQL/Telegram failures, crash/replay, shadow promotion, unresolved recovery and concurrent state writers. |
-| `.\amb.cmd local:status` | Runtime services and queues healthy; two hot replicas redundant; monitoring remains intentionally `STOPPED`; backup mirror remains unconfigured. |
+| `.\amb.cmd local:status` | Runtime services healthy; two hot replicas redundant; monitoring is `RUNNING` in LIVE mode; all queues drained to zero; backup mirror remains unconfigured. |
 
-The upgrade is not an external OLX parity certification while protection is active. Deployment must preserve the existing cooldown, and production latency remains `INSUFFICIENT_DATA` until natural recovery yields qualified samples.
+The upgrade is not an external OLX parity certification while protection is active. Deployment preserved the existing OLX/RST cooldowns; the live hot-path view reports `PROTECTED`, and production latency remains `INSUFFICIENT_DATA` until natural recovery yields qualified samples.
 
 ## Primary sources
 
