@@ -34,10 +34,10 @@ export default defineConfig({
         functions: 50,
         lines: 40,
         "apps/worker/src/processors/collector-run.ts": {
-          statements: 20,
-          branches: 40,
-          functions: 45,
-          lines: 20,
+          statements: 80,
+          branches: 80,
+          functions: 85,
+          lines: 80,
         },
         "apps/worker/src/processors/listing-detected.ts": {
           statements: 70,

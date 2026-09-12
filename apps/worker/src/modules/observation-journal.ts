@@ -44,11 +44,16 @@ export function buildFilterSetRevision(
 export async function recordPendingObservations(
   listings: NormalizedListing[],
   lane: ListingDiscoveryLane,
-): Promise<void> {
+): Promise<Map<string, PendingObservationState>> {
+  const states = new Map<string, PendingObservationState>();
   for (let index = 0; index < listings.length; index += WRITE_BATCH_SIZE) {
     const batch = listings.slice(index, index + WRITE_BATCH_SIZE);
-    await Promise.all(batch.map((listing) => upsertObservation(listing, lane)));
+    const persisted = await Promise.all(batch.map((listing) => upsertObservation(listing, lane)));
+    batch.forEach((listing, itemIndex) => {
+      states.set(observationIdentity(listing), persisted[itemIndex]!);
+    });
   }
+  return states;
 }
 
 export type PendingObservationState = {
@@ -56,6 +61,10 @@ export type PendingObservationState = {
   listingId: string | null;
   matchedFilterIds: string[];
 };
+
+export function observationIdentity(listing: Pick<NormalizedListing, "source" | "externalId">): string {
+  return `${listing.source}\u001f${listing.externalId}`;
+}
 
 /** Persist one hot candidate and return retained dedupe state in one round trip. */
 export async function recordPendingObservation(

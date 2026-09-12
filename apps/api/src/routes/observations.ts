@@ -7,6 +7,7 @@ import {
 } from "@amb/shared";
 import { z } from "zod";
 import { enqueue } from "../lib/queues.js";
+import { classifyObservationActivation } from "../lib/observation-activation.js";
 
 const sourceSchema = z.enum(["AUTO_RIA", "OLX", "RST", "CARS_UA", "AUTOMOTO", "MOCK"]);
 const summaryQuerySchema = z.object({
@@ -123,9 +124,20 @@ export async function observationsRoutes(app: FastifyInstance): Promise<void> {
         },
       });
       if (!observation) return reply.code(404).send({ error: "Observation not found" });
+      const activationStates = await prisma.sourceSearchState.findMany({
+        where: {
+          source: observation.source,
+          ...(observation.matchedFilterIds.length > 0 ? { filterIds: { hasSome: observation.matchedFilterIds } } : {}),
+        },
+        select: { initialSyncCompletedAt: true },
+      });
 
       return {
         observation,
+        activationClass: classifyObservationActivation(
+          observation.firstSeenAt,
+          activationStates.map((state) => state.initialSyncCompletedAt),
+        ),
         rejectionLabels: observation.rejectionReasons.map((reason) => ({
           reason,
           label: FILTER_REJECTION_LABELS[reason as FilterRejectionReason] ?? reason,

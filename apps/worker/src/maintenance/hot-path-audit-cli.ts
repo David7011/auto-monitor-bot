@@ -1,5 +1,5 @@
 import { closeDatabase, prisma } from "@amb/db";
-import { summarizeJournalLatencies } from "@amb/shared";
+import { qualifyMetricSummary, summarizeJournalLatencies } from "@amb/shared";
 import {
   parseOlxNetworkSamples,
   summarizeOlxNetworkSamples,
@@ -76,6 +76,8 @@ try {
   const qualificationCompleteAcceptedHotPathSamples = monitoringState
     ? completeAcceptedObservations.filter((sample) => sample.firstSeenAt >= monitoringState.olxCanaryQualificationStartedAt).length
     : 0;
+  const stages = summarizeJournalLatencies(observations);
+  const completeAcceptedStages = summarizeJournalLatencies(completeAcceptedObservations);
   console.log(JSON.stringify({
     generatedAt: until,
     since,
@@ -95,8 +97,10 @@ try {
       rollbackReason: monitoringState.olxCanaryRollbackReason,
     } : null,
     legacySchema,
-    stages: summarizeJournalLatencies(observations),
-    completeAcceptedStages: summarizeJournalLatencies(completeAcceptedObservations),
+    stages,
+    qualifiedStages: qualifyStages(stages),
+    completeAcceptedStages,
+    qualifiedCompleteAcceptedStages: qualifyStages(completeAcceptedStages),
     network: {
       collectorRequests: summarizeOlxNetworkSamples(collectorNetworkSamples),
       completeAcceptedListings: summarizeOlxNetworkSamples(acceptedListingNetworkSamples),
@@ -104,6 +108,10 @@ try {
   }, null, 2));
 } finally {
   await closeDatabase();
+}
+
+function qualifyStages(stages: ReturnType<typeof summarizeJournalLatencies>) {
+  return Object.fromEntries(Object.entries(stages).map(([name, summary]) => [name, qualifyMetricSummary(summary)]));
 }
 
 function networkSamplesFromCoverageMetrics(value: unknown): SourceNetworkTelemetry[] {

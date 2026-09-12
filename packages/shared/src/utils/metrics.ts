@@ -8,6 +8,27 @@ export type MetricSummary = {
   p99: number | null;
 };
 
+export type QualifiedMetricSummary = {
+  count: number;
+  max: number | null;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+  status: "READY" | "INSUFFICIENT_DATA";
+  minimumSamples: { p50: number; p95: number; p99: number };
+  ready: { p50: boolean; p95: boolean; p99: boolean };
+};
+
+export const LATENCY_PERCENTILE_MIN_SAMPLES = Object.freeze({ p50: 5, p95: 30, p99: 100 });
+
+export type LatencyRegressionDecision = {
+  status: "PASS" | "FAIL" | "INSUFFICIENT_DATA";
+  baselineP95Ms: number | null;
+  candidateP95Ms: number | null;
+  maximumCandidateP95Ms: number | null;
+  reason: string;
+};
+
 export const TELEGRAM_LATENCY_TARGET_MS = 3_000;
 export const TELEGRAM_LATENCY_MIN_SAMPLE_SIZE = 30;
 export const STARTUP_CATCH_UP_WINDOW_MS = 2 * 60 * 1000;
@@ -43,7 +64,9 @@ export type JournalLatencySummary = {
   parsedToHotCandidateMs: MetricSummary;
   firstByteToHotCandidateMs: MetricSummary;
   hotCandidateToDurableJournalMs: MetricSummary;
+  hotCandidateToTelegramAcceptanceMs: MetricSummary;
   durableJournalToFilterCompletedMs: MetricSummary;
+  durableJournalToTelegramRequestMs: MetricSummary;
   filterCompletedToTelegramRequestMs: MetricSummary;
   dispatchAttemptedToTelegramRequestMs: MetricSummary;
   telegramRequestToTelegramAcceptanceMs: MetricSummary;
@@ -80,6 +103,62 @@ export function summarizeMetric(values: number[]): MetricSummary {
 }
 
 /**
+ * Hides unstable tail percentiles until their explicit evidence threshold is
+ * met. The raw summary remains available for diagnostics, but user-facing SLO
+ * surfaces must not present a p95/p99 calculated from a handful of samples.
+ */
+export function qualifyMetricSummary(
+  summary: MetricSummary,
+  minimumSamples = LATENCY_PERCENTILE_MIN_SAMPLES,
+): QualifiedMetricSummary {
+  const ready = {
+    p50: summary.count >= minimumSamples.p50,
+    p95: summary.count >= minimumSamples.p95,
+    p99: summary.count >= minimumSamples.p99,
+  };
+  return {
+    count: summary.count,
+    max: summary.max,
+    p50: ready.p50 ? summary.p50 : null,
+    p95: ready.p95 ? summary.p95 : null,
+    p99: ready.p99 ? summary.p99 : null,
+    status: ready.p95 ? "READY" : "INSUFFICIENT_DATA",
+    minimumSamples: { ...minimumSamples },
+    ready,
+  };
+}
+
+export function evaluateLatencyRegression(input: {
+  baseline: MetricSummary;
+  candidate: MetricSummary;
+  minimumSamples?: number;
+  maximumGrowthRatio: number;
+}): LatencyRegressionDecision {
+  const minimumSamples = Math.max(1, Math.trunc(input.minimumSamples ?? LATENCY_PERCENTILE_MIN_SAMPLES.p95));
+  if (input.baseline.count < minimumSamples || input.candidate.count < minimumSamples
+    || input.baseline.p95 == null || input.candidate.p95 == null) {
+    return {
+      status: "INSUFFICIENT_DATA",
+      baselineP95Ms: input.baseline.p95,
+      candidateP95Ms: input.candidate.p95,
+      maximumCandidateP95Ms: null,
+      reason: `p95 comparison requires ${minimumSamples} samples in both cohorts`,
+    };
+  }
+  const maximumCandidateP95Ms = Math.round(input.baseline.p95 * Math.max(1, input.maximumGrowthRatio));
+  const passed = input.candidate.p95 <= maximumCandidateP95Ms;
+  return {
+    status: passed ? "PASS" : "FAIL",
+    baselineP95Ms: input.baseline.p95,
+    candidateP95Ms: input.candidate.p95,
+    maximumCandidateP95Ms,
+    reason: passed
+      ? "candidate p95 remains within the evidence-based growth limit"
+      : "candidate p95 exceeds the evidence-based growth limit",
+  };
+}
+
+/**
  * Summarizes latency stages from the durable observation journal. Publication
  * based stages intentionally exclude LOW/UNKNOWN timestamps because those are
  * source estimates rather than sufficiently precise publication times.
@@ -94,7 +173,9 @@ export function summarizeJournalLatencies(samples: JournalLatencySample[]): Jour
   const parsedToHotCandidate: number[] = [];
   const firstByteToHotCandidate: number[] = [];
   const hotCandidateToDurableJournal: number[] = [];
+  const hotCandidateToTelegramAcceptance: number[] = [];
   const durableJournalToFilterCompleted: number[] = [];
+  const durableJournalToTelegramRequest: number[] = [];
   const filterCompletedToTelegramRequest: number[] = [];
   const dispatchAttemptedToTelegramRequest: number[] = [];
   const telegramRequestToTelegramAcceptance: number[] = [];
@@ -108,7 +189,9 @@ export function summarizeJournalLatencies(samples: JournalLatencySample[]): Jour
     pushDuration(parsedToHotCandidate, sample.parsedAt, sample.hotCandidateAt);
     pushDuration(firstByteToHotCandidate, sample.firstByteAt, sample.hotCandidateAt);
     pushDuration(hotCandidateToDurableJournal, sample.hotCandidateAt, sample.journalPersistedAt);
+    pushDuration(hotCandidateToTelegramAcceptance, sample.hotCandidateAt, sample.telegramAcceptedAt);
     pushDuration(durableJournalToFilterCompleted, sample.journalPersistedAt, sample.filterCompletedAt);
+    pushDuration(durableJournalToTelegramRequest, sample.journalPersistedAt, sample.telegramRequestedAt);
     pushDuration(filterCompletedToTelegramRequest, sample.filterCompletedAt, sample.telegramRequestedAt);
     pushDuration(dispatchAttemptedToTelegramRequest, sample.dispatchAttemptedAt, sample.telegramRequestedAt);
     pushDuration(telegramRequestToTelegramAcceptance, sample.telegramRequestedAt, sample.telegramAcceptedAt);
@@ -136,7 +219,9 @@ export function summarizeJournalLatencies(samples: JournalLatencySample[]): Jour
     parsedToHotCandidateMs: summarizeMetric(parsedToHotCandidate),
     firstByteToHotCandidateMs: summarizeMetric(firstByteToHotCandidate),
     hotCandidateToDurableJournalMs: summarizeMetric(hotCandidateToDurableJournal),
+    hotCandidateToTelegramAcceptanceMs: summarizeMetric(hotCandidateToTelegramAcceptance),
     durableJournalToFilterCompletedMs: summarizeMetric(durableJournalToFilterCompleted),
+    durableJournalToTelegramRequestMs: summarizeMetric(durableJournalToTelegramRequest),
     filterCompletedToTelegramRequestMs: summarizeMetric(filterCompletedToTelegramRequest),
     dispatchAttemptedToTelegramRequestMs: summarizeMetric(dispatchAttemptedToTelegramRequest),
     telegramRequestToTelegramAcceptanceMs: summarizeMetric(telegramRequestToTelegramAcceptance),

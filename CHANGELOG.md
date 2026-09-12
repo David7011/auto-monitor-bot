@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-12 — provable completeness and evidence-qualified OLX latency
+
+- Collector durably journals the complete normalized burst before the first Redis claim/filter/dispatch, eliminating the memory-only tail-loss window.
+- Added a formal durable outcome classifier, read-only consistency checker, deterministic mutable marketplace, 23 crash checkpoints, and a real concurrent recovery-writer PostgreSQL test.
+- Expanded meaningful `collector-run.ts` branch coverage and raised its file gate to statements/lines/branches 80%, functions 85%.
+- Recovery verification now requires evidence-bearing BACKFILL; realtime overlap cannot close an older gap. Search Plan exposes per-shard proof and truthful global aggregation.
+- OLX parity now refuses all network work during RATE_LIMITED/CAPTCHA/pause/cooling and requires sampled IDs in the durable observation journal.
+- Initial-sync observation semantics are derived as `OBSERVED_EXISTING`, `NEW_AFTER_ACTIVATION`, or `ACTIVATION_UNKNOWN` without a redundant schema enum.
+- Added T1–T7/internal OLX hot-path metrics, origin pressure, a dedicated Dashboard block, and p50/p95/p99 evidence thresholds of 5/30/100 samples.
+- No dependency, OLX cadence, cooldown, request concurrency, Telegram concurrency, or production protection setting was changed.
+
 ## 2026-09-07 — multi-category correctness checkpoint
 
 - Durable SHADOW/LIVE delivery intent, provisional reasons in cards/flash, guarded replay/promotion, and preservation of NOTIFIED outcomes.

@@ -80,6 +80,10 @@ async function main(): Promise<void> {
     await assertCategoryRecoveryIsolation();
     checks.push("foreign shard write rejected; degraded parser cannot verify cutoff; cleanup retains recovery evidence");
 
+    progress("concurrent recovery state writers");
+    await assertConcurrentRecoveryWritersSerialize();
+    checks.push("two stale worker snapshots serialize through PostgreSQL row locking without losing anchors, cutoff or attempt evidence");
+
     await assertLegacyShardRekey();
     checks.push("legacy car re-key preserves state identity, cutoff, anchors and UNRESOLVED foreign key");
 
@@ -325,6 +329,80 @@ async function assertCategoryRecoveryIsolation(): Promise<void> {
   await compactSourceSearchStates({ source: "OLX", currentFingerprints: [replacement.fingerprint], preserveStateId: replacement.id });
   assert(await prisma.coverageRecoveryWindow.count() === beforeWindows, "Planner cleanup deleted durable recovery history");
   assert(await prisma.sourceSearchState.count({ where: { id: laptop.id } }) === 1, "Planner cleanup deleted pending category recovery");
+}
+
+async function assertConcurrentRecoveryWritersSerialize(): Promise<void> {
+  const filter = await prisma.filter.findFirstOrThrow({ where: { categoryKey: "vehicle.car" } });
+  const context = buildSearchContextFromFilter("OLX", {
+    ...filter,
+    regions: ["concurrency-test-region"],
+    cities: [],
+  });
+  const staleSnapshot = await loadSourceSearchState(context);
+  const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1_000);
+  const boundary = new Date(cutoff.getTime() + 5 * 60 * 1_000);
+  await prisma.sourceSearchState.update({
+    where: { id: staleSnapshot.id },
+    data: {
+      initialSyncCompletedAt: boundary,
+      lastSuccessfulScanAt: boundary,
+      coverageRecoveryPending: true,
+      coverageRecoveryCutoffAt: cutoff,
+      knownExternalIds: ["race-anchor"],
+    },
+  });
+  const window = await prisma.coverageRecoveryWindow.create({
+    data: {
+      source: "OLX",
+      sourceSearchStateId: staleSnapshot.id,
+      reason: "OFFLINE_WINDOW",
+      persistedBoundaryAt: boundary,
+      requiredCutoffAt: cutoff,
+    },
+  });
+  const sharedStaleState = await loadSourceSearchState(context);
+  const first = {
+    ...probeListing("race-worker-a"),
+    publishedAt: new Date(boundary.getTime() - 60_000),
+  };
+  const second = {
+    ...probeListing("race-worker-b"),
+    publishedAt: new Date(boundary.getTime() - 120_000),
+  };
+
+  await Promise.all([
+    markSourceSearchSuccess(context, sharedStaleState, [first], {
+      initialSyncCompleted: true,
+      lane: "BACKFILL",
+      pageCount: 1,
+      requestCount: 1,
+      observedCount: 1,
+      oldestObservedAt: first.publishedAt,
+      backfillResumePage: 2,
+      runId: "race-worker-a",
+    }),
+    markSourceSearchSuccess(context, sharedStaleState, [second], {
+      initialSyncCompleted: true,
+      lane: "BACKFILL",
+      pageCount: 2,
+      requestCount: 2,
+      observedCount: 1,
+      oldestObservedAt: second.publishedAt,
+      backfillResumePage: 3,
+      runId: "race-worker-b",
+    }),
+  ]);
+
+  const persisted = await prisma.sourceSearchState.findUniqueOrThrow({ where: { id: staleSnapshot.id } });
+  assert(persisted.coverageRecoveryPending, "Concurrent incomplete attempts incorrectly closed recovery");
+  assert(persisted.coverageRecoveryCutoffAt?.getTime() === cutoff.getTime(), "Concurrent writers narrowed the durable cutoff");
+  assert(persisted.knownExternalIds.includes("race-worker-a"), "First worker anchor was lost");
+  assert(persisted.knownExternalIds.includes("race-worker-b"), "Second worker anchor was lost");
+  const evidence = await prisma.coverageRecoveryWindow.findUniqueOrThrow({ where: { id: window.id } });
+  assert(evidence.status === "PENDING", "Concurrent incomplete attempts changed recovery status");
+  assert(evidence.attemptCount === 2, `Expected two serialized attempts, received ${evidence.attemptCount}`);
+  assert(evidence.pageCount === 3 && evidence.requestCount === 3 && evidence.observedCount === 2,
+    "Concurrent attempt evidence was overwritten instead of accumulated");
 }
 
 async function assertLegacyShardRekey(): Promise<void> {

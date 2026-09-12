@@ -4,6 +4,7 @@ import {
   groupCount,
   marketplaceCategoryKey,
   isMarketplaceCategoryKey,
+  qualifyMetricSummary,
   startOfTodayInKyiv,
   STARTUP_CATCH_UP_WINDOW_MS,
   splitSessionJournalLatencies,
@@ -12,6 +13,7 @@ import {
   TELEGRAM_LATENCY_MIN_SAMPLE_SIZE,
   type MetricsResponse,
 } from "@amb/shared";
+import { env } from "../env.js";
 import { apiStartedAt } from "../lib/runtime-lifecycle.js";
 import {
   COLLECTOR_DURATION_MIN_SAMPLE_SIZE,
@@ -36,6 +38,9 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
       firstOlxSuccessThisSession,
       categoryDurationRows,
       categoryStates,
+      monitoringState,
+      olxProtectionIncidents,
+      olxPressureRows,
     ] = await Promise.all([
       prisma.$queryRaw<CollectorDurationAggregateRow[]>(Prisma.sql`
         WITH durations AS (
@@ -180,11 +185,29 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
       `),
       prisma.sourceSearchState.findMany({
         select: {
+          source: true,
           categoryKey: true,
           parserHealth: true,
           coverageRecoveryPending: true,
           lastSuccessfulScanAt: true,
         },
+      }),
+      prisma.monitoringState.findUnique({ where: { id: "singleton" } }),
+      prisma.challengeIncident.findMany({
+        where: {
+          detectedAt: { gte: latencyWindowStartedAt, lte: generatedAt },
+          source: { source: "OLX" },
+        },
+        select: { detector: true, responseStatus: true },
+      }),
+      prisma.collectorRun.groupBy({
+        by: ["lane"],
+        where: {
+          source: "OLX",
+          startedAt: { gte: latencyWindowStartedAt, lte: generatedAt },
+        },
+        _count: { _all: true },
+        _sum: { requestCount: true },
       }),
     ]);
 
@@ -265,6 +288,39 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
     const collectorSloPassed = collectorSloReady && collectorDurations.realtimeDurationMs.p95 != null
       ? collectorDurations.realtimeDurationMs.p95 <= 2_000
       : null;
+    const olxLatency = summarizeJournalLatencies(latencyObservations
+      .filter((observation) => observation.source === "OLX")
+      .map((observation) => ({
+        ...observation,
+        notifiedAt: observation.notifiedAt && observation.notifiedAt <= generatedAt ? observation.notifiedAt : null,
+      })));
+    const olxCollectorDuration = collectorDurations.bySourceLane.find((row) =>
+      row.source === "OLX" && row.lane === "REALTIME")?.durationMs ?? summarizeMetric([]);
+    const qualifiedOlxCollector = qualifyMetricSummary(olxCollectorDuration);
+    const qualifiedOlxInternal = qualifyMetricSummary(olxLatency.hotCandidateToTelegramAcceptanceMs);
+    const olxSource = sourceHealth.find((source) => source.source === "OLX");
+    const olxProtected = olxSource?.status === "RATE_LIMITED" || olxSource?.status === "CAPTCHA_DETECTED";
+    const olxParserDegraded = categoryStates.some((state) => state.source === "OLX" && state.parserHealth === "DEGRADED");
+    const olxState = olxProtected
+      ? "PROTECTED" as const
+      : !qualifiedOlxCollector.ready.p95 || !qualifiedOlxInternal.ready.p95
+        ? "INSUFFICIENT_DATA" as const
+        : olxParserDegraded || (qualifiedOlxCollector.p95 ?? 0) > 2_000 || (qualifiedOlxInternal.p95 ?? 0) > 3_000
+          ? "DEGRADED" as const
+          : "HEALTHY" as const;
+    const olxStateReason = olxProtected
+      ? `OLX source is ${olxSource?.status ?? "protected"}; no extra traffic is authorized`
+      : olxState === "INSUFFICIENT_DATA"
+        ? `p95 requires 30 complete samples (collector=${qualifiedOlxCollector.count}, accepted hot path=${qualifiedOlxInternal.count})`
+        : olxParserDegraded
+          ? "At least one OLX discovery shard reports parser degradation"
+          : olxState === "DEGRADED"
+            ? "Measured OLX collector or internal delivery p95 exceeds its existing diagnostic target"
+            : "OLX collector and internal delivery tails have sufficient healthy evidence";
+    const olxRequests = olxPressureRows.reduce((sum, row) => sum + (row._sum.requestCount ?? 0), 0);
+    const olxCaptcha = olxProtectionIncidents.filter((incident) => incident.detector.toUpperCase().includes("CAPTCHA")).length;
+    const olxCanaryMode = monitoringState?.olxCanaryMode ?? "BASELINE";
+    const acceleratedCadence = olxCanaryMode === "CANARY" || olxCanaryMode === "PROMOTED";
 
     return {
       generatedAt: generatedAt.toISOString(),
@@ -279,6 +335,51 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         realtimeObservations: latencyObservations.length,
         publicationTimestamps: latencySummary.publicationTimestampToFirstSeenMs.count,
         telegramNotifications: exactTelegramLatency.count,
+      },
+      olxHotPath: {
+        state: olxState,
+        stateReason: olxStateReason,
+        windowHours: 24 as const,
+        cadence: {
+          mode: olxCanaryMode,
+          intervalSeconds: acceleratedCadence
+            ? env.OLX_CADENCE_CANARY_INTERVAL_SECONDS
+            : env.LIVE_OLX_INTERVAL_SECONDS,
+          jitterSeconds: acceleratedCadence
+            ? env.OLX_CADENCE_CANARY_JITTER_SECONDS
+            : env.LIVE_OLX_JITTER_SECONDS,
+          experimentId: monitoringState?.olxCanaryExperimentId ?? null,
+        },
+        collectorDurationMs: qualifiedOlxCollector,
+        stages: {
+          requestStartToFirstByteMs: qualifyMetricSummary(olxLatency.requestStartToFirstByteMs),
+          firstByteToBodyReceivedMs: qualifyMetricSummary(olxLatency.firstByteToBodyReceivedMs),
+          bodyReceivedToParsedMs: qualifyMetricSummary(olxLatency.bodyReceivedToParsedMs),
+          parsedToHotCandidateMs: qualifyMetricSummary(olxLatency.parsedToHotCandidateMs),
+          hotCandidateToDurableJournalMs: qualifyMetricSummary(olxLatency.hotCandidateToDurableJournalMs),
+          durableJournalToTelegramRequestMs: qualifyMetricSummary(olxLatency.durableJournalToTelegramRequestMs),
+          telegramRequestToTelegramAcceptanceMs: qualifyMetricSummary(olxLatency.telegramRequestToTelegramAcceptanceMs),
+          hotCandidateToTelegramAcceptanceMs: qualifiedOlxInternal,
+          requestStartToTelegramAcceptanceMs: qualifyMetricSummary(olxLatency.requestStartToTelegramAcceptanceMs),
+        },
+        pressure: {
+          requests: olxRequests,
+          requestsPerHour: Math.round((olxRequests / 24) * 100) / 100,
+          byLane: olxPressureRows.map((row) => ({
+            lane: row.lane,
+            requests: row._sum.requestCount ?? 0,
+            runs: row._count._all,
+          })),
+          protectionIncidents: olxProtectionIncidents.length,
+          protectionIncidentsPerThousandRequests: olxRequests > 0
+            ? Math.round((olxProtectionIncidents.length * 1_000_000) / olxRequests) / 1_000
+            : null,
+          http403: olxProtectionIncidents.filter((incident) => incident.responseStatus === 403).length,
+          http429: olxProtectionIncidents.filter((incident) => incident.responseStatus === 429).length,
+          captcha: olxCaptcha,
+          recoveryPendingShards: categoryStates.filter((state) =>
+            state.source === "OLX" && state.coverageRecoveryPending).length,
+        },
       },
       collectorDurationMs: collectorDurations.realtimeDurationMs,
       collectorRealtimeDurationMs: collectorDurations.realtimeDurationMs,
@@ -300,7 +401,9 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         parsedToHotCandidateMs: "SOURCE_PARSED_TO_HOT_CANDIDATE" as const,
         firstByteToHotCandidateMs: "SOURCE_RESPONSE_HEADERS_TO_HOT_CANDIDATE" as const,
         hotCandidateToDurableJournalMs: "HOT_CANDIDATE_TO_DURABLE_JOURNAL" as const,
+        hotCandidateToTelegramAcceptanceMs: "HOT_CANDIDATE_TO_TELEGRAM_ACCEPTANCE" as const,
         durableJournalToFilterCompletedMs: "DURABLE_JOURNAL_TO_FILTER_COMPLETED" as const,
+        durableJournalToTelegramRequestMs: "DURABLE_JOURNAL_TO_TELEGRAM_REQUEST" as const,
         filterCompletedToTelegramRequestMs: "FILTER_COMPLETED_TO_TELEGRAM_REQUEST" as const,
         dispatchAttemptedToTelegramRequestMs: "DISPATCH_ATTEMPTED_TO_TELEGRAM_REQUEST" as const,
         telegramRequestToTelegramAcceptanceMs: "TELEGRAM_REQUEST_TO_TELEGRAM_ACCEPTANCE" as const,

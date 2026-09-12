@@ -8,7 +8,7 @@ import type {
 } from "./listing.js";
 import type { SourceCapabilities } from "./source-capabilities.js";
 import type { MarketplaceCategoryKey, UnknownFilterPolicy } from "./category.js";
-import type { JournalLatencySummary, MetricSummary } from "../utils/metrics.js";
+import type { JournalLatencySummary, MetricSummary, QualifiedMetricSummary } from "../utils/metrics.js";
 
 /**
  * Wire-level contract shared by the local API and Dashboard.
@@ -187,6 +187,40 @@ export type MetricsResponse<DateValue = string> = {
     publicationTimestamps: number;
     telegramNotifications: number;
   };
+  olxHotPath: {
+    state: "HEALTHY" | "DEGRADED" | "PROTECTED" | "INSUFFICIENT_DATA";
+    stateReason: string;
+    windowHours: 24;
+    cadence: {
+      mode: "BASELINE" | "CANARY" | "PROMOTED" | "ROLLED_BACK" | "DISABLED";
+      intervalSeconds: number;
+      jitterSeconds: number;
+      experimentId: string | null;
+    };
+    collectorDurationMs: QualifiedMetricSummary;
+    stages: {
+      requestStartToFirstByteMs: QualifiedMetricSummary;
+      firstByteToBodyReceivedMs: QualifiedMetricSummary;
+      bodyReceivedToParsedMs: QualifiedMetricSummary;
+      parsedToHotCandidateMs: QualifiedMetricSummary;
+      hotCandidateToDurableJournalMs: QualifiedMetricSummary;
+      durableJournalToTelegramRequestMs: QualifiedMetricSummary;
+      telegramRequestToTelegramAcceptanceMs: QualifiedMetricSummary;
+      hotCandidateToTelegramAcceptanceMs: QualifiedMetricSummary;
+      requestStartToTelegramAcceptanceMs: QualifiedMetricSummary;
+    };
+    pressure: {
+      requests: number;
+      requestsPerHour: number;
+      byLane: Array<{ lane: "REALTIME" | "BACKFILL" | "COVERAGE" | "MANUAL"; requests: number; runs: number }>;
+      protectionIncidents: number;
+      protectionIncidentsPerThousandRequests: number | null;
+      http403: number;
+      http429: number;
+      captcha: number;
+      recoveryPendingShards: number;
+    };
+  };
   /** Compatibility alias for collectorRealtimeDurationMs. Never mixes background lanes. */
   collectorDurationMs: MetricSummary;
   collectorRealtimeDurationMs: MetricSummary;
@@ -218,7 +252,9 @@ export type MetricsResponse<DateValue = string> = {
   parsedToHotCandidateMs: MetricSummary;
   firstByteToHotCandidateMs: MetricSummary;
   hotCandidateToDurableJournalMs: MetricSummary;
+  hotCandidateToTelegramAcceptanceMs: MetricSummary;
   durableJournalToFilterCompletedMs: MetricSummary;
+  durableJournalToTelegramRequestMs: MetricSummary;
   filterCompletedToTelegramRequestMs: MetricSummary;
   dispatchAttemptedToTelegramRequestMs: MetricSummary;
   telegramRequestToTelegramAcceptanceMs: MetricSummary;
@@ -242,7 +278,9 @@ export type MetricsResponse<DateValue = string> = {
     parsedToHotCandidateMs: MetricSummary;
     firstByteToHotCandidateMs: MetricSummary;
     hotCandidateToDurableJournalMs: MetricSummary;
+    hotCandidateToTelegramAcceptanceMs: MetricSummary;
     durableJournalToFilterCompletedMs: MetricSummary;
+    durableJournalToTelegramRequestMs: MetricSummary;
     filterCompletedToTelegramRequestMs: MetricSummary;
     dispatchAttemptedToTelegramRequestMs: MetricSummary;
     telegramRequestToTelegramAcceptanceMs: MetricSummary;
@@ -263,7 +301,9 @@ export type MetricsResponse<DateValue = string> = {
     parsedToHotCandidateMs: "SOURCE_PARSED_TO_HOT_CANDIDATE";
     firstByteToHotCandidateMs: "SOURCE_RESPONSE_HEADERS_TO_HOT_CANDIDATE";
     hotCandidateToDurableJournalMs: "HOT_CANDIDATE_TO_DURABLE_JOURNAL";
+    hotCandidateToTelegramAcceptanceMs: "HOT_CANDIDATE_TO_TELEGRAM_ACCEPTANCE";
     durableJournalToFilterCompletedMs: "DURABLE_JOURNAL_TO_FILTER_COMPLETED";
+    durableJournalToTelegramRequestMs: "DURABLE_JOURNAL_TO_TELEGRAM_REQUEST";
     filterCompletedToTelegramRequestMs: "FILTER_COMPLETED_TO_TELEGRAM_REQUEST";
     dispatchAttemptedToTelegramRequestMs: "DISPATCH_ATTEMPTED_TO_TELEGRAM_REQUEST";
     telegramRequestToTelegramAcceptanceMs: "TELEGRAM_REQUEST_TO_TELEGRAM_ACCEPTANCE";
@@ -436,6 +476,36 @@ export type SearchPlanResponse<DateValue = string> = {
       requestCount: number;
       observedCount: number;
     } | null;
+  };
+  discoveryProofs: Array<{
+    source: SourceKind;
+    categoryKey: MarketplaceCategoryKey;
+    fingerprint: string;
+    relevance: "LIVE" | "SHADOW" | "INACTIVE";
+    lastRealtimeSuccessAt: DateValue | null;
+    latestObservedExternalId: string | null;
+    latestObservedAt: DateValue | null;
+    knownTailExternalId: string | null;
+    requiredCutoffAt: DateValue | null;
+    coverageStatus: "VERIFIED" | "PENDING" | "UNRESOLVED" | "CURRENT_ONLY";
+    parserStatus: "HEALTHY" | "DEGRADED" | "UNKNOWN";
+    recoveryReason: "OFFLINE_WINDOW" | "REALTIME_OVERFLOW" | "KNOWN_IDS_RESET" | null;
+    detectedAt: DateValue | null;
+    attemptCount: number;
+    pagesScanned: number;
+    requests: number;
+    oldestObservedAt: DateValue | null;
+    verificationMethod: "KNOWN_TAIL" | "CUTOFF" | "EXHAUSTED" | null;
+    unresolvedReason: "PUBLIC_OFFSET_CAP" | "UNSTABLE_PAGINATION" | "NON_PARTITIONABLE_RANGE" | "SOURCE_EXHAUSTED_BEFORE_BOUNDARY" | null;
+    lastRecoveryAttemptAt: DateValue | null;
+    lastFullAuditAt: DateValue | null;
+    lastFullAuditPassed: boolean | null;
+  }>;
+  globalCoverageProof: {
+    activeShardCount: number;
+    pendingCount: number;
+    unresolvedCount: number;
+    proved: boolean;
   };
   coverage: {
     intervalSeconds: number;

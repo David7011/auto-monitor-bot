@@ -53,7 +53,7 @@ const FIELD_LABELS: Record<(typeof AUTO_RIA_SEARCH_FIELDS)[number], string> = {
 export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
   app.get("/search-plan", async () => {
     const now = new Date();
-    const [filters, sources, states, recentRuns, quota, olxDiscovery, monitoringState, recoveryWindows] = await Promise.all([
+    const [filters, sources, states, recentRuns, quota, olxDiscovery, monitoringState, recoveryWindows, recoveryCounts, lastFullAudit] = await Promise.all([
       prisma.filter.findMany({ where: { enabled: true }, orderBy: { updatedAt: "desc" } }),
       prisma.source.findMany(),
       prisma.sourceSearchState.findMany({ orderBy: { updatedAt: "desc" } }),
@@ -61,7 +61,12 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       autoRiaQuota(now),
       olxDiscoveryDiagnostics(now),
       prisma.monitoringState.findUnique({ where: { id: "singleton" } }),
-      prisma.coverageRecoveryWindow.findMany({ orderBy: { detectedAt: "desc" }, take: 20 }),
+      prisma.coverageRecoveryWindow.findMany({
+        orderBy: [{ sourceSearchStateId: "asc" }, { detectedAt: "desc" }],
+        distinct: ["sourceSearchStateId"],
+      }),
+      prisma.coverageRecoveryWindow.groupBy({ by: ["status"], _count: { _all: true } }),
+      prisma.completenessAudit.findFirst({ orderBy: { startedAt: "desc" } }),
     ]);
 
     const sourceMap = new Map(sources.map((source) => [source.source, source]));
@@ -94,7 +99,59 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
       activeCategories: new Set(filters.map((filter) => marketplaceCategoryKey(filter.categoryKey))).size,
       discoveryShards: new Set(states.map((state) => `${state.source}:${state.fingerprint}`)).size,
     };
-    const latestRecovery = recoveryWindows.find((window) => window.status !== "VERIFIED") ?? recoveryWindows[0];
+    const latestRecovery = [...recoveryWindows].sort((left, right) => right.detectedAt.getTime() - left.detectedAt.getTime())
+      .find((window) => window.status !== "VERIFIED")
+      ?? [...recoveryWindows].sort((left, right) => right.detectedAt.getTime() - left.detectedAt.getTime())[0];
+    const recoveryCount = (status: "PENDING" | "VERIFIED" | "UNRESOLVED") =>
+      recoveryCounts.find((row) => row.status === status)?._count._all ?? 0;
+    const activeFilterMap = new Map(filters.map((filter) => [filter.id, filter]));
+    const latestWindowByState = new Map(recoveryWindows.map((window) => [window.sourceSearchStateId, window]));
+    const discoveryProofs: SearchPlanResponse["discoveryProofs"] = states.map((state) => {
+      const activeStateFilters = state.filterIds.flatMap((id) => {
+        const filter = activeFilterMap.get(id);
+        return filter ? [filter] : [];
+      });
+      const relevance = activeStateFilters.length === 0
+        ? "INACTIVE"
+        : activeStateFilters.some((filter) => !filter.shadowMode)
+          ? "LIVE"
+          : "SHADOW";
+      const recovery = latestWindowByState.get(state.id);
+      const coverageStatus = state.coverageRecoveryPending || recovery?.status === "PENDING"
+        ? "PENDING"
+        : recovery?.status === "UNRESOLVED"
+          ? "UNRESOLVED"
+          : recovery?.status === "VERIFIED"
+            ? "VERIFIED"
+            : "CURRENT_ONLY";
+      return {
+        source: state.source,
+        categoryKey: marketplaceCategoryKey(state.categoryKey),
+        fingerprint: state.fingerprint,
+        relevance,
+        lastRealtimeSuccessAt: state.lastSuccessfulScanAt?.toISOString() ?? null,
+        latestObservedExternalId: state.latestSeenExternalId ?? state.lastExternalId,
+        latestObservedAt: state.latestSeenPublishedAt?.toISOString() ?? state.lastPublishedAt?.toISOString() ?? null,
+        knownTailExternalId: state.coverageAnchorExternalIds[0] ?? state.knownExternalIds.at(-1) ?? null,
+        requiredCutoffAt: state.coverageRecoveryCutoffAt?.toISOString() ?? recovery?.requiredCutoffAt.toISOString() ?? null,
+        coverageStatus,
+        parserStatus: state.parserHealth === "HEALTHY" || state.parserHealth === "DEGRADED" ? state.parserHealth : "UNKNOWN",
+        recoveryReason: recovery?.reason ?? null,
+        detectedAt: recovery?.detectedAt.toISOString() ?? null,
+        attemptCount: recovery?.attemptCount ?? 0,
+        pagesScanned: recovery?.pageCount ?? 0,
+        requests: recovery?.requestCount ?? 0,
+        oldestObservedAt: recovery?.oldestObservedAt?.toISOString() ?? null,
+        verificationMethod: recovery?.verificationMethod ?? null,
+        unresolvedReason: recovery?.unresolvedReason ?? null,
+        lastRecoveryAttemptAt: recovery?.lastAttemptAt?.toISOString() ?? null,
+        lastFullAuditAt: lastFullAudit?.finishedAt?.toISOString() ?? lastFullAudit?.startedAt.toISOString() ?? null,
+        lastFullAuditPassed: lastFullAudit ? lastFullAudit.failedCount === 0 && lastFullAudit.pendingCount === 0 : null,
+      };
+    });
+    const activeProofs = discoveryProofs.filter((proof) => proof.relevance !== "INACTIVE");
+    const activePendingCount = activeProofs.filter((proof) => proof.coverageStatus === "PENDING").length;
+    const activeUnresolvedCount = activeProofs.filter((proof) => proof.coverageStatus === "UNRESOLVED").length;
     const olxHotPathSampleCount = monitoringState
       ? (await prisma.sourceSeenListing.findMany({
         where: {
@@ -154,15 +211,15 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
         lastTransitionAt: monitoringState?.olxCanaryLastTransitionAt?.toISOString() ?? null,
       },
       offlineRecovery: {
-        status: recoveryWindows.some((window) => window.status === "PENDING")
+        status: recoveryCount("PENDING") > 0
           ? "PENDING"
-          : recoveryWindows.some((window) => window.status === "UNRESOLVED")
+          : recoveryCount("UNRESOLVED") > 0
             ? "UNRESOLVED"
-          : recoveryWindows.length > 0
+          : recoveryCount("VERIFIED") > 0
             ? "VERIFIED"
             : "NONE",
-        pendingCount: recoveryWindows.filter((window) => window.status === "PENDING").length,
-        unresolvedCount: recoveryWindows.filter((window) => window.status === "UNRESOLVED").length,
+        pendingCount: recoveryCount("PENDING"),
+        unresolvedCount: recoveryCount("UNRESOLVED"),
         latest: latestRecovery
           ? {
               id: latestRecovery.id,
@@ -190,6 +247,14 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
               observedCount: latestRecovery.observedCount,
             }
           : null,
+      },
+      discoveryProofs,
+      globalCoverageProof: {
+        activeShardCount: activeProofs.length,
+        pendingCount: activePendingCount,
+        unresolvedCount: activeUnresolvedCount,
+        proved: activeProofs.length > 0 && activePendingCount === 0 && activeUnresolvedCount === 0
+          && activeProofs.every((proof) => proof.coverageStatus === "VERIFIED"),
       },
       coverage: {
         intervalSeconds: env.OLX_COVERAGE_INTERVAL_SECONDS,

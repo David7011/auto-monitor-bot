@@ -281,6 +281,47 @@ export default function DashboardPage() {
         </HudPanel>
       </section>
 
+      <HudPanel
+        kicker="OLX Hot Path · 24 часа"
+        title="Доказуемая задержка и нагрузка"
+        action={<StatusBadge status={metrics?.olxHotPath?.state ?? "INSUFFICIENT_DATA"} />}
+      >
+        <div className="space-y-4">
+          <div className="grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-4">
+            <InfoLine
+              label="Cadence"
+              value={metrics?.olxHotPath ? `${metrics.olxHotPath.cadence.mode} · ${metrics.olxHotPath.cadence.intervalSeconds}±${metrics.olxHotPath.cadence.jitterSeconds} с` : "—"}
+            />
+            <InfoLine label="OLX запросов" value={String(metrics?.olxHotPath?.pressure.requests ?? 0)} />
+            <InfoLine label="Запросов/час" value={String(metrics?.olxHotPath?.pressure.requestsPerHour ?? 0)} />
+            <InfoLine label="Очередь сейчас" value={String(queueLoad)} />
+            <InfoLine label="403 / 429 / CAPTCHA" value={metrics?.olxHotPath ? `${metrics.olxHotPath.pressure.http403} / ${metrics.olxHotPath.pressure.http429} / ${metrics.olxHotPath.pressure.captcha}` : "—"} />
+            <InfoLine label="Protection / 1000" value={metrics?.olxHotPath?.pressure.protectionIncidentsPerThousandRequests?.toFixed(3) ?? "—"} />
+            <InfoLine label="Recovery shards" value={String(metrics?.olxHotPath?.pressure.recoveryPendingShards ?? 0)} />
+            <InfoLine label="Collector p95" value={qualifiedPercentile(metrics?.olxHotPath?.collectorDurationMs, "p95")} />
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-line">
+            <table className="w-full min-w-[680px] text-left text-xs">
+              <thead className="bg-surface-1 text-muted">
+                <tr><th className="px-3 py-2">Этап</th><th className="px-3 py-2">samples</th><th className="px-3 py-2">p50</th><th className="px-3 py-2">p95</th><th className="px-3 py-2">p99</th><th className="px-3 py-2">max</th></tr>
+              </thead>
+              <tbody>
+                <QualifiedLatencyRow label="request → headers" metric={metrics?.olxHotPath?.stages.requestStartToFirstByteMs} />
+                <QualifiedLatencyRow label="headers → body" metric={metrics?.olxHotPath?.stages.firstByteToBodyReceivedMs} />
+                <QualifiedLatencyRow label="body → parsed" metric={metrics?.olxHotPath?.stages.bodyReceivedToParsedMs} />
+                <QualifiedLatencyRow label="parsed → candidate" metric={metrics?.olxHotPath?.stages.parsedToHotCandidateMs} />
+                <QualifiedLatencyRow label="candidate → journal" metric={metrics?.olxHotPath?.stages.hotCandidateToDurableJournalMs} />
+                <QualifiedLatencyRow label="journal → Telegram request" metric={metrics?.olxHotPath?.stages.durableJournalToTelegramRequestMs} />
+                <QualifiedLatencyRow label="Telegram request → accepted" metric={metrics?.olxHotPath?.stages.telegramRequestToTelegramAcceptanceMs} />
+                <QualifiedLatencyRow label="candidate → accepted" metric={metrics?.olxHotPath?.stages.hotCandidateToTelegramAcceptanceMs} />
+                <QualifiedLatencyRow label="request → accepted" metric={metrics?.olxHotPath?.stages.requestStartToTelegramAcceptanceMs} />
+              </tbody>
+            </table>
+          </div>
+          <div className="text-xs text-muted">{metrics?.olxHotPath?.stateReason ?? "Собираются измерения."}</div>
+        </div>
+      </HudPanel>
+
       {/* Core + sources health */}
       <section className="grid gap-4 xl:grid-cols-[360px_1fr]">
         <HudPanel kicker="Радар" title="Ядро мониторинга">
@@ -344,6 +385,26 @@ export default function DashboardPage() {
         </div>
       </HudPanel>
     </div>
+  )
+}
+
+type QualifiedLatency = MetricsResponse["olxHotPath"]["collectorDurationMs"]
+
+function qualifiedPercentile(metric: QualifiedLatency | undefined, key: "p50" | "p95" | "p99"): string {
+  if (!metric || !metric.ready[key]) return "INSUFFICIENT_DATA"
+  return formatMs(metric[key])
+}
+
+function QualifiedLatencyRow({ label, metric }: { label: string; metric: QualifiedLatency | undefined }) {
+  return (
+    <tr className="border-t border-line">
+      <td className="px-3 py-2 font-medium text-foreground">{label}</td>
+      <td className="px-3 py-2 font-mono">{metric?.count ?? 0}</td>
+      <td className="px-3 py-2 font-mono">{qualifiedPercentile(metric, "p50")}</td>
+      <td className="px-3 py-2 font-mono">{qualifiedPercentile(metric, "p95")}</td>
+      <td className="px-3 py-2 font-mono">{qualifiedPercentile(metric, "p99")}</td>
+      <td className="px-3 py-2 font-mono">{formatMs(metric?.max ?? null)}</td>
+    </tr>
   )
 }
 

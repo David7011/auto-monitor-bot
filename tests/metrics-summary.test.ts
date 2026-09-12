@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   groupCount,
+  evaluateLatencyRegression,
   percentile,
+  qualifyMetricSummary,
   splitSessionJournalLatencies,
   summarizeJournalLatencies,
   summarizeMetric,
@@ -30,6 +32,41 @@ describe("metrics summary", () => {
       p95: 100,
       p99: 100,
     });
+  });
+
+  it("does not publish unstable p95 or p99 tails from a small sample", () => {
+    const small = qualifyMetricSummary(summarizeMetric(Array.from({ length: 29 }, (_, index) => index + 1)));
+    expect(small).toMatchObject({
+      count: 29,
+      status: "INSUFFICIENT_DATA",
+      p50: 15,
+      p95: null,
+      p99: null,
+      ready: { p50: true, p95: false, p99: false },
+    });
+
+    const p95Ready = qualifyMetricSummary(summarizeMetric(Array.from({ length: 30 }, (_, index) => index + 1)));
+    expect(p95Ready).toMatchObject({ status: "READY", p95: 29, p99: null });
+
+    const tailsReady = qualifyMetricSummary(summarizeMetric(Array.from({ length: 100 }, (_, index) => index + 1)));
+    expect(tailsReady).toMatchObject({ status: "READY", p50: 50, p95: 95, p99: 99 });
+  });
+
+  it("gates deterministic p95 regressions only after both cohorts are large enough", () => {
+    const summary = (count: number, tailMs: number) => summarizeMetric([
+      ...Array.from({ length: Math.max(0, count - 2) }, () => 100),
+      tailMs,
+      tailMs,
+    ]);
+    expect(evaluateLatencyRegression({
+      baseline: summary(29, 200), candidate: summary(30, 210), maximumGrowthRatio: 1.1,
+    }).status).toBe("INSUFFICIENT_DATA");
+    expect(evaluateLatencyRegression({
+      baseline: summary(30, 200), candidate: summary(30, 210), maximumGrowthRatio: 1.1,
+    })).toMatchObject({ status: "PASS", maximumCandidateP95Ms: 220 });
+    expect(evaluateLatencyRegression({
+      baseline: summary(30, 200), candidate: summary(30, 250), maximumGrowthRatio: 1.1,
+    })).toMatchObject({ status: "FAIL", maximumCandidateP95Ms: 220 });
   });
 
   it("reads grouped Prisma-style counts", () => {
@@ -96,7 +133,9 @@ describe("metrics summary", () => {
     expect(summary.parsedToHotCandidateMs).toMatchObject({ count: 1, p95: 10 });
     expect(summary.firstByteToHotCandidateMs).toMatchObject({ count: 1, p95: 50 });
     expect(summary.hotCandidateToDurableJournalMs).toMatchObject({ count: 1, p95: 50 });
+    expect(summary.hotCandidateToTelegramAcceptanceMs).toMatchObject({ count: 1, p95: 550 });
     expect(summary.durableJournalToFilterCompletedMs).toMatchObject({ count: 1, p95: 100 });
+    expect(summary.durableJournalToTelegramRequestMs).toMatchObject({ count: 1, p95: 250 });
     expect(summary.filterCompletedToTelegramRequestMs).toMatchObject({ count: 1, p95: 150 });
     expect(summary.dispatchAttemptedToTelegramRequestMs).toMatchObject({ count: 1, p95: 150 });
     expect(summary.telegramRequestToTelegramAcceptanceMs).toMatchObject({ count: 1, p95: 250 });

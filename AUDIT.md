@@ -1,5 +1,19 @@
 # Глубокий аудит Auto Monitor Bot 0.4.1
 
+## Дополнение 12.09.2026 — provable completeness
+
+- Архитектура сохранена: PostgreSQL observation остаётся раньше Redis coordination, realtime отделён от recovery/background, Telegram использует единый межпроцессный gate.
+- Устранён внутренний burst-loss path: весь нормализованный результат collector теперь durable до обработки первого кандидата.
+- Добавлены формальный outcome contract, read-only consistency checker, newest-first mutable fake marketplace, 23-point crash matrix и реальный PostgreSQL/Redis acceptance.
+- `collector-run.ts` поднят с прежнего слабого gate 20/40/45/20 до фактических 97,89% statements/lines, 83,76% branches и 100% functions; новый минимальный gate — 80/80/80/85.
+- Recovery доказан при двух конкурентных stale worker snapshots: `SELECT ... FOR UPDATE` сохраняет оба набора anchors, старейший cutoff и суммирует attempt evidence.
+- Coverage API теперь shard-aware и не заявляет global proof при `PENDING`/`UNRESOLVED`. Parity делает protection preflight до сети.
+- T1–T7 и internal latency отображаются с evidence thresholds 5/30/100 samples. Live OLX sample за последние 24 часа сейчас равен нулю из-за штатного `RATE_LIMITED`; любые production percentile и ускорение cadence имеют статус `INSUFFICIENT_DATA`.
+- На 12.09.2026 локальная инфраструктура здорова и очереди пусты, но OLX находится в 24-часовом cooldown после обычного HTTP 403, RST — в `CAPTCHA_DETECTED`. Эти внешние состояния не обходились.
+- Остаётся P1/P2 operational risk: `BACKUP_MIRROR_PATH` не настроен, поэтому локальная encrypted backup и production находятся на одном физическом диске.
+
+Полный датированный отчёт: [docs/PROVABLE_COMPLETENESS_UPGRADE_2026-09-12.md](./docs/PROVABLE_COMPLETENESS_UPGRADE_2026-09-12.md).
+
 Дата проверки: 22.08.2026.
 
 ## Итог

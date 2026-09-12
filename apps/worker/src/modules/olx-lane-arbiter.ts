@@ -6,7 +6,7 @@ type ArbiterDependencies = {
 /**
  * Realtime never waits for backfill. Backfill yields between pages while a
  * realtime scan is active and leaves a short quiet window after it completes.
- * This limits request bursts without adding latency to the four-second lane.
+ * This limits request bursts without adding latency to the configured realtime lane.
  */
 export class OlxLaneArbiter {
   private activeRealtimeScans = 0;
@@ -43,7 +43,7 @@ export class OlxLaneArbiter {
       ) {
         // Reserve at most one deep page between two realtime completions. This
         // prevents a multi-page backfill burst from consuming the whole
-        // four-second request window and triggering protection.
+        // current realtime request window and triggering protection.
         this.lastReservedBackfillEpoch = this.lastRealtimeFinishedAt;
         return true;
       }

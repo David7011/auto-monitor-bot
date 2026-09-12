@@ -60,6 +60,7 @@
     "metrics:telegram:baseline": "pnpm --filter @amb/worker metrics:telegram:24h -- --mark-baseline",
     "metrics:telegram:24h": "pnpm --filter @amb/worker metrics:telegram:24h",
     "metrics:hot-path": "pnpm --filter @amb/worker metrics:hot-path",
+    "completeness:check": "pnpm --filter @amb/worker completeness:check",
     "maintenance:cleanup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cleanup-generated-files.ps1",
     "docs:sync": "node scripts/runtime-docs.mjs --write",
     "docs:check": "node scripts/runtime-docs.mjs --check",

@@ -4,6 +4,7 @@ import {
   buildSearchContextFromFilter,
   contextForCoverageRecovery,
   coverageVerificationHasDurableEvidence,
+  decideCoverageRecoveryTransition,
   mergeOlxFilterGeography,
   planCoverageRecovery,
   rotateKnownExternalIds,
@@ -68,6 +69,35 @@ describe("source search plan", () => {
     expect(coverageVerificationHasDurableEvidence("KNOWN_TAIL", undefined, cutoff, {
       lane: "REALTIME", existingRecoveryPending: false,
     })).toBe(true);
+  });
+
+  it("allows only evidence-bearing backfill to verify a pending recovery", () => {
+    expect(decideCoverageRecoveryTransition({
+      requested: true, lane: "BACKFILL", coverageVerified: true, verificationHasEvidence: true,
+    })).toEqual({ verified: true, unresolved: false, required: false });
+    expect(decideCoverageRecoveryTransition({
+      requested: true, lane: "REALTIME", coverageVerified: true, verificationHasEvidence: true,
+    })).toEqual({ verified: false, unresolved: false, required: true });
+    expect(decideCoverageRecoveryTransition({
+      requested: true, lane: "BACKFILL", coverageVerified: true, verificationHasEvidence: false,
+    })).toEqual({ verified: false, unresolved: false, required: true });
+  });
+
+  it("persists a bounded backfill failure as UNRESOLVED and never as VERIFIED", () => {
+    expect(decideCoverageRecoveryTransition({
+      requested: true,
+      lane: "BACKFILL",
+      coverageVerified: false,
+      verificationHasEvidence: false,
+      unresolvedReason: "PUBLIC_OFFSET_CAP",
+    })).toEqual({ verified: false, unresolved: true, required: false });
+    expect(decideCoverageRecoveryTransition({
+      requested: true,
+      lane: "REALTIME",
+      coverageVerified: false,
+      verificationHasEvidence: false,
+      unresolvedReason: "PUBLIC_OFFSET_CAP",
+    })).toEqual({ verified: false, unresolved: false, required: true });
   });
 
   it("does not reopen the full freshness history after every known-ID rotation", () => {

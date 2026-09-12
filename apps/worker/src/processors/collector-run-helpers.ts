@@ -20,7 +20,11 @@ import {
 import { requiresManualChallengeVerification } from "../modules/challenge-incident-policy.js";
 import { loadSourceSearchState } from "../modules/source-search-plan.js";
 import { sendSystemAlert } from "../modules/telegram-service.js";
-import { recordPendingObservations } from "../modules/observation-journal.js";
+import {
+  observationIdentity,
+  recordPendingObservations,
+  type PendingObservationState,
+} from "../modules/observation-journal.js";
 import { mapWithConcurrency } from "../modules/bounded-parallel.js";
 import { backfillScanBudget, type BackfillProfile } from "../modules/backfill-profile.js";
 import { planRealtimeDispatch } from "../modules/realtime-dispatch-policy.js";
@@ -174,6 +178,10 @@ export async function dispatchListings(
   lane: ListingDiscoveryLane,
   inlineBudget: { used: number },
 ): Promise<Array<{ listing: NormalizedListing; result: ListingProcessingResult | undefined }>> {
+  // Persist the whole callback/result batch before any per-item Redis claim or
+  // filtering. A mid-burst crash leaves a replayable tail instead of memory-
+  // only candidates that can disappear when the mutable source page shifts.
+  const persistedStates = await recordPendingObservations([...listings], lane);
   const flashPlan = planTelegramFlashBundle({
     listings,
     lane,
@@ -183,7 +191,7 @@ export async function dispatchListings(
   });
   if (flashPlan.enabled) {
     inlineBudget.used = Math.max(inlineBudget.used, env.FAST_INLINE_LISTING_LIMIT_PER_RUN);
-    const flashResults = await dispatchFlashListings(flashPlan.flash, filterIds);
+    const flashResults = await dispatchFlashListings(flashPlan.flash, filterIds, persistedStates);
     const remainderResults = await mapWithConcurrency(
       flashPlan.remainder,
       env.FAST_INLINE_LISTING_CONCURRENCY,
@@ -192,7 +200,14 @@ export async function dispatchListings(
         // Keep an oversized burst's tail behind the durable flash header. The
         // configured flash cap protects Telegram's 4096-character limit; this
         // delay prevents tail cards from taking an earlier global send slot.
-        result: await dispatchListing(listing, filterIds, lane, false, 5_000),
+        result: await dispatchListing(
+          listing,
+          filterIds,
+          lane,
+          false,
+          5_000,
+          persistedStates.get(observationIdentity(listing)),
+        ),
       }),
     );
     return [...flashResults, ...remainderResults];
@@ -210,7 +225,14 @@ export async function dispatchListings(
   for (const listing of plan.inline) {
     inlineResults.push({
       listing,
-      result: await dispatchListing(listing, filterIds, lane, true),
+      result: await dispatchListing(
+        listing,
+        filterIds,
+        lane,
+        true,
+        0,
+        persistedStates.get(observationIdentity(listing)),
+      ),
     });
   }
 
@@ -219,7 +241,14 @@ export async function dispatchListings(
     env.FAST_INLINE_LISTING_CONCURRENCY,
     async (listing) => ({
       listing,
-      result: await dispatchListing(listing, filterIds, lane, false),
+      result: await dispatchListing(
+        listing,
+        filterIds,
+        lane,
+        false,
+        0,
+        persistedStates.get(observationIdentity(listing)),
+      ),
     }),
   );
   return [...inlineResults, ...queuedResults];
@@ -228,6 +257,7 @@ export async function dispatchListings(
 async function dispatchFlashListings(
   listings: readonly NormalizedListing[],
   filterIds: string[],
+  persistedStates: ReadonlyMap<string, PendingObservationState>,
 ): Promise<Array<{ listing: NormalizedListing; result: ListingProcessingResult | undefined }>> {
   const flashBundleId = `flash-${randomUUID()}`;
   const results = await mapWithConcurrency(
@@ -242,6 +272,8 @@ async function dispatchFlashListings(
             filterIds,
             discoveryLane: "REALTIME",
             flashBundleId,
+            observationPersisted: true,
+            persistedObservationState: persistedStates.get(observationIdentity(listing)),
           }),
         };
       } catch (error) {
@@ -308,10 +340,17 @@ async function dispatchListing(
   lane: ListingDiscoveryLane,
   allowInline = true,
   queueDelayMs = 0,
+  persistedState?: PendingObservationState,
 ): Promise<ListingProcessingResult | undefined> {
   if (allowInline && !isBackgroundDiscoveryLane(lane) && env.FAST_INLINE_LISTING_PROCESSING_ENABLED) {
     try {
-      return await processListingDetected({ listing, filterIds, discoveryLane: lane });
+      return await processListingDetected({
+        listing,
+        filterIds,
+        discoveryLane: lane,
+        observationPersisted: true,
+        persistedObservationState: persistedState,
+      });
     } catch (error) {
       void log.warn(
         "pipeline",
@@ -323,7 +362,6 @@ async function dispatchListing(
 
   // Persist the normalized snapshot before handing work to Redis. If Redis or
   // the worker crashes after enqueue, observation replay can still recover it.
-  await recordPendingObservations([listing], lane);
   await enqueue(
     QUEUE_NAMES.LISTING_DETECTED,
     "detected",

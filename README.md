@@ -243,9 +243,21 @@ Health:    http://127.0.0.1:4000/health
 .\amb.cmd test:recovery:all
 .\amb.cmd test:hot-failover   # только при monitoring.status=STOPPED
 .\amb.cmd test:olx-parity
+.\amb.cmd completeness:check
+.\amb.cmd metrics:hot-path
 ```
 
+`completeness:check` — read-only consistency checker. Он классифицирует durable observation как terminal, replayable, recovery-pending либо impossible и завершает команду с ошибкой при невозможном состоянии. Автоматический repair намеренно отсутствует; параметр `--apply` отклоняется.
+
+OLX collector сначала одной batch-операцией сохраняет весь нормализованный burst в PostgreSQL, и только затем начинает Redis claim, filtering и Telegram dispatch. Поэтому авария на середине burst оставляет durable replayable tail. BullMQ job ID остаётся только координацией: durable `coverageRecoveryPending` и `CoverageRecoveryWindow` являются источником истины, а обычный background scheduler повторно ставит recovery, если immediate job был коалесцирован с уже активным.
+
+`GET /metrics -> olxHotPath` и блок Dashboard «OLX Hot Path» показывают T1–T7, полный internal path, OLX origin pressure и protection events за 24 часа. p50 скрыт до 5 samples, p95 — до 30, p99 — до 100; до порога возвращается `INSUFFICIENT_DATA`. Внешняя `publishedAt` latency считается только для `HIGH`/`MEDIUM` confidence и не смешивается с internal SLO.
+
+`GET /search-plan -> discoveryProofs` показывает доказательство отдельно для каждого source/category/fingerprint. Глобальный `proved=true` невозможен, если хотя бы один активный shard остаётся `PENDING` или `UNRESOLVED`; historical gap при этом не помечает живой realtime worker как DOWN.
+
 `acceptance:extended` поднимает на случайных loopback-портах полностью изолированные PostgreSQL и Redis 6+, запускает локальные OLX/Telegram HTTP-заглушки и физически проверяет отказы Redis, PostgreSQL и Telegram в критических точках pipeline. Рабочая `.env`, основная база, реальные OLX и Telegram не используются. Приёмка завершается только если каждое детерминированное объявление подтверждённо отправлено либо осталось в явном состоянии восстановления; в тот же прогон входит транзакционная проверка сброса 2000 OLX ID с реальной строкой Telegram-избранного.
+
+`test:olx-parity` выполняет preflight до создания collector/network запроса. При `RATE_LIMITED`, `CAPTCHA_DETECTED`, source pause или protection cooling команда безопасно отказывается от дополнительного OLX traffic — такой отказ является ожидаемым защитным результатом, а не разрешением сбросить cooldown.
 
 Локальная 24-часовая оценка задержки Telegram хранит baseline в PostgreSQL и использует точный тракт `journalPersistedAt -> telegramAcceptedAt` из компактного `source_seen_listings`, поэтому 12-часовая очистка карточек не стирает телеметрию и старые приблизительные timestamps не могут дать ложный PASS/FAIL:
 

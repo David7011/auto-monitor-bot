@@ -564,7 +564,7 @@ export class OlxCollector implements SourceCollector {
       }
 
       // The owner-filtered feed is a low-frequency shadow lane. It is not part
-      // of the four-second hot path, but catches temporary index differences
+      // of the configured hot path, but catches temporary index differences
       // without doubling every realtime scan or provoking protection pages.
       if (page === 1 && privateCoverageDue) {
         lastPrivateCoverageAt = now;

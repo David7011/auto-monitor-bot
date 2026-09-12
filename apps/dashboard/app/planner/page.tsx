@@ -243,6 +243,40 @@ export default function PlannerPage() {
         )}
       </HudPanel>
 
+      <HudPanel
+        kicker="P0 · DISCOVERY PROOF"
+        title="Доказательство по каждому активному shard"
+        action={data?.globalCoverageProof?.proved ? <CheckCircle2 className="size-4 text-success" /> : <ShieldAlert className="size-4 text-warning" />}
+      >
+        <div className={cn(
+          "mb-3 rounded-lg border p-3 text-sm",
+          data?.globalCoverageProof?.proved ? "border-success/30 bg-success/10 text-success" : "border-warning/30 bg-warning/10 text-warning",
+        )}>
+          {data?.globalCoverageProof?.proved
+            ? `Полнота доказана для ${data.globalCoverageProof.activeShardCount} активных shard.`
+            : `Глобальная полнота не заявлена: PENDING ${data?.globalCoverageProof?.pendingCount ?? 0}, UNRESOLVED ${data?.globalCoverageProof?.unresolvedCount ?? 0}. Realtime оценивается отдельно.`}
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          {(data?.discoveryProofs ?? []).filter((proof) => proof.relevance !== "INACTIVE").map((proof) => (
+            <div key={`${proof.source}:${proof.fingerprint}`} className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <span className="font-mono text-foreground">{proof.source} · {proof.categoryKey} · {proof.fingerprint.slice(0, 10)}</span>
+                <span className={cn(
+                  "rounded border px-2 py-0.5 font-mono",
+                  proof.coverageStatus === "VERIFIED" ? "border-success/30 text-success"
+                    : proof.coverageStatus === "UNRESOLVED" ? "border-danger/30 text-danger"
+                      : "border-warning/30 text-warning",
+                )}>{proof.coverageStatus}</span>
+              </div>
+              <div>{proof.relevance} · PARSER {proof.parserStatus} · попыток {proof.attemptCount} · страниц {proof.pagesScanned} · запросов {proof.requests}</div>
+              <div>Realtime: <span className="font-mono text-foreground">{formatDate(proof.lastRealtimeSuccessAt)}</span> · tail: <span className="font-mono text-foreground">{proof.knownTailExternalId ?? "—"}</span></div>
+              <div>Cutoff: <span className="font-mono text-foreground">{formatDate(proof.requiredCutoffAt)}</span> · oldest: <span className="font-mono text-foreground">{formatDate(proof.oldestObservedAt)}</span></div>
+              <div>Evidence: <span className="font-mono text-foreground">{proof.verificationMethod ?? proof.unresolvedReason ?? proof.recoveryReason ?? "current-only"}</span></div>
+            </div>
+          ))}
+        </div>
+      </HudPanel>
+
       <section className="grid gap-4 xl:grid-cols-[1fr_1.6fr]">
         <HudPanel title="Лимиты AUTO.RIA" action={<Gauge className="size-4 text-accent-soft" />}>
           <div className="space-y-4">

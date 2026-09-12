@@ -56,7 +56,7 @@ export const env = {
   OLX_HTML_DETAIL_MAX_PER_SCAN: numberEnv("OLX_HTML_DETAIL_MAX_PER_SCAN", 6),
   OLX_BACKFILL_PAGE_DELAY_MS: numberEnv("OLX_BACKFILL_PAGE_DELAY_MS", 750),
   OLX_BACKFILL_REALTIME_QUIET_MS: numberEnv("OLX_BACKFILL_REALTIME_QUIET_MS", 250),
-  // Background traffic is deliberately slower than the 4s realtime cadence.
+  // Background traffic is deliberately slower than the controlled realtime cadence.
   // The coordinator applies this only to coverage/backfill/recovery/enrichment.
   OLX_BACKGROUND_REQUEST_MIN_INTERVAL_MS: numberEnv("OLX_BACKGROUND_REQUEST_MIN_INTERVAL_MS", 3_500),
   OLX_BACKGROUND_AFTER_REALTIME_QUIET_MS: numberEnv("OLX_BACKGROUND_AFTER_REALTIME_QUIET_MS", 1_000),

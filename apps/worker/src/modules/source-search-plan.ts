@@ -112,6 +112,28 @@ export function coverageVerificationHasDurableEvidence(
   );
 }
 
+export function decideCoverageRecoveryTransition(input: {
+  requested: boolean;
+  lane: ListingDiscoveryLane;
+  coverageVerified: boolean;
+  verificationHasEvidence: boolean;
+  unresolvedReason?: OlxRecoveryUnresolvedReason;
+}): { verified: boolean; unresolved: boolean; required: boolean } {
+  const verified = input.requested
+    && input.lane === "BACKFILL"
+    && input.coverageVerified
+    && input.verificationHasEvidence;
+  const unresolved = input.requested
+    && input.lane === "BACKFILL"
+    && !verified
+    && Boolean(input.unresolvedReason);
+  return {
+    verified,
+    unresolved,
+    required: input.requested && !verified && !unresolved,
+  };
+}
+
 export async function buildSourceSearchPlan(source: ListingSource, now = new Date()): Promise<SourceSearchContext[]> {
   const filters = await prisma.filter.findMany({
     where: {
@@ -632,14 +654,16 @@ export async function markSourceSearchSuccess(
       requestedCutoff,
       { lane, existingRecoveryPending: current.coverageRecoveryPending },
     );
-    const recoveryVerified = recoveryWasRequested
-      && lane !== "COVERAGE"
-      && Boolean(options.coverageVerified)
-      && verificationHasEvidence;
-    const recoveryUnresolved = recoveryWasRequested
-      && lane === "BACKFILL"
-      && Boolean(options.coverageUnresolvedReason);
-    const recoveryRequired = recoveryWasRequested && !recoveryVerified && !recoveryUnresolved;
+    const recoveryTransition = decideCoverageRecoveryTransition({
+      requested: recoveryWasRequested,
+      lane,
+      coverageVerified: Boolean(options.coverageVerified),
+      verificationHasEvidence,
+      unresolvedReason: options.coverageUnresolvedReason,
+    });
+    const recoveryVerified = recoveryTransition.verified;
+    const recoveryUnresolved = recoveryTransition.unresolved;
+    const recoveryRequired = recoveryTransition.required;
     const openingRecoveryWindow = !current.coverageRecoveryPending && recoveryWasRequested;
     const frozenRecoveryAnchors = openingRecoveryWindow
       ? current.knownExternalIds.slice(0, MAX_COVERAGE_ANCHOR_IDS)

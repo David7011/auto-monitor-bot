@@ -36,6 +36,7 @@ export type ListingDetectedJob = {
   discoveryLane?: ListingDiscoveryLane;
   bypassHotClaim?: boolean;
   observationPersisted?: boolean;
+  persistedObservationState?: PendingObservationState;
   flashBundleId?: string;
 };
 
@@ -56,11 +57,11 @@ export type ListingProcessingResult = {
  */
 export async function processListingDetected(job: ListingDetectedJob): Promise<ListingProcessingResult> {
   const discoveryLane = job.discoveryLane ?? "REALTIME";
-  let persistedState: PendingObservationState | undefined;
+  let persistedState = job.persistedObservationState;
   // PostgreSQL is the durable recovery boundary. Persist before taking the
   // short-lived Redis claim so a worker crash can never hide an unjournaled
   // advert until the claim TTL expires.
-  if (!job.observationPersisted) {
+  if (!job.observationPersisted && !persistedState) {
     persistedState = await recordPendingObservation(job.listing, discoveryLane);
   }
 
