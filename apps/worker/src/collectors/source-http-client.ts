@@ -1,5 +1,6 @@
 import { env } from "../env.js";
 import { Agent, setGlobalDispatcher } from "undici";
+import { fetchSourceResponse, windowsResponseTiming, closeWindowsSourceHttp } from "../lib/windows-source-http.js";
 import { readResponseBuffer, ResponseTooLargeError } from "../lib/response-body.js";
 import { activeCollectorLease } from "../modules/collector-lease.js";
 import {
@@ -198,14 +199,14 @@ export class SourceHttpClient {
 
     try {
       requestSignal.throwIfAborted();
-      const response = await fetch(url, {
+      const response = await fetchSourceResponse(url, {
         method: options.method ?? "GET",
         headers: requestHeaders(options, requestId),
         body: options.body,
         redirect: "follow",
         signal: requestSignal,
-      });
-      const firstByteAt = new Date();
+      }, options.source, options.maxBytes ?? env.SOURCE_HTTP_MAX_RESPONSE_BYTES, options.timeoutMs ?? env.SOURCE_HTTP_TIMEOUT_MS);
+      const firstByteAt = windowsResponseTiming.get(response)?.firstByteAt ?? new Date();
 
       const contentType = response.headers.get("content-type") ?? "";
       const retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
@@ -230,7 +231,7 @@ export class SourceHttpClient {
 
       const encoding = options.encoding ?? (contentType.toLowerCase().includes("windows-1251") ? "windows-1251" : "utf8");
       const body = new TextDecoder(encoding).decode(buffer);
-      const bodyReceivedAt = new Date();
+      const bodyReceivedAt = windowsResponseTiming.get(response)?.bodyReceivedAt ?? new Date();
       const network = takeSourceNetworkTelemetry(requestId);
       if (network) network.responseBytes = buffer.byteLength;
       const { classification, detector } = classifyResponse(
@@ -329,6 +330,7 @@ async function sleepWithAbort(
 export const sourceHttpClient = new SourceHttpClient();
 
 export async function closeSourceHttpClient(): Promise<void> {
+  closeWindowsSourceHttp();
   await sourceDispatcher.close();
 }
 
