@@ -61,13 +61,18 @@ export async function runRetentionMaintenance(now = new Date()): Promise<void> {
         // Compact NOTIFIED rows are permanent dedupe tombstones. Their heavy
         // normalizedData is removed by listing retention, but the external ID
         // must survive so an old advert can never be sent again.
-        decision: { not: "NOTIFIED" },
+        decision: { in: ["REJECTED", "DUPLICATE"] },
+        listingId: null,
+        notifiedAt: null,
+        telegramAcceptedAt: null,
       },
     });
     const legacyObservations = await tx.$executeRaw`
       DELETE FROM "source_seen_listings"
       WHERE "normalizedData" IS NULL
-        AND "decision" <> 'NOTIFIED'
+        AND "decision" IN ('REJECTED', 'DUPLICATE')
+        AND "listingId" IS NULL
+        AND "notifiedAt" IS NULL AND "telegramAcceptedAt" IS NULL
         AND "createdAt" < ${legacyObservationCutoff}
     `;
     const supersededStates = await tx.$executeRaw`

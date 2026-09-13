@@ -37,6 +37,14 @@ export function getQueue(name: QueueName): Queue {
     // consumers keep the resilient, indefinitely reconnecting connection.
     queue = new Queue(name, { connection: producerConnection, skipVersionCheck: true });
     queues.set(name, queue);
+    const created = queue;
+    const discard = () => {
+      if (queues.get(name) === created) queues.delete(name);
+      void created.close().catch(() => {});
+    };
+    // A fail-fast producer does not reconnect. Do not cache its rejected client
+    // forever: a later durable replay must be able to create a fresh producer.
+    void created.client.then((client) => client.once("end", discard), discard);
   }
   return queue;
 }

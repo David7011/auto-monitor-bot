@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../packages/db/src/index.js", () => ({
   Prisma: { PrismaClientKnownRequestError: class extends Error {} },
   prisma: {
+    monitoringState: { findUnique: vi.fn().mockResolvedValue({ status: "RUNNING" }) },
     filter: { findMany: mocks.filterFindMany },
     sourceSeenListing: { findUnique: mocks.observationFindUnique },
     listing: {
@@ -205,7 +206,7 @@ describe("listing.detected glue invariants", () => {
   it("uses at most one owned detail request for an UNKNOWN replay candidate", async () => {
     mocks.matchFiltersDetailed.mockReturnValueOnce({ matched: [], evaluations: [{ outcome: "UNKNOWN", unknownReasons: ["ENGINE_VOLUME"] }], rejectionReasons: [] });
     mocks.fetchOlxDetailListing.mockResolvedValueOnce({ ...listing, engineVolume: 2 });
-    await processListingDetected({ listing, hydrateObservation: true, discoveryLane: "BACKFILL" });
+    await processListingDetected({ listing: { ...listing, firstSeenAt: new Date() }, hydrateObservation: true, allowExternalHydration: true, discoveryLane: "BACKFILL" });
     expect(mocks.fetchOlxDetailListing).toHaveBeenCalledExactlyOnceWith(listing.url, expect.any(Date), "RECOVERY");
   });
 

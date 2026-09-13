@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   redisSet: vi.fn(),
   redisEval: vi.fn(),
+  redisGet: vi.fn(),
+  monitoring: vi.fn(),
+  reservation: vi.fn(),
   enqueue: vi.fn(),
   filterFindMany: vi.fn(),
   observationFindMany: vi.fn(),
@@ -24,12 +27,13 @@ vi.mock("../packages/db/src/index.js", () => ({
   Prisma: { DbNull: Symbol("DbNull") },
   prisma: {
     filter: { findMany: mocks.filterFindMany },
-    sourceSeenListing: { findMany: mocks.observationFindMany, count: mocks.observationCount },
+    monitoringState: { findUnique: mocks.monitoring },
+    sourceSeenListing: { findMany: mocks.observationFindMany, count: mocks.observationCount, updateMany: mocks.reservation },
     completenessAudit: { create: mocks.auditCreate, update: mocks.auditUpdate },
   },
 }));
 vi.mock("../apps/worker/src/lib/queues.js", () => ({
-  redisConnection: { set: mocks.redisSet, eval: mocks.redisEval },
+  redisConnection: { set: mocks.redisSet, eval: mocks.redisEval, get: mocks.redisGet },
   enqueue: mocks.enqueue,
 }));
 vi.mock("../apps/worker/src/lib/log.js", () => ({ log: { info: mocks.logInfo, warn: mocks.logWarn } }));
@@ -46,6 +50,10 @@ vi.mock("../apps/worker/src/modules/observation-recovery.js", () => ({
 }));
 
 import { processObservationReplay } from "../apps/worker/src/processors/observation-replay.js";
+vi.mock("../apps/worker/src/modules/delivery-outbox.js", () => ({
+  reconcileOrphanDeliveryIntents: vi.fn().mockResolvedValue(0),
+  selectPendingCardDeliveryIntents: vi.fn().mockResolvedValue([]),
+}));
 
 const normalizedListing = {
   source: "OLX",
@@ -62,6 +70,9 @@ describe("observation replay glue invariants", () => {
     vi.clearAllMocks();
     mocks.redisSet.mockResolvedValue("OK");
     mocks.redisEval.mockResolvedValue(1);
+    mocks.redisGet.mockImplementation(async () => mocks.redisSet.mock.calls.at(-1)?.[1]);
+    mocks.monitoring.mockResolvedValue({ status: "RUNNING" });
+    mocks.reservation.mockResolvedValue({ count: 1 });
     mocks.enqueue.mockResolvedValue(undefined);
     mocks.filterFindMany.mockResolvedValue([]);
     mocks.buildFilterSetRevision.mockReturnValue("revision-1");
@@ -89,6 +100,47 @@ describe("observation replay glue invariants", () => {
     await expect(processObservationReplay({ trigger: "PERIODIC" })).resolves.toBeUndefined();
     expect(mocks.filterFindMany).not.toHaveBeenCalled();
     expect(mocks.redisEval).not.toHaveBeenCalled();
+  });
+
+  it("releases the lease when filter bootstrap fails", async () => {
+    mocks.filterFindMany.mockRejectedValueOnce(new Error("database unavailable"));
+    await expect(processObservationReplay({})).rejects.toThrow("database unavailable");
+    expect(mocks.redisEval).toHaveBeenCalledOnce();
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("renews ownership during a slow bootstrap and stops its timer afterwards", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.filterFindMany.mockImplementationOnce(async () => {
+        await vi.advanceTimersByTimeAsync(81000);
+        return [];
+      });
+      await processObservationReplay({});
+      expect(mocks.redisEval).toHaveBeenCalledWith(expect.stringContaining("pexpire"), 1, "observation-replay:lock", expect.any(String), 240000);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not scan or deliver when monitoring is stopped", async () => {
+    mocks.monitoring.mockResolvedValueOnce({ status: "STOPPED" });
+    await processObservationReplay({});
+    expect(mocks.filterFindMany).not.toHaveBeenCalled();
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+    expect(mocks.redisEval).toHaveBeenCalledOnce();
+  });
+
+  it("bounds optional external hydration and skips a concurrently completed observation", async () => {
+    mocks.observationFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce(
+      Array.from({ length: 8 }, (_, i) => ({ source: "OLX", externalId: String(i), normalizedData: { id: i } })),
+    );
+    mocks.deserializeNormalizedListing.mockImplementation((data) => ({ ...normalizedListing, externalId: String(data.id) }));
+    mocks.reservation.mockResolvedValueOnce({ count: 0 });
+    await processObservationReplay({ trigger: "MANUAL" });
+    expect(mocks.enqueue).toHaveBeenCalledTimes(7);
+    expect(mocks.enqueue.mock.calls.filter((call) => call[2].allowExternalHydration === true)).toHaveLength(5);
+    expect(mocks.enqueue.mock.calls.filter((call) => call[2].allowExternalHydration === false)).toHaveLength(2);
+    expect(mocks.enqueue.mock.calls.some((call) => call[2].listing.externalId === "0")).toBe(false);
   });
 
   it("releases its lease after an empty periodic scan without creating noise", async () => {

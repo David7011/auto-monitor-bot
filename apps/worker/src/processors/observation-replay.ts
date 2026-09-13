@@ -11,6 +11,10 @@ import { processListingDetected } from "./listing-detected.js";
 import { enqueue } from "../lib/queues.js";
 import { QUEUE_NAMES } from "@amb/shared";
 import { reconstructObservationListing } from "../modules/observation-recovery.js";
+import { CollectorLease } from "../modules/collector-lease.js";
+import { observationReplayWhere } from "../modules/observation-replay-selection.js";
+import { reconcileOrphanDeliveryIntents, selectPendingCardDeliveryIntents } from "../modules/delivery-outbox.js";
+import { env } from "../env.js";
 
 const REPLAY_LOCK_KEY = "observation-replay:lock";
 const REPLAY_LOCK_TTL_MS = 4 * 60 * 1000;
@@ -20,13 +24,27 @@ export type ObservationReplayJob = {
   trigger?: "FILTER_CHANGED" | "PERIODIC" | "MANUAL" | "STARTUP";
   lookbackHours?: number;
   limit?: number;
+  /** Isolated acceptance only; ignored by production. */
+  testLeaseTtlMs?: number;
 };
 
 export async function processObservationReplay(job: ObservationReplayJob): Promise<void> {
   const lockValue = `${process.pid}:${Date.now()}`;
-  const lock = await redisConnection.set(REPLAY_LOCK_KEY, lockValue, "PX", REPLAY_LOCK_TTL_MS, "NX");
+  const ttlMs = process.env.AMB_PIPELINE_INTEGRATION_TEST === "1" && job.testLeaseTtlMs
+    ? Math.max(150, job.testLeaseTtlMs) : REPLAY_LOCK_TTL_MS;
+  const lock = await redisConnection.set(REPLAY_LOCK_KEY, lockValue, "PX", ttlMs, "NX");
   if (lock !== "OK") return;
-
+  let lease: CollectorLease | undefined;
+  try {
+  lease = new CollectorLease({
+    ttlMs, renewalIntervalMs: Math.max(50, Math.floor(ttlMs / 3)),
+    renew: async () => Number(await redisConnection.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end", 1, REPLAY_LOCK_KEY, lockValue, ttlMs)) === 1,
+    owns: async () => await redisConnection.get(REPLAY_LOCK_KEY) === lockValue,
+  });
+  const ownedLease = lease;
+  await lease.run(async () => {
+  const monitoring = await prisma.monitoringState.findUnique({ where: { id: "singleton" }, select: { status: true } });
+  if (monitoring?.status !== "RUNNING") return;
   const trigger = job.trigger ?? "PERIODIC";
   const lookbackHours = clampInteger(job.lookbackHours, 1, 24 * 8, 48);
   const limit = clampInteger(job.limit, 1, 2_000, 500);
@@ -48,6 +66,15 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
   const sourceCounts = new Map<ListingSource, number>();
 
   try {
+    await ownedLease.assertOwnership();
+    await reconcileOrphanDeliveryIntents(env.TELEGRAM_CHAT_ID, limit);
+    const deliveryIntents = await selectPendingCardDeliveryIntents(limit);
+    for (const intent of deliveryIntents) {
+      await ownedLease.assertOwnership();
+      const state = await prisma.monitoringState.findUnique({ where: { id: "singleton" }, select: { status: true } });
+      if (state?.status !== "RUNNING") break;
+      await enqueue(QUEUE_NAMES.TELEGRAM_SEND, "replay-delivery", { listingId: intent.listingId }, { deduplicationId: `pending-delivery-${intent.listingId}` });
+    }
     const cutoff = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
     const hydrated = await hydrateIncompleteObservations(cutoff);
     const repairedStates = await releaseIncompleteObservationIds(lookbackHours);
@@ -55,27 +82,8 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
       await log.info("completeness", `Released incomplete fresh observation IDs from ${repairedStates} search state(s)`);
     }
     const observations = await prisma.sourceSeenListing.findMany({
-      where: {
-        // Complete rows have a real snapshot; incomplete ones are SQL NULL
-        // (hydrate selects them via equals: DbNull), so the complement is DbNull.
-        normalizedData: { not: Prisma.DbNull },
-        OR: [
-          { listingId: null },
-          { evaluationNotes: { has: "SHADOW_MODE: production notification suppressed" }, filterRevision: { not: filterRevision } },
-        ],
-        decision: { not: "NOTIFIED" },
-        AND: [
-          { OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }] },
-          {
-            OR: [
-              { filterRevision: null },
-              { filterRevision: { not: filterRevision } },
-              { decision: { in: ["PENDING", "FAILED", "MATCHED"] } },
-            ],
-          },
-        ],
-      },
-      orderBy: [{ publishedAt: "desc" }, { firstSeenAt: "desc" }],
+      where: observationReplayWhere(cutoff, filterRevision),
+      orderBy: [{ lastEvaluatedAt: { sort: "asc", nulls: "first" } }, { firstSeenAt: "asc" }, { id: "asc" }],
       take: limit,
       select: {
         source: true,
@@ -99,8 +107,12 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
       })),
     ];
     counts.observed = replayItems.length;
+    let detailBudget = 5;
     for (const observation of replayItems) {
       const listing = observation.listing;
+      await ownedLease.assertOwnership();
+      const state = await prisma.monitoringState.findUnique({ where: { id: "singleton" }, select: { status: true } });
+      if (state?.status !== "RUNNING") break;
       if (!listing) {
         counts.failed += 1;
         await markObservationOutcome(observation.source, observation.externalId, { decision: "FAILED" });
@@ -110,8 +122,17 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
       sourceCounts.set(observation.source, (sourceCounts.get(observation.source) ?? 0) + 1);
       try {
         if (listing.source === "OLX") {
+          // Reserve a bounded retry window without inventing an evaluation or
+          // deleting the durable snapshot. A failed enqueue remains selectable later.
+          const reservation = await prisma.sourceSeenListing.updateMany({
+            where: { source: listing.source, externalId: listing.externalId, decision: { not: "NOTIFIED" }, notifiedAt: null, telegramAcceptedAt: null },
+            data: { lastEvaluatedAt: new Date() },
+          });
+          if (reservation.count === 0) { counts.alreadyHandled += 1; continue; }
+          const allowExternalHydration = detailBudget > 0;
+          if (allowExternalHydration) detailBudget -= 1;
           await enqueue(QUEUE_NAMES.LISTING_DETECTED, "replay", {
-            listing, discoveryLane: "BACKFILL", bypassHotClaim: true, observationPersisted: true, hydrateObservation: true,
+            listing, discoveryLane: "BACKFILL", bypassHotClaim: true, observationPersisted: true, hydrateObservation: true, allowExternalHydration,
           }, { priority: 10, deduplicationId: `observation-replay-${listing.source}-${listing.externalId}` });
           counts.queued += 1;
           continue;
@@ -142,18 +163,13 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
     }
 
     const pendingCount = await prisma.sourceSeenListing.count({
+      // Backoff changes eligibility, not the existence of durable backlog.
       where: {
-        normalizedData: { not: Prisma.DbNull },
+        notifiedAt: null, telegramAcceptedAt: null, decision: { not: "NOTIFIED" },
         OR: [
-          { listingId: null },
-          { evaluationNotes: { has: "SHADOW_MODE: production notification suppressed" }, filterRevision: { not: filterRevision } },
+          { listingId: null, decision: { in: ["PENDING", "FAILED", "MATCHED", "DISPATCHED"] } },
+          observationReplayWhere(cutoff, filterRevision),
         ],
-        decision: { not: "NOTIFIED" },
-        AND: [{ OR: [
-          { filterRevision: null },
-          { filterRevision: { not: filterRevision } },
-          { decision: { in: ["PENDING", "FAILED", "MATCHED"] } },
-        ] }, { OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }] }],
       },
     });
 
@@ -202,7 +218,10 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
       });
     }
     throw error;
+  }
+  });
   } finally {
+    lease?.stop();
     await releaseReplayLock(lockValue);
   }
 }
@@ -217,12 +236,18 @@ async function hydrateIncompleteObservations(cutoff: Date): Promise<Array<{
     where: {
       normalizedData: { equals: Prisma.DbNull },
       decision: { not: "NOTIFIED" },
-      OR: [{ publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } }],
+      notifiedAt: null,
+      telegramAcceptedAt: null,
+      OR: [
+        { listingId: null, decision: { in: ["PENDING", "FAILED", "MATCHED", "DISPATCHED"] } },
+        { publishedAt: { gte: cutoff } }, { firstSeenAt: { gte: cutoff } },
+      ],
       AND: [{ OR: [{ lastEvaluatedAt: null }, { lastEvaluatedAt: { lte: retryBefore } }] }],
     },
     orderBy: [
-      { publishedAt: { sort: "desc", nulls: "last" } },
-      { firstSeenAt: "desc" },
+      { lastEvaluatedAt: { sort: "asc", nulls: "first" } },
+      { firstSeenAt: "asc" },
+      { id: "asc" },
     ],
     take: 50,
     select: {
@@ -256,6 +281,10 @@ async function hydrateIncompleteObservations(cutoff: Date): Promise<Array<{
     const batch = rows.slice(index, index + DETAIL_HYDRATION_CONCURRENCY);
     const results = await Promise.all(batch.map(async (row) => {
       try {
+        await prisma.sourceSeenListing.updateMany({
+          where: { source: row.source, externalId: row.externalId, normalizedData: { equals: Prisma.DbNull }, decision: { not: "NOTIFIED" }, notifiedAt: null, telegramAcceptedAt: null },
+          data: { lastEvaluatedAt: new Date() },
+        });
         // External detail hydration belongs to the elected hot origin owner.
         const listing = reconstructObservationListing(row);
         if (listing) {

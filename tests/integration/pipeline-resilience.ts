@@ -27,6 +27,9 @@ import { getCollector } from "../../apps/worker/src/collectors/index.js";
 import { SourceHttpClient } from "../../apps/worker/src/collectors/source-http-client.js";
 import { OlxOriginDeferredError, OlxRequestCoordinator, setOlxRequestLeadershipGuard } from "../../apps/worker/src/modules/olx-request-coordinator.js";
 import { HotWorkerLeadership } from "../../apps/worker/src/modules/hot-worker-leadership.js";
+import { observationReplayWhere } from "../../apps/worker/src/modules/observation-replay-selection.js";
+import { processObservationReplay } from "../../apps/worker/src/processors/observation-replay.js";
+import { runRetentionMaintenance } from "../../apps/worker/src/modules/retention.js";
 
 type TelegramMode = "SUCCESS" | "FAIL" | "STOP_DB_AFTER_ACCEPT";
 
@@ -166,6 +169,25 @@ async function main(): Promise<void> {
     checks.push("real collector handler + loopback page1/page2-403 -> durable partial journal, no boundary advancement; STOPPED -> journal only");
     await assertOriginPolicyRestart();
     checks.push("persisted origin pause + elected hot/background child restarts -> zero HTTP; owned expired-pause realtime probe -> exactly one HTTP");
+    progress("old pending retention and real replay handoff");
+    const oldPending = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { source_externalId: { source: "OLX", externalId: "100003" } } });
+    await prisma.sourceSeenListing.update({ where: { id: oldPending.id }, data: { firstSeenAt: new Date(Date.now() - 180 * 86400000), lastSeenAt: new Date(Date.now() - 180 * 86400000), lastEvaluatedAt: null } });
+    await runRetentionMaintenance();
+    const retained = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { id: oldPending.id } });
+    if (!retained.normalizedData) throw new Error("Retention erased durable pending snapshot");
+    const eligible = await prisma.sourceSeenListing.findMany({ where: observationReplayWhere(new Date(Date.now() - 48 * 3600000), "acceptance-revision") });
+    if (!eligible.some((row) => row.id === oldPending.id)) throw new Error("Age cutoff stranded pending snapshot");
+    await prisma.monitoringState.upsert({ where: { id: "singleton" }, create: { id: "singleton", status: "RUNNING" }, update: { status: "RUNNING" } });
+    await processObservationReplay({ trigger: "MANUAL", limit: 20 });
+    const replayJobs = await getQueue(QUEUE_NAMES.LISTING_DETECTED).getJobs(["waiting", "prioritized", "delayed"]);
+    const replayJob = replayJobs.find((item) => item.data.listing?.externalId === "100003");
+    if (!replayJob) throw new Error("Old pending has no real BullMQ replay owner");
+    await processListingDetected(replayJob.data);
+    await recoverTelegramForExternalId("100003");
+    await assertSent("100003");
+    await processListingDetected(replayJob.data);
+    if (telegramDeliveries.get("100003") !== 1) throw new Error("Replay duplicated Telegram delivery");
+    checks.push("180-day pending survives retention -> SQL selector -> real BullMQ serialized payload -> Telegram once; repeated replay suppressed");
     console.log(JSON.stringify({
       result: "PASS",
       invariant: "every deterministic OLX advert is NOTIFIED or remains in an explicit recoverable state",

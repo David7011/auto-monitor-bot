@@ -23,6 +23,7 @@ import {
   markObservationOutcome,
   recordPendingObservation,
   recordObservationEvaluation,
+  deserializeNormalizedListing,
   type PendingObservationState,
 } from "../modules/observation-journal.js";
 
@@ -40,6 +41,7 @@ export type ListingDetectedJob = {
   persistedObservationState?: PendingObservationState;
   flashBundleId?: string;
   hydrateObservation?: boolean;
+  allowExternalHydration?: boolean;
 };
 
 export type ListingProcessingResult = {
@@ -58,6 +60,15 @@ export type ListingProcessingResult = {
  * notification is persisted, so telegram.update always has a message target.
  */
 export async function processListingDetected(job: ListingDetectedJob): Promise<ListingProcessingResult> {
+  if (!(job.listing.firstSeenAt instanceof Date)) {
+    const listing = deserializeNormalizedListing(job.listing as unknown as Prisma.JsonValue);
+    if (!listing) throw new Error("Invalid queued listing snapshot");
+    job = { ...job, listing };
+  }
+  if (job.hydrateObservation) {
+    const state = await prisma.monitoringState.findUnique({ where: { id: "singleton" }, select: { status: true } });
+    if (state?.status !== "RUNNING") return { outcome: "DEFERRED", matchedFilterIds: [], rejectionReasons: [] };
+  }
   if (job.hydrateObservation && job.listing.source === "OLX") {
     const retained = await prisma.sourceSeenListing.findUnique({
       where: { source_externalId: { source: "OLX", externalId: job.listing.externalId } },
@@ -68,7 +79,9 @@ export async function processListingDetected(job: ListingDetectedJob): Promise<L
     }
     const filters = await loadEnabledFilters(job.filterIds ?? []);
     const evaluation = matchFiltersDetailed(job.listing, filters);
-    if (evaluation.matched.length === 0 && evaluation.evaluations.some((item) => item.outcome === "UNKNOWN")) {
+    if (evaluation.matched.length === 0 && evaluation.evaluations.some((item) => item.outcome === "UNKNOWN")
+      && job.allowExternalHydration === true
+      && job.listing.firstSeenAt.getTime() >= Date.now() - 48 * 60 * 60_000) {
       const detail = await fetchOlxDetailListing(job.listing.url, new Date(), "RECOVERY");
       if (detail && detail.externalId === job.listing.externalId) {
         job = { ...job, listing: { ...job.listing, ...detail, firstSeenAt: job.listing.firstSeenAt }, observationPersisted: false };
