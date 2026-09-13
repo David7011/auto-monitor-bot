@@ -3,16 +3,22 @@ import { Redis, type RedisOptions } from "ioredis";
 import { QUEUE_NAMES, QUEUE_PRIORITIES, type QueueName } from "@amb/shared";
 import { env } from "../env.js";
 
-export const redisConnection = new Redis(env.REDIS_URL, {
-  maxRetriesPerRequest: null,
-  lazyConnect: true,
-  connectTimeout: 1000,
-  enableOfflineQueue: true,
-  retryStrategy: (attempt) => Math.min(1000 + attempt * 100, 5000),
-});
-redisConnection.on("error", () => {
-  // Individual processors fall back or fail fast depending on their queue semantics.
-});
+export function createControlRedis(url: string): Redis {
+  const connection = new Redis(url, {
+    maxRetriesPerRequest: 1,
+    lazyConnect: true,
+    connectTimeout: 1000,
+    commandTimeout: 2000,
+    enableOfflineQueue: false,
+    retryStrategy: (attempt) => Math.min(1000 + attempt * 100, 5000),
+  });
+  connection.on("error", () => {
+    // Individual processors fall back or fail fast depending on their queue semantics.
+  });
+  return connection;
+}
+// Locks, leadership, gates and cache reads are not blocking BullMQ consumers.
+export const redisConnection = createControlRedis(env.REDIS_URL);
 export const bullConnection: ConnectionOptions = redisOptionsFromUrl(env.REDIS_URL);
 const producerConnection: ConnectionOptions = redisOptionsFromUrl(env.REDIS_URL, {
   maxRetriesPerRequest: 1,
