@@ -12,6 +12,7 @@ $RedisConfig = Join-Path $RunRoot "redis.conf"
 $DatabaseName = "amb_pipeline_test"
 $DatabaseUser = "amb_test"
 $RedisProcess = $null
+$EvidenceRoot = Join-Path $ProjectRoot ".runtime\audit\$RunId"
 
 function Resolve-Executable([string]$Name, [string[]]$Candidates) {
   foreach ($candidate in $Candidates) {
@@ -102,7 +103,7 @@ $EnvironmentKeys = @(
   "AMB_PIPELINE_INTEGRATION_TEST", "AMB_TEST_PG_CTL", "AMB_TEST_PG_DATA", "AMB_TEST_PG_LOG",
   "AMB_TEST_PSQL",
   "AMB_TEST_REDIS_SERVER", "AMB_TEST_REDIS_CLI", "AMB_TEST_REDIS_CONFIG", "AMB_TEST_REDIS_PORT",
-  "AMB_TEST_PROGRESS_LOG",
+  "AMB_TEST_PROGRESS_LOG", "AMB_TEST_REPORT_PATH", "AMB_TEST_DURABLE_PG",
   "FAST_INLINE_TELEGRAM_SEND_ENABLED", "FAST_INLINE_TELEGRAM_DEADLINE_MS",
   "TELEGRAM_LISTING_SEND_MIN_INTERVAL_MS", "NHTSA_VPIC_ENABLED", "NHTSA_RECALLS_ENABLED",
   "NHTSA_COMPLAINTS_ENABLED", "NHTSA_SAFETY_RATINGS_ENABLED", "DATA_GOV_UA_STOLEN_ENABLED",
@@ -112,14 +113,15 @@ foreach ($key in $EnvironmentKeys) { $PreviousEnvironment[$key] = [Environment]:
 
 try {
   New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
+  New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
   & $InitDb -D $PgData -U $DatabaseUser -A trust --encoding UTF8 --no-locale *> (Join-Path $RunRoot "initdb.log")
   if ($LASTEXITCODE -ne 0) { throw "initdb failed; see $RunRoot\initdb.log" }
   @(
     "listen_addresses = '127.0.0.1'"
     "port = $PgPort"
-    "fsync = off"
-    "synchronous_commit = off"
-    "full_page_writes = off"
+    "fsync = on"
+    "synchronous_commit = on"
+    "full_page_writes = on"
     "max_connections = 30"
   ) | Add-Content -LiteralPath (Join-Path $PgData "postgresql.conf") -Encoding ASCII
   & $PgCtl start -D $PgData -l $PgLog -w
@@ -155,6 +157,8 @@ try {
   $env:AMB_TEST_REDIS_CONFIG = $RedisConfigArgument
   $env:AMB_TEST_REDIS_PORT = "$RedisPort"
   $env:AMB_TEST_PROGRESS_LOG = (Join-Path $RunRoot "progress.log")
+  $env:AMB_TEST_REPORT_PATH = (Join-Path $EvidenceRoot "result.json")
+  $env:AMB_TEST_DURABLE_PG = "1"
   $env:FAST_INLINE_TELEGRAM_SEND_ENABLED = "true"
   $env:FAST_INLINE_TELEGRAM_DEADLINE_MS = "5000"
   $env:TELEGRAM_LISTING_SEND_MIN_INTERVAL_MS = "250"
@@ -177,6 +181,15 @@ try {
   }
   Write-Host "Extended pipeline acceptance passed with isolated PostgreSQL:$PgPort and Redis:$RedisPort."
 } finally {
+  # Preserve synthetic test evidence before deleting the isolated data cluster.
+  # Never export dotenv, live pgdata, production dump or Redis state.
+  foreach ($name in @("progress.log", "postgres.log", "initdb.log")) {
+    $evidenceSource = Join-Path $RunRoot $name
+    if (Test-Path -LiteralPath $evidenceSource) {
+      New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
+      Copy-Item -LiteralPath $evidenceSource -Destination (Join-Path $EvidenceRoot $name)
+    }
+  }
   $RedisStop = Start-Process -FilePath $RedisCli -WindowStyle Hidden -PassThru -ArgumentList @("-h", "127.0.0.1", "-p", "$RedisPort", "shutdown", "nosave")
   if (!$RedisStop.WaitForExit(2000)) { $RedisStop.Kill() }
   if ($RedisProcess -and !$RedisProcess.HasExited) { $RedisProcess.Kill() }

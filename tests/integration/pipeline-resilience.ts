@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync, realpathSync } from "node:fs";
+import { sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { Worker } from "bullmq";
 import { prisma, compactSourceSearchStates } from "@amb/db";
@@ -11,7 +13,7 @@ import { selectOlxCandidates } from "../../apps/worker/src/collectors/olx.js";
 import { closeSourceHttpClient } from "../../apps/worker/src/collectors/source-http-client.js";
 import { bullConnection, closeQueues, getQueue, redisConnection } from "../../apps/worker/src/lib/queues.js";
 import { configureTelegramApiRootForIntegrationTest, sendListingLink, stageListingForFlash, createTelegramFlashBundle, sendTelegramFlashBundle } from "../../apps/worker/src/modules/telegram-service.js";
-import { recordPendingObservation, recordPendingObservations } from "../../apps/worker/src/modules/observation-journal.js";
+import { recordPendingObservation, recordPendingObservations, recordObservationEvaluation, deserializeNormalizedListing } from "../../apps/worker/src/modules/observation-journal.js";
 import { checkDuplicate, findStrongDuplicate } from "../../apps/worker/src/modules/duplicate-guard.js";
 import {
   buildSourceSearchPlan,
@@ -41,7 +43,19 @@ const redisServer = requiredEnv("AMB_TEST_REDIS_SERVER");
 const redisCli = requiredEnv("AMB_TEST_REDIS_CLI");
 const redisConfig = requiredEnv("AMB_TEST_REDIS_CONFIG");
 const redisPort = Number(requiredEnv("AMB_TEST_REDIS_PORT"));
-const expectedIds = ["100001", "100002", "100003", "100004", "100005", "100006", "100007", "100008", "100009", "100010"];
+const isolatedRoot = realpathSync(fileURLToPath(new URL("../../.runtime/pipeline-acceptance/", import.meta.url))) + sep;
+const testDatabase = new URL(requiredEnv("DATABASE_URL"));
+const testRedis = new URL(requiredEnv("REDIS_URL"));
+if (process.env.AMB_PIPELINE_INTEGRATION_TEST !== "1"
+  || process.env.TELEGRAM_BOT_TOKEN !== "test-token"
+  || testDatabase.pathname !== "/amb_pipeline_test" || testDatabase.username !== "amb_test"
+  || !["127.0.0.1", "localhost"].includes(testDatabase.hostname)
+  || !["127.0.0.1", "localhost"].includes(testRedis.hostname)
+  || Number(testRedis.port) !== redisPort
+  || !realpathSync(pgData).toLowerCase().startsWith(isolatedRoot.toLowerCase())) {
+  throw new Error("Refusing fault injection outside the owned isolated PostgreSQL/Redis fixture");
+}
+const expectedIds = ["100001", "100002", "100003", "100004", "100005", "100006", "100007", "100008", "100009", "100010", "100011", "100012"];
 const olxRequests = new Map<string, number>();
 const telegramDeliveries = new Map<string, number>();
 let telegramMode: TelegramMode = "SUCCESS";
@@ -135,6 +149,19 @@ async function main(): Promise<void> {
     await processListingDetected({ listing: dbAfterTelegram, discoveryLane: "REALTIME", bypassHotClaim: true });
     await assertRecoverable("100003");
     await assertRecoverable("100005", ["RETRY_PENDING"]);
+    if (process.env.AMB_TEST_DURABLE_PG === "1") {
+      progress("immediate PostgreSQL crash with durable WAL settings");
+      const settings = await prisma.$queryRaw<Array<{ fsync: string; synchronous_commit: string; full_page_writes: string }>>`SELECT current_setting('fsync') AS fsync, current_setting('synchronous_commit') AS synchronous_commit, current_setting('full_page_writes') AS full_page_writes`;
+      assert(settings[0]?.fsync === "on" && settings[0]?.synchronous_commit === "on" && settings[0]?.full_page_writes === "on", "Durability-disabled stand cannot certify WAL recovery");
+      const snapshot = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { source_externalId: { source: "OLX", externalId: "100003" } } });
+      const stopped = spawnSync(pgCtl, ["stop", "-D", pgData, "-m", "immediate", "-w"], { windowsHide: true, encoding: "utf8", timeout: 10000 });
+      assert(stopped.status === 0, "Immediate isolated PostgreSQL crash failed");
+      startPostgres();
+      await retryUntil(databaseAvailable, "PostgreSQL recovery after immediate stop");
+      const recovered = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { id: snapshot.id } });
+      assert(JSON.stringify(recovered) === JSON.stringify(snapshot), "Committed journal changed after WAL crash recovery");
+      checks.push("fsync/synchronous_commit/full_page_writes ON -> immediate PostgreSQL crash -> WAL recovery preserves committed pending snapshot");
+    }
 
     progress("Redis producer failure");
     const redisFailure = await fetchKnownListing("100006");
@@ -190,15 +217,64 @@ async function main(): Promise<void> {
     await processListingDetected(replayJob.data);
     if (telegramDeliveries.get("100003") !== 1) throw new Error("Replay duplicated Telegram delivery");
     checks.push("180-day pending survives retention -> SQL selector -> real BullMQ serialized payload -> Telegram once; repeated replay suppressed");
-    console.log(JSON.stringify({
+    progress("real process crashes before and after journal");
+    await assertJournalProcessCrashes();
+    checks.push("real process kill before journal -> permitted source refetch; after journal -> fresh process replay/BullMQ consumer without refetch");
+    await runChild("--probe-partial-delivery-restart", true);
+    for (const id of ["100009", "100010"]) {
+      await assertSent(id);
+      assert(telegramDeliveries.get(id) === 1, `${id} partial recovery duplicated delivery`);
+      assert(olxRequests.get(id) === 1, `${id} partial recovery refetched source`);
+    }
+    checks.push("saved page1/403 and STOPPED observations -> elected replay/BullMQ handoff -> fresh process delivery, once and without source refetch");
+    progress("stale terminal evaluation in a fresh process");
+    const terminalBefore = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { source_externalId: { source: "OLX", externalId: "100001" } } });
+    await runChild("--probe-stale-terminal", true);
+    const terminalAfter = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { id: terminalBefore.id } });
+    assert(JSON.stringify(terminalBefore) === JSON.stringify(terminalAfter), "Stale process mutated terminal observation");
+    assert(telegramDeliveries.get("100001") === 1, "Stale process duplicated terminal Telegram receipt");
+    checks.push("real child stale evaluation CAS after NOTIFIED -> false, unchanged durable row and no second notification");
+    await runChild("--probe-database-refetch", true);
+    await assertSent("100002");
+    checks.push("pre-journal PostgreSQL failure -> fresh process permitted source refetch -> durable observation and one notification");
+    const outcomes = [];
+    for (const id of expectedIds) {
+      const row = await prisma.sourceSeenListing.findUnique({ where: { source_externalId: { source: "OLX", externalId: id } } });
+      assert(Boolean(row), `${id} has no durable outcome after recovery`);
+      const receiptCount = telegramDeliveries.get(id) ?? 0;
+      if (id === "100005") {
+        assert(receiptCount === 1 && row!.telegramAcceptedAt === null, "Ambiguous external acceptance fixture not reproduced");
+        outcomes.push({ id, outcome: "AMBIGUOUS_EXTERNAL_ACCEPTANCE", decision: row!.decision, receiptCount });
+        continue;
+      }
+      const terminal = ["NOTIFIED", "REJECTED", "DUPLICATE"].includes(row!.decision);
+      const durablePending = Boolean(row!.normalizedData) && ["PENDING", "FAILED", "MATCHED", "DISPATCHED"].includes(row!.decision);
+      assert(terminal || durablePending, `${id} has no terminal or durable replay outcome`);
+      if (!terminal) {
+        const eligible = await prisma.sourceSeenListing.count({ where: { AND: [{ id: row!.id }, observationReplayWhere(new Date(Date.now() - 48 * 3600000), "acceptance-revision")] } });
+        const queued = (await getQueue(QUEUE_NAMES.LISTING_DETECTED).getJobs(["waiting", "active", "prioritized", "delayed"]))
+          .some((job) => job.data.listing?.externalId === id);
+        const intents = await selectPendingCardDeliveryIntents(500);
+        const boundedRetry = row!.listingId === null && row!.lastEvaluatedAt != null
+          && row!.lastEvaluatedAt.getTime() + 300000 > Date.now();
+        assert(eligible > 0 || queued || boundedRetry || intents.some((intent) => intent.listingId === row!.listingId), `${id} snapshot has no selectable, queued or bounded retry owner`);
+      }
+      assert(receiptCount <= 1, `${id} duplicated Telegram acceptance`);
+      outcomes.push({ id, outcome: terminal ? "TERMINAL" : "DURABLE_REPLAY", decision: row!.decision, receiptCount });
+    }
+    const report = {
       result: "PASS",
-      invariant: "every deterministic OLX advert is NOTIFIED or remains in an explicit recoverable state",
+      invariant: "tested unambiguous crash boundaries recover; ambiguous external Telegram acceptance is explicitly not an exactly-once proof",
       expectedIds,
       olxRequests: Object.fromEntries(olxRequests),
       telegramDeliveries: Object.fromEntries(telegramDeliveries),
+      outcomes,
       dbHotPathBenchmark,
       checks,
-    }, null, 2));
+    };
+    const serialized = JSON.stringify(report, null, 2);
+    if (process.env.AMB_TEST_REPORT_PATH) writeFileSync(process.env.AMB_TEST_REPORT_PATH, serialized + "\n", { flag: "wx" });
+    console.log(serialized);
   } finally {
     progress("cleanup");
     telegramMode = "SUCCESS";
@@ -504,6 +580,52 @@ async function runProbe(mode: string): Promise<void> {
   await redisConnection.connect();
   if (process.env.AMB_TEST_FAKE_ROOT) fakeRoot = process.env.AMB_TEST_FAKE_ROOT;
   setOlxRequestLeadershipGuard(async () => {});
+  if (mode === "--probe-stale-terminal") {
+    const row = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { source_externalId: { source: "OLX", externalId: "100001" } } });
+    const listing = deserializeNormalizedListing(row.normalizedData!);
+    assert(Boolean(listing), "Missing terminal snapshot");
+    assert(await recordObservationEvaluation({ ...listing!, title: "stale mutation" }, "BACKFILL", { decision: "FAILED", filterRevision: "stale" }) === false, "Terminal CAS accepted stale evaluator");
+    await processListingDetected({ listing: listing!, bypassHotClaim: true, observationPersisted: true });
+    return;
+  }
+  if (mode === "--probe-journal-before-crash" || mode === "--probe-journal-after-crash") {
+    const listing = await fetchKnownListing(mode === "--probe-journal-before-crash" ? "100011" : "100012");
+    if (mode === "--probe-journal-after-crash") await recordPendingObservations([listing], "REALTIME");
+    console.log("JOURNAL_CRASH_CHECKPOINT");
+    await new Promise<void>(() => {});
+    return;
+  }
+  if (mode === "--probe-journal-refetch" || mode === "--probe-database-refetch") {
+    configureTelegramApiRootForIntegrationTest(fakeRoot);
+    const id = mode === "--probe-journal-refetch" ? "100011" : "100002";
+    await processListingDetected({ listing: await fetchKnownListing(id), bypassHotClaim: true });
+    await recoverTelegramForExternalId(id);
+    return;
+  }
+  if (mode === "--probe-journal-restart") {
+    configureTelegramApiRootForIntegrationTest(fakeRoot);
+    await processObservationReplay({ trigger: "STARTUP", limit: 50 });
+    const worker = new Worker(QUEUE_NAMES.LISTING_DETECTED, async (job) => { await processListingDetected(job.data); }, { connection: bullConnection, concurrency: 1 });
+    try {
+      await worker.waitUntilReady();
+      await retryUntil(async () => Boolean((await pipelineRow("100012"))?.notificationStatus), "Journal replay durable delivery intent");
+      await recoverTelegramForExternalId("100012");
+      await assertSent("100012");
+    } finally { await worker.close(); }
+    return;
+  }
+  if (mode === "--probe-partial-delivery-restart") {
+    configureTelegramApiRootForIntegrationTest(fakeRoot);
+    const intents = await selectPendingCardDeliveryIntents(500);
+    for (const id of ["100009", "100010"]) {
+      const row = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { source_externalId: { source: "OLX", externalId: id } } });
+      assert(intents.some((intent) => intent.listingId === row.listingId), `${id} has no selectable delivery outbox`);
+      await recoverTelegramForExternalId(id);
+      await assertSent(id);
+      await recoverTelegramForExternalId(id);
+    }
+    return;
+  }
   if (mode.startsWith("--probe-origin-")) {
     const owner = new HotWorkerLeadership({ redis: redisConnection, instanceId: "a", onPromoted: async () => {}, onDemoted: async () => {} });
     try {
@@ -719,6 +841,38 @@ async function assertDurableOutboxCrash(): Promise<void> {
   }
 }
 
+async function assertJournalProcessCrashes(): Promise<void> {
+  for (const [mode, id, restart] of [
+    ["--probe-journal-before-crash", "100011", "--probe-journal-refetch"],
+    ["--probe-journal-after-crash", "100012", "--probe-journal-restart"],
+  ] as const) {
+    const child = spawn(process.execPath, [...process.execArgv, process.argv[1] ?? "", mode], {
+      env: { ...process.env, AMB_TEST_FAKE_ROOT: fakeRoot }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+    child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+    try {
+      await retryUntil(async () => {
+        if (child.exitCode !== null) throw new Error(`Crash child exited ${child.exitCode}: ${output}`);
+        return output.includes("JOURNAL_CRASH_CHECKPOINT");
+      }, `${id} crash checkpoint`);
+      child.kill("SIGKILL");
+      await waitForChildExit(child, 5000);
+      assert((telegramDeliveries.get(id) ?? 0) === 0, "Crash checkpoint sent Telegram");
+      const requestsBefore = olxRequests.get(id) ?? 0;
+      const saved = await prisma.sourceSeenListing.findUnique({ where: { source_externalId: { source: "OLX", externalId: id } } });
+      assert(mode === "--probe-journal-before-crash" ? saved === null : saved?.decision === "PENDING" && Boolean(saved.normalizedData), "Wrong durable crash boundary");
+      await runChild(restart, true);
+      await assertSent(id);
+      assert(telegramDeliveries.get(id) === 1, "Unambiguous journal crash duplicated delivery");
+      assert((olxRequests.get(id) ?? 0) === requestsBefore + (saved ? 0 : 1), "Unexpected source refetch across journal boundary");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+  }
+}
+
 async function routeFakeRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url ?? "/", fakeRoot);
   if (url.pathname === "/origin-probe") {
@@ -756,7 +910,7 @@ async function routeFakeRequest(request: IncomingMessage, response: ServerRespon
   }
   if (/^\/bottest-token\/(?:sendMessage|editMessageText|editMessageReplyMarkup)$/u.test(url.pathname)) {
     const body = await readBody(request);
-    const listingId = body.match(/integration\s+(10000\d)/u)?.[1] ?? "unknown";
+    const listingId = body.match(/integration\s+(1000\d{2})/u)?.[1] ?? "unknown";
     if (telegramMode === "FAIL") {
       return json(response, 503, { ok: false, error_code: 503, description: "integration Telegram outage" });
     }
