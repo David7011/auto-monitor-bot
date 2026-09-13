@@ -78,25 +78,13 @@ export async function recordObservationEvaluation(
   listing: NormalizedListing,
   lane: ListingDiscoveryLane,
   input: ObservationEvaluationInput,
-): Promise<void> {
+): Promise<boolean> {
   const now = new Date();
-  const shared = observationData(listing, lane);
-  await prisma.sourceSeenListing.upsert({
-    where: { source_externalId: { source: listing.source, externalId: listing.externalId } },
-    create: {
-      ...shared,
-      decision: input.decision,
-      matchedFilterIds: unique(input.matchedFilterIds ?? []),
-      rejectionReasons: unique(input.rejectionReasons ?? []),
-      evaluationNotes: unique(input.evaluationNotes ?? []),
-      filterRevision: input.filterRevision,
-      lastEvaluatedAt: now,
-      filterCompletedAt: now,
-      dispatchAttemptedAt: input.dispatchAttempted ? now : null,
-      listingId: input.listingId,
-      evaluationCount: 1,
-    },
-    update: {
+  // The journal precedes evaluation. The SQL predicate fences stale evaluators
+  // atomically against accepted/retained terminal receipts, without a pre-read.
+  const updated = await prisma.sourceSeenListing.updateMany({
+    where: { source: listing.source, externalId: listing.externalId, decision: { not: "NOTIFIED" }, notifiedAt: null, telegramAcceptedAt: null },
+    data: {
       ...observationUpdateData(listing),
       decision: input.decision,
       matchedFilterIds: unique(input.matchedFilterIds ?? []),
@@ -110,6 +98,12 @@ export async function recordObservationEvaluation(
       evaluationCount: { increment: 1 },
     },
   });
+  if (updated.count > 0) return true;
+  const retained = await prisma.sourceSeenListing.findUnique({
+    where: { source_externalId: { source: listing.source, externalId: listing.externalId } }, select: { decision: true },
+  });
+  if (!retained) throw new Error("Observation journal missing before evaluation");
+  return false;
 }
 
 export async function markObservationOutcome(

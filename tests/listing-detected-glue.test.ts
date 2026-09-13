@@ -209,6 +209,13 @@ describe("listing.detected glue invariants", () => {
     expect(mocks.fetchOlxDetailListing).toHaveBeenCalledExactlyOnceWith(listing.url, expect.any(Date), "RECOVERY");
   });
 
+  it("stops a stale evaluator when the atomic terminal-receipt CAS declines it", async () => {
+    mocks.recordObservationEvaluation.mockResolvedValueOnce(false);
+    await expect(processListingDetected({ listing })).resolves.toMatchObject({ outcome: "DUPLICATE" });
+    expect(mocks.listingCreate).not.toHaveBeenCalled();
+    expect(mocks.sendListingLink).not.toHaveBeenCalled();
+  });
+
   it("does not hydrate a proven match or a retained terminal notification", async () => {
     await processListingDetected({ listing, hydrateObservation: true });
     expect(mocks.fetchOlxDetailListing).not.toHaveBeenCalled();

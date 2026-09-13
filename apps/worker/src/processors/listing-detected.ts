@@ -143,7 +143,7 @@ async function processClaimedListing(
   const provisionalNotes = evaluation.evaluations
     .filter((item) => item.outcome === "UNKNOWN")
     .flatMap((item) => item.unknownReasons.map((reason) => `${item.filterId}: ${reason}`));
-  await recordObservationEvaluation(listing, discoveryLane, {
+  const evaluated = await recordObservationEvaluation(listing, discoveryLane, {
     decision: matched.length > 0 ? "MATCHED" : unresolved ? "PENDING" : "REJECTED",
     matchedFilterIds,
     rejectionReasons: evaluation.rejectionReasons,
@@ -151,6 +151,9 @@ async function processClaimedListing(
     filterRevision,
     dispatchAttempted: matched.length > 0 && !shadowOnly,
   });
+  if (evaluated === false) {
+    return { outcome: "DUPLICATE", listingId: retainedDedupe?.listingId ?? undefined, matchedFilterIds: retainedDedupe?.matchedFilterIds ?? [], rejectionReasons: [] };
+  }
   // A rejected candidate was not persisted, so it must be replayable after a
   // filter or normalizer change. Keeping the hot claim here hides valid ads.
   if (matched.length === 0) {
