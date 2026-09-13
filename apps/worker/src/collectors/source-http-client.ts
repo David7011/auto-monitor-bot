@@ -212,6 +212,9 @@ export class SourceHttpClient {
       const contentLength = Number(response.headers.get("content-length") ?? 0);
       const maxBytes = options.maxBytes ?? env.SOURCE_HTTP_MAX_RESPONSE_BYTES;
       if (contentLength > maxBytes) {
+        // Unread bodies can pin a pooled connection until GC; release explicitly.
+        try { await response.body?.cancel(); }
+        catch { timeoutController.abort(); }
         return invalidResponse(requestId, response.status, contentType, retryAfterSeconds, `Response too large: ${contentLength} bytes`, requestStartedAt, firstByteAt);
       }
 

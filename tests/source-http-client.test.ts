@@ -163,12 +163,15 @@ describe("SourceHttpClient", () => {
   });
 
   it("enforces response size limit before parsing", async () => {
+    const cancelled = vi.fn();
+    const body = new ReadableStream({ cancel: cancelled });
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => new Response("large", { status: 200, headers: { "content-length": "100", "content-type": "text/html" } })),
+      vi.fn(async () => new Response(body, { status: 200, headers: { "content-length": "100", "content-type": "text/html" } })),
     );
 
     const result = await freshSourceHttpClient().text("https://example.test/list", { source: "RST", maxBytes: 10 });
+    expect(cancelled).toHaveBeenCalledOnce();
     expect(result.classification).toBe("INVALID_RESPONSE");
     expect(result.errorMessage).toContain("Response too large");
   });
