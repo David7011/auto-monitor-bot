@@ -246,6 +246,10 @@ Telegram card/flash send lease сохраняет владельца по ном
 
 ## Проверки
 
+Для повседневной работы: `.\amb.cmd check:fast` — schema/docs/typecheck/lint и весь unit-набор без coverage и production build. Это не релизная приёмка. `.\amb.cmd check` / `check:full` сохраняют полный gate; CI его не сокращает. Тесты не работают фоном в production и не замедляют мониторинг.
+
+При точечной правке запускайте только связанные тесты: `.\amb.cmd test:related apps/worker/src/processors/observation-replay.ts` (можно передать несколько файлов). Подбор основан на import graph; динамические зависимости, migrations, PowerShell и конфигурацию это не сертифицирует — для них нужен полный gate. Отсутствие связанных тестов не превращается в успешную приёмку.
+
 ```powershell
 .\amb.cmd check
 .\amb.cmd audit:prod

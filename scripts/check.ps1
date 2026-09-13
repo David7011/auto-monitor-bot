@@ -1,5 +1,7 @@
 [CmdletBinding()]
-param([switch]$Ci)
+param([switch]$Ci, [switch]$Fast)
+
+if ($Ci -and $Fast) { throw "Fast validation cannot replace the CI/release gate" }
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -10,10 +12,12 @@ $LockStream = $null
 function Invoke-Pnpm {
   param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
-  & pnpm @Arguments
+  $stepTimer = [Diagnostics.Stopwatch]::StartNew()
+  & (Join-Path $ProjectRoot "amb.cmd") @Arguments
   if ($LASTEXITCODE -ne 0) {
     throw "pnpm $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
   }
+  Write-Host ("Validation step {0}: {1:N1}s" -f ($Arguments -join ' '), $stepTimer.Elapsed.TotalSeconds)
 }
 
 New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
@@ -39,6 +43,11 @@ try {
     Invoke-Pnpm -Arguments @("docs:check")
     Invoke-Pnpm -Arguments @("typecheck")
     Invoke-Pnpm -Arguments @("lint")
+    if ($Fast) {
+      Invoke-Pnpm -Arguments @("test")
+      Write-Host "FAST check passed: all unit tests, schema, docs, typecheck and lint. Coverage, build and extended acceptance remain required for release."
+      return
+    }
     Invoke-Pnpm -Arguments @("test:powershell")
     Invoke-Pnpm -Arguments @("test:backup-crypto")
     Invoke-Pnpm -Arguments @("test:backup-health")
