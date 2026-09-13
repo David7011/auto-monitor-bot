@@ -170,6 +170,8 @@ async function main(): Promise<void> {
     await assertOriginPolicyRestart();
     checks.push("persisted origin pause + elected hot/background child restarts -> zero HTTP; owned expired-pause realtime probe -> exactly one HTTP");
     progress("old pending retention and real replay handoff");
+    await assertReplayLeaseRenewalAndFence();
+    checks.push("real SQL replay selector delayed past lease TTL -> renewable ownership; stolen token -> stale owner stops and cannot release successor");
     const oldPending = await prisma.sourceSeenListing.findUniqueOrThrow({ where: { source_externalId: { source: "OLX", externalId: "100003" } } });
     await prisma.sourceSeenListing.update({ where: { id: oldPending.id }, data: { firstSeenAt: new Date(Date.now() - 180 * 86400000), lastSeenAt: new Date(Date.now() - 180 * 86400000), lastEvaluatedAt: null } });
     await runRetentionMaintenance();
@@ -540,7 +542,13 @@ async function runProbe(mode: string): Promise<void> {
     });
     try {
       await worker.waitUntilReady();
-      await getQueue(QUEUE_NAMES.TELEGRAM_SEND).add("send", { listingId: target.id }, { jobId: `outbox-crash-${target.id}` });
+      await prisma.monitoringState.upsert({ where: { id: "singleton" }, create: { id: "singleton", status: "STOPPED" }, update: { status: "STOPPED" } });
+      await processObservationReplay({ trigger: "STARTUP", limit: 500 });
+      assert((await pipelineRow("100008"))?.notificationStatus === "PENDING", "STOPPED startup released an outbox");
+      await prisma.monitoringState.update({ where: { id: "singleton" }, data: { status: "RUNNING" } });
+      // Restart through the production replay handler, which selects and
+      // schedules the durable outbox itself. Do not fabricate a recovery job.
+      await processObservationReplay({ trigger: "STARTUP", limit: 500 });
       await retryUntil(async () => (await pipelineRow("100008"))?.decision === "NOTIFIED", "Outbox notification after restart");
     } finally {
       await worker.close();
@@ -603,6 +611,42 @@ async function assertLegacyOrphanRepair(): Promise<void> {
     assert(!pending.some((row) => row.listingId === rows[1] || row.listingId === rows[2]), "Shadow/retained records revived");
   } finally {
     await prisma.listing.deleteMany({ where: { id: { in: rows } } });
+  }
+}
+
+async function assertReplayLeaseRenewalAndFence(): Promise<void> {
+  const original = prisma.sourceSeenListing.findMany.bind(prisma.sourceSeenListing);
+  let steal = false;
+  let delayed = false;
+  const key = "observation-replay:lock";
+  prisma.sourceSeenListing.findMany = (async (...args: Parameters<typeof original>) => {
+    const rows = await original(...args);
+    if (!delayed) {
+      delayed = true;
+      const token = await redisConnection.get(key);
+      assert(token, "Replay has no real Redis owner");
+      for (let i = 0; i < 3; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert(await redisConnection.get(key) === token, "Replay lease expired during actual selector");
+      }
+      if (steal) await redisConnection.set(key, "acceptance-successor", "PX", 5000);
+    }
+    return rows;
+  }) as typeof prisma.sourceSeenListing.findMany;
+  try {
+    await prisma.monitoringState.update({ where: { id: "singleton" }, data: { status: "RUNNING" } });
+    await processObservationReplay({ trigger: "MANUAL", limit: 1, testLeaseTtlMs: 450 });
+    assert(await redisConnection.get(key) === null, "Completed replay leaked its lease");
+    steal = true;
+    delayed = false;
+    let rejected = false;
+    try { await processObservationReplay({ trigger: "MANUAL", limit: 1, testLeaseTtlMs: 450 }); }
+    catch (error) { rejected = error instanceof Error && error.name === "CollectorLeaseLostError"; }
+    assert(rejected, "Stale replay continued after token replacement");
+    assert(await redisConnection.get(key) === "acceptance-successor", "Stale replay deleted successor lease");
+  } finally {
+    prisma.sourceSeenListing.findMany = original;
+    await redisConnection.del(key);
   }
 }
 

@@ -8,6 +8,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  throw "Elevation is required to inspect protected runtime processes before the supervisor recovery test."
+}
 $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $PidDir = Join-Path $ProjectRoot ".runtime\pids"
 $ProcessManagementScript = Join-Path $PSScriptRoot "process-management.ps1"

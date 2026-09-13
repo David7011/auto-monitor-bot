@@ -6,6 +6,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$systemTask = Get-ScheduledTask -TaskName "Auto Monitor Bot" -ErrorAction SilentlyContinue
+$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+if ($systemTask -and !$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  throw "The project runs under a protected Windows account. Elevation is required before recovery can inspect processes or mutate PID files."
+}
 $ProjectRoot = if ($env:PROJECT_ROOT) {
   (Resolve-Path $env:PROJECT_ROOT).Path
 } else {

@@ -76,7 +76,8 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
       await enqueue(QUEUE_NAMES.TELEGRAM_SEND, "replay-delivery", { listingId: intent.listingId }, { deduplicationId: `pending-delivery-${intent.listingId}` });
     }
     const cutoff = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
-    const hydrated = await hydrateIncompleteObservations(cutoff);
+    const hydrated = await hydrateIncompleteObservations(cutoff, ownedLease);
+    await ownedLease.assertOwnership();
     const repairedStates = await releaseIncompleteObservationIds(lookbackHours);
     if (repairedStates > 0) {
       await log.info("completeness", `Released incomplete fresh observation IDs from ${repairedStates} search state(s)`);
@@ -129,6 +130,7 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
             data: { lastEvaluatedAt: new Date() },
           });
           if (reservation.count === 0) { counts.alreadyHandled += 1; continue; }
+          await ownedLease.assertOwnership();
           const allowExternalHydration = detailBudget > 0;
           if (allowExternalHydration) detailBudget -= 1;
           await enqueue(QUEUE_NAMES.LISTING_DETECTED, "replay", {
@@ -153,6 +155,8 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
           counts.alreadyHandled += 1;
         }
       } catch (error) {
+        // Lease loss must terminate this owner, rather than continuing the batch.
+        await ownedLease.assertOwnership();
         counts.failed += 1;
         await log.warn(
           "completeness",
@@ -226,7 +230,7 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
   }
 }
 
-async function hydrateIncompleteObservations(cutoff: Date): Promise<Array<{
+async function hydrateIncompleteObservations(cutoff: Date, lease: CollectorLease): Promise<Array<{
   source: ListingSource;
   externalId: string;
   listing: ReturnType<typeof reconstructObservationListing>;
@@ -278,9 +282,11 @@ async function hydrateIncompleteObservations(cutoff: Date): Promise<Array<{
     listing: ReturnType<typeof reconstructObservationListing>;
   }> = [];
   for (let index = 0; index < rows.length; index += DETAIL_HYDRATION_CONCURRENCY) {
+    await lease.assertOwnership();
     const batch = rows.slice(index, index + DETAIL_HYDRATION_CONCURRENCY);
     const results = await Promise.all(batch.map(async (row) => {
       try {
+        await lease.assertOwnership();
         await prisma.sourceSeenListing.updateMany({
           where: { source: row.source, externalId: row.externalId, normalizedData: { equals: Prisma.DbNull }, decision: { not: "NOTIFIED" }, notifiedAt: null, telegramAcceptedAt: null },
           data: { lastEvaluatedAt: new Date() },
@@ -298,6 +304,7 @@ async function hydrateIncompleteObservations(cutoff: Date): Promise<Array<{
           return { source: row.source, externalId: row.externalId, listing };
         }
       } catch (error) {
+        await lease.assertOwnership();
         const listing = reconstructObservationListing(row);
         await log.warn(
           "completeness",

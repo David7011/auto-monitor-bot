@@ -221,6 +221,19 @@ describe("observation replay glue invariants", () => {
     expect(mocks.redisEval).toHaveBeenCalledOnce();
   });
 
+  it("does not enqueue after ownership is lost during a database reservation", async () => {
+    mocks.observationFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      { source: "OLX", externalId: "replay-1", normalizedData: { id: 1 } },
+    ]);
+    mocks.reservation.mockImplementationOnce(async () => {
+      mocks.redisGet.mockResolvedValue("successor-owner");
+      return { count: 1 };
+    });
+    await expect(processObservationReplay({ trigger: "MANUAL" })).rejects.toThrow("Collector lease ownership lost");
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+    expect(mocks.markObservationOutcome).not.toHaveBeenCalled();
+  });
+
   it("marks an existing audit failed and releases the lease on an outer database error", async () => {
     mocks.observationFindMany.mockResolvedValueOnce([]).mockResolvedValueOnce([
       { source: "OLX", externalId: "replay-1", normalizedData: { id: 1 } },
