@@ -382,6 +382,7 @@ export function countProcessingResult(result: ListingProcessingResult | undefine
   accepted: number;
 } {
   if (!result) return { matched: 0, rejected: 0, duplicate: 0, dispatched: 1, accepted: 0 };
+  if (result.outcome === "DEFERRED") return { matched: 0, rejected: 0, duplicate: 0, dispatched: 0, accepted: 0 };
   if (result.outcome === "REJECTED") return { matched: 0, rejected: 1, duplicate: 0, dispatched: 0, accepted: 0 };
   if (result.outcome === "DUPLICATE" || result.outcome === "HOT_DUPLICATE") {
     return {

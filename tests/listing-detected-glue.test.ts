@@ -186,6 +186,18 @@ describe("listing.detected glue invariants", () => {
     expect(mocks.listingCreate).not.toHaveBeenCalled();
   });
 
+  it("keeps UNKNOWN actionable without creating or sending a false match", async () => {
+    mocks.matchFiltersDetailed.mockReturnValueOnce({
+      matched: [], evaluations: [{ filterId: filter.id, outcome: "UNKNOWN", unknownReasons: ["ENGINE_VOLUME"] }], rejectionReasons: [],
+    });
+    await expect(processListingDetected({ listing })).resolves.toMatchObject({ outcome: "DEFERRED" });
+    expect(mocks.recordObservationEvaluation).toHaveBeenCalledWith(listing, "REALTIME", expect.objectContaining({ decision: "PENDING", dispatchAttempted: false }));
+    expect(mocks.releaseHotListingClaim).toHaveBeenCalledWith("claim-token");
+    expect(mocks.listingCreate).not.toHaveBeenCalled();
+    expect(mocks.sendListingLink).not.toHaveBeenCalled();
+    expect(mocks.enqueue).not.toHaveBeenCalled();
+  });
+
   it("persists and journals dispatch before performing the first Telegram send", async () => {
     const order: string[] = [];
     mocks.listingCreate.mockImplementationOnce(async () => {

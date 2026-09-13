@@ -14,6 +14,7 @@ import {
   type FilterRejectionReason,
   type NormalizedListing,
   vehicleAttributeMatches,
+  inferVehicleAttributes,
 } from "@amb/shared";
 import type { Filter } from "@amb/db";
 
@@ -52,6 +53,7 @@ export function evaluateListingFilter(listing: NormalizedListing, filter: Filter
     return evaluateCategoryListingFilter(listing, filter);
   }
   const reasons: FilterRejectionReason[] = [];
+  const unknownReasons: string[] = [];
   if (!filter.enabled) reasons.push("FILTER_DISABLED");
 
   if (filter.sources.length > 0 && !filter.sources.includes(listing.source)) reasons.push("SOURCE");
@@ -66,27 +68,57 @@ export function evaluateListingFilter(listing: NormalizedListing, filter: Filter
   if (modelNames.length > 0 && !modelNames.some((model) => matchesName(listing.model, model, haystack))) reasons.push("MODEL");
   if (filter.generation && !normalizeText(haystack).includes(normalizeText(filter.generation))) reasons.push("GENERATION");
 
-  if (!vehicleAttributeMatches(filter.bodyTypes, listing.bodyType, haystack, BODY_TYPE_OPTIONS)) reasons.push("BODY_TYPE");
-  if (!vehicleAttributeMatches(filter.fuelTypes, listing.fuelType, haystack, FUEL_TYPE_OPTIONS)) reasons.push("FUEL_TYPE");
-  if (!vehicleAttributeMatches(filter.gearboxes, listing.gearbox, haystack, GEARBOX_OPTIONS)) reasons.push("GEARBOX");
-  if (!vehicleAttributeMatches(filter.driveTypes, listing.driveType, haystack, DRIVE_TYPE_OPTIONS)) reasons.push("DRIVE_TYPE");
-  if (!textOptionMatches(filter.colors, listing.color, haystack)) reasons.push("COLOR");
-  if (!textOptionMatches(filter.conditions, listing.condition, haystack)) reasons.push("CONDITION");
+  const inferred = inferVehicleAttributes(haystack);
+  const checkEnum = (key: keyof typeof inferred, expected: string[], options: typeof BODY_TYPE_OPTIONS, reason: FilterRejectionReason) => {
+    if (!expected.length) return;
+    const known = inferVehicleAttributes(listing[key] ?? "")[key] ?? inferred[key];
+    if (!known) unknownReasons.push(`${reason} unavailable before evaluation`);
+    else if (!vehicleAttributeMatches(expected, known, "", options)) reasons.push(reason);
+  };
+  checkEnum("bodyType", filter.bodyTypes, BODY_TYPE_OPTIONS, "BODY_TYPE");
+  checkEnum("fuelType", filter.fuelTypes, FUEL_TYPE_OPTIONS, "FUEL_TYPE");
+  checkEnum("gearbox", filter.gearboxes, GEARBOX_OPTIONS, "GEARBOX");
+  checkEnum("driveType", filter.driveTypes, DRIVE_TYPE_OPTIONS, "DRIVE_TYPE");
+  if (!textOptionMatches(filter.colors, listing.color, haystack)) {
+    if (!listing.color) unknownReasons.push("COLOR unavailable before evaluation");
+    else reasons.push("COLOR");
+  }
+  if (!textOptionMatches(filter.conditions, listing.condition, haystack)) {
+    if (!listing.condition) unknownReasons.push("CONDITION unavailable before evaluation");
+    else reasons.push("CONDITION");
+  }
 
-  if (!numberInRange(listing.year, filter.yearFrom, filter.yearTo)) reasons.push("YEAR");
-  if (!numberInRange(listing.engineVolume, filter.engineVolumeFrom, filter.engineVolumeTo)) reasons.push("ENGINE_VOLUME");
-  if (!numberInRange(listing.enginePower, filter.enginePowerFrom, filter.enginePowerTo)) reasons.push("ENGINE_POWER");
-  if (!numberInRange(listing.doors, filter.doorsFrom, filter.doorsTo)) reasons.push("DOORS");
-  if (!numberInRange(listing.seats, filter.seatsFrom, filter.seatsTo)) reasons.push("SEATS");
+  const checkRange = (value: number | null | undefined, from: number | null, to: number | null, reason: FilterRejectionReason) => {
+    if (from == null && to == null) return;
+    if (value == null || !Number.isFinite(value)) unknownReasons.push(`${reason} unavailable before evaluation`);
+    else if (!numberInRange(value, from, to)) reasons.push(reason);
+  };
+  checkRange(listing.year, filter.yearFrom, filter.yearTo, "YEAR");
+  checkRange(listing.engineVolume, filter.engineVolumeFrom, filter.engineVolumeTo, "ENGINE_VOLUME");
+  checkRange(listing.enginePower, filter.enginePowerFrom, filter.enginePowerTo, "ENGINE_POWER");
+  checkRange(listing.doors, filter.doorsFrom, filter.doorsTo, "DOORS");
+  checkRange(listing.seats, filter.seatsFrom, filter.seatsTo, "SEATS");
 
-  const price = listing.priceNormalized ?? listing.priceOriginal;
-  if (!numberInRange(price, filter.priceFrom, filter.priceTo)) reasons.push("PRICE");
+  const price = listing.priceNormalized ?? (listing.currencyOriginal === "USD" ? listing.priceOriginal : undefined);
+  checkRange(price, filter.priceFrom, filter.priceTo, "PRICE");
 
-  if (!numberInRange(listing.mileage, filter.mileageFrom, filter.mileageTo)) reasons.push("MILEAGE");
-  if (filter.customsCleared != null && listing.customsCleared !== filter.customsCleared) reasons.push("CUSTOMS");
-  if (filter.bargainPossible != null && listing.bargainPossible !== filter.bargainPossible) reasons.push("BARGAIN");
+  checkRange(listing.mileage, filter.mileageFrom, filter.mileageTo, "MILEAGE");
+  if (filter.customsCleared != null) {
+    if (listing.customsCleared == null) unknownReasons.push("CUSTOMS unavailable before evaluation");
+    else if (listing.customsCleared !== filter.customsCleared) reasons.push("CUSTOMS");
+  }
+  if (filter.bargainPossible != null) {
+    if (listing.bargainPossible == null) unknownReasons.push("BARGAIN unavailable before evaluation");
+    else if (listing.bargainPossible !== filter.bargainPossible) reasons.push("BARGAIN");
+  }
 
-  if (!listingMatchesGeoSelection(listing, filter.regions, filter.cities)) reasons.push("GEOGRAPHY");
+  if (!listingMatchesGeoSelection(listing, filter.regions, filter.cities)) {
+    const knownRegionMismatch = Boolean(listing.region && filter.regions.length
+      && !listingMatchesGeoSelection({ region: listing.region }, filter.regions, []));
+    if (!knownRegionMismatch && ((!listing.city && filter.cities.length > 0) || (!listing.region && !listing.city))) {
+      unknownReasons.push("GEOGRAPHY unavailable before evaluation");
+    } else reasons.push("GEOGRAPHY");
+  }
 
   const keywordHaystack = normalizeText([listing.title, listing.description].filter(Boolean).join(" "));
 
@@ -100,13 +132,16 @@ export function evaluateListingFilter(listing: NormalizedListing, filter: Filter
     if (!hasKeyword) reasons.push("REQUIRED_KEYWORD");
   }
 
+  const outcome: TriStateFilterOutcome = reasons.length > 0 ? "NO_MATCH" : unknownReasons.length > 0 ? "UNKNOWN" : "MATCH";
   return {
     filterId: filter.id,
     filterName: filter.name,
-    matched: reasons.length === 0,
-    outcome: reasons.length === 0 ? "MATCH" : "NO_MATCH",
-    provisional: false,
-    unknownReasons: [],
+    // Vehicle UNKNOWN is deferred, not a positive match and not a rejection.
+    // This does not initiate detail HTTP; the durable replay owner remains.
+    matched: outcome === "MATCH",
+    outcome,
+    provisional: outcome === "UNKNOWN",
+    unknownReasons,
     reasons,
   };
 }

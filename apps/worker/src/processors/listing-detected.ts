@@ -41,7 +41,7 @@ export type ListingDetectedJob = {
 };
 
 export type ListingProcessingResult = {
-  outcome: "REJECTED" | "DUPLICATE" | "DISPATCHED" | "HOT_DUPLICATE" | "SHADOWED";
+  outcome: "REJECTED" | "DEFERRED" | "DUPLICATE" | "DISPATCHED" | "HOT_DUPLICATE" | "SHADOWED";
   listingId?: string;
   matchedFilterIds: string[];
   rejectionReasons: string[];
@@ -81,7 +81,7 @@ export async function processListingDetected(job: ListingDetectedJob): Promise<L
 
   try {
     const result = await processClaimedListing(job, persistedState);
-    if (result.outcome === "REJECTED") await releaseHotListingClaim(claim);
+    if (result.outcome === "REJECTED" || result.outcome === "DEFERRED") await releaseHotListingClaim(claim);
     return result;
   } catch (error) {
     await releaseHotListingClaim(claim);
@@ -117,6 +117,7 @@ async function processClaimedListing(
   const filterInput = forceSourceMatch ? filters.map((filter) => ({ ...filter, sources: [] })) : filters;
   const evaluation = matchFiltersDetailed(listing, filterInput);
   const matched = evaluation.matched;
+  const unresolved = matched.length === 0 && evaluation.evaluations.some((item) => item.outcome === "UNKNOWN");
   const shadowOnly = matched.length > 0 && matched.every((filter) => filter.shadowMode);
   const matchedFilterIds = matched.map((filter) => filter.id);
   const filterRevision = buildFilterSetRevision(filters);
@@ -124,7 +125,7 @@ async function processClaimedListing(
     .filter((item) => item.outcome === "UNKNOWN")
     .flatMap((item) => item.unknownReasons.map((reason) => `${item.filterId}: ${reason}`));
   await recordObservationEvaluation(listing, discoveryLane, {
-    decision: matched.length > 0 ? "MATCHED" : "REJECTED",
+    decision: matched.length > 0 ? "MATCHED" : unresolved ? "PENDING" : "REJECTED",
     matchedFilterIds,
     rejectionReasons: evaluation.rejectionReasons,
     evaluationNotes: [...provisionalNotes, ...(shadowOnly ? ["SHADOW_MODE: production notification suppressed"] : [])],
@@ -135,7 +136,7 @@ async function processClaimedListing(
   // filter or normalizer change. Keeping the hot claim here hides valid ads.
   if (matched.length === 0) {
     return {
-      outcome: "REJECTED",
+      outcome: unresolved ? "DEFERRED" : "REJECTED",
       matchedFilterIds,
       rejectionReasons: evaluation.rejectionReasons,
     };

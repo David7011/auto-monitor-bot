@@ -15,7 +15,7 @@ import {
   type TimestampConfidence,
 } from "@amb/shared";
 
-const NORMALIZER_VERSION = 4;
+const NORMALIZER_VERSION = 5;
 const WRITE_BATCH_SIZE = 12;
 
 export type ObservationEvaluationInput = {

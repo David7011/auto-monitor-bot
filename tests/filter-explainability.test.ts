@@ -78,6 +78,49 @@ function listing(overrides: Partial<NormalizedListing> = {}): NormalizedListing 
 }
 
 describe("explainable filter engine", () => {
+  it.each([
+    ["engineVolume", "engineVolumeFrom", 2],
+    ["enginePower", "enginePowerFrom", 100],
+    ["doors", "doorsFrom", 4],
+    ["seats", "seatsFrom", 4],
+    ["mileage", "mileageFrom", 100],
+    ["year", "yearFrom", 2000],
+    ["priceNormalized", "priceFrom", 1000],
+  ] as const)("distinguishes missing, mismatching and matching %s", (field, constraint, threshold) => {
+    const configured = filter({ [constraint]: threshold });
+    expect(evaluateListingFilter(listing({ [field]: undefined }), configured)).toMatchObject({ outcome: "UNKNOWN", matched: false, provisional: true });
+    expect(evaluateListingFilter(listing({ [field]: threshold - 1 }), configured).outcome).toBe("NO_MATCH");
+    expect(evaluateListingFilter(listing({ [field]: threshold }), configured).outcome).toBe("MATCH");
+  });
+
+  it.each(["STRICT", "MAX_COVERAGE"] as const)("does not authorize a vehicle with unknown attributes under %s", (unknownPolicy) => {
+    expect(evaluateListingFilter(listing(), filter({ unknownPolicy, engineVolumeFrom: 2 }))).toMatchObject({ outcome: "UNKNOWN", matched: false });
+  });
+
+  it.each([
+    ["customsCleared", true], ["bargainPossible", false],
+  ] as const)("does not confuse missing %s with false", (field, expected) => {
+    expect(evaluateListingFilter(listing({ [field]: undefined }), filter({ [field]: expected })).outcome).toBe("UNKNOWN");
+    expect(evaluateListingFilter(listing({ [field]: !expected }), filter({ [field]: expected })).outcome).toBe("NO_MATCH");
+    expect(evaluateListingFilter(listing({ [field]: expected }), filter({ [field]: expected })).outcome).toBe("MATCH");
+  });
+
+  it("defers unknown currency instead of comparing the raw price against USD bounds", () => {
+    expect(evaluateListingFilter(listing({ priceNormalized: undefined, priceOriginal: 8500, currencyOriginal: "UAH" }), filter()).outcome).toBe("UNKNOWN");
+    expect(evaluateListingFilter(listing({ priceNormalized: undefined, priceOriginal: 8500, currencyOriginal: "USD" }), filter()).outcome).toBe("MATCH");
+  });
+
+  it("defers absent vehicle enums but rejects a proven contradiction", () => {
+    expect(evaluateListingFilter(listing(), filter({ fuelTypes: ["diesel"] })).outcome).toBe("UNKNOWN");
+    expect(evaluateListingFilter(listing({ fuelType: "Бензин" }), filter({ fuelTypes: ["diesel"] })).outcome).toBe("NO_MATCH");
+    expect(evaluateListingFilter(listing({ fuelType: "Дизель" }), filter({ fuelTypes: ["diesel"] })).outcome).toBe("MATCH");
+  });
+
+  it("distinguishes absent geography from a proven different city", () => {
+    expect(evaluateListingFilter(listing({ city: undefined, region: undefined }), filter({ cities: ["Київ"] })).outcome).toBe("UNKNOWN");
+    expect(evaluateListingFilter(listing(), filter({ cities: ["Київ"] })).outcome).toBe("NO_MATCH");
+  });
+
   it("returns no rejection reasons for a matching listing", () => {
     const result = evaluateListingFilter(listing(), filter());
     expect(result.matched).toBe(true);
@@ -96,9 +139,9 @@ describe("explainable filter engine", () => {
       "BRAND",
       "YEAR",
       "PRICE",
-      "MILEAGE",
       "REQUIRED_KEYWORD",
     ]));
+    expect(result.unknownReasons.join(" ")).toContain("MILEAGE");
   });
 
   it("explains an empty active-filter set", () => {
