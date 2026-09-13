@@ -22,6 +22,10 @@ import {
 import { configureListingCommittedHookForIntegrationTest, processListingDetected } from "../../apps/worker/src/processors/listing-detected.js";
 import { reconcileOrphanDeliveryIntents, selectPendingCardDeliveryIntents } from "../../apps/worker/src/modules/delivery-outbox.js";
 import { processTelegramSend } from "../../apps/worker/src/processors/telegram.js";
+import { processCollectorRun } from "../../apps/worker/src/processors/collector-run.js";
+import { getCollector } from "../../apps/worker/src/collectors/index.js";
+import { SourceHttpClient } from "../../apps/worker/src/collectors/source-http-client.js";
+import { OlxRequestCoordinator } from "../../apps/worker/src/modules/olx-request-coordinator.js";
 
 type TelegramMode = "SUCCESS" | "FAIL" | "STOP_DB_AFTER_ACCEPT";
 
@@ -33,7 +37,7 @@ const redisServer = requiredEnv("AMB_TEST_REDIS_SERVER");
 const redisCli = requiredEnv("AMB_TEST_REDIS_CLI");
 const redisConfig = requiredEnv("AMB_TEST_REDIS_CONFIG");
 const redisPort = Number(requiredEnv("AMB_TEST_REDIS_PORT"));
-const expectedIds = ["100001", "100002", "100003", "100004", "100005", "100006", "100007", "100008"];
+const expectedIds = ["100001", "100002", "100003", "100004", "100005", "100006", "100007", "100008", "100009", "100010"];
 const olxRequests = new Map<string, number>();
 const telegramDeliveries = new Map<string, number>();
 let telegramMode: TelegramMode = "SUCCESS";
@@ -153,6 +157,8 @@ async function main(): Promise<void> {
     checks.push("DB loss after Telegram accepts -> PROCESSING/RETRY_PENDING lease remains recoverable");
 
     assertFinalInvariantViaFreshConnection();
+    await assertPartialCollectorCheckpoint();
+    checks.push("real collector handler + loopback page1/page2-403 -> durable partial journal, no boundary advancement; STOPPED -> journal only");
     console.log(JSON.stringify({
       result: "PASS",
       invariant: "every deterministic OLX advert is NOTIFIED or remains in an explicit recoverable state",
@@ -534,6 +540,47 @@ async function assertLegacyOrphanRepair(): Promise<void> {
   }
 }
 
+async function assertPartialCollectorCheckpoint(): Promise<void> {
+  const collector = getCollector("OLX");
+  assert(collector, "OLX collector missing");
+  const original = collector.collect;
+  const client = new SourceHttpClient(new OlxRequestCoordinator({
+    maxBackgroundConcurrency: 1, backgroundMinIntervalMs: 0, backgroundQuietAfterRealtimeMs: 0,
+    postFinishQuietMs: 0,
+  }), { transientRetryCount: 0 });
+  const before = await prisma.sourceSearchState.findMany({ where: { source: "OLX" }, select: { id: true, lastSuccessfulScanAt: true, knownExternalIds: true }, orderBy: { id: "asc" } });
+  try {
+    await prisma.source.upsert({ where: { source: "OLX" }, create: { source: "OLX", name: "Loopback OLX", enabled: true }, update: { enabled: true, pausedUntil: null, status: "ACTIVE" } });
+    await prisma.monitoringState.upsert({ where: { id: "singleton" }, create: { id: "singleton", status: "RUNNING" }, update: { status: "RUNNING" } });
+    // Only the upstream fixture is substituted; HTTP, parsing, handler,
+    // protection, journal and state selectors are the real implementation.
+    collector.collect = async () => {
+      const listing = await fetchKnownListing("100009");
+      const blocked = await client.text(`${fakeRoot}/olx/blocked`, { source: "OLX", requestClass: "BACKFILL" });
+      assert(blocked.status === 403 && blocked.classification === "ACCESS_DENIED", "Expected real loopback 403 classification");
+      return { listings: [listing], rateLimited: true, responseStatus: 403, affectedUrl: `${fakeRoot}/olx/blocked`, pageCount: 1, requestCount: 2 };
+    };
+    await processCollectorRun({ source: "OLX", lane: "BACKFILL", trigger: "BACKFILL", scheduledAt: new Date().toISOString() });
+    const partial = await pipelineRow("100009");
+    assert(partial?.hasSnapshot && partial.decision === "PENDING" && !partial.notificationStatus, "Protected partial candidate is not durably pending");
+    assert((telegramDeliveries.get("100009") ?? 0) === 0, "Protected partial initiated notification");
+    await prisma.source.update({ where: { source: "OLX" }, data: { pausedUntil: null, status: "ACTIVE" } });
+    collector.collect = async () => {
+      const listing = await fetchKnownListing("100010");
+      await prisma.monitoringState.update({ where: { id: "singleton" }, data: { status: "STOPPED" } });
+      return { listings: [listing], requestCount: 1, pageCount: 1 };
+    };
+    await processCollectorRun({ source: "OLX", lane: "REALTIME", trigger: "SCHEDULED", scheduledAt: new Date().toISOString() });
+    const stopped = await pipelineRow("100010");
+    assert(stopped?.hasSnapshot && stopped.decision === "PENDING" && !stopped.notificationStatus, "STOPPED did not checkpoint candidate");
+    assert((telegramDeliveries.get("100010") ?? 0) === 0, "STOPPED initiated notification");
+    const after = await prisma.sourceSearchState.findMany({ where: { source: "OLX" }, select: { id: true, lastSuccessfulScanAt: true, knownExternalIds: true }, orderBy: { id: "asc" } });
+    assert(JSON.stringify(after) === JSON.stringify(before), "Protected/stopped run advanced continuity boundary");
+  } finally {
+    collector.collect = original;
+  }
+}
+
 async function assertDurableOutboxCrash(): Promise<void> {
   const child = spawn(process.execPath, [...process.execArgv, process.argv[1] ?? "", "--probe-outbox-crash"], {
     env: { ...process.env, AMB_TEST_FAKE_ROOT: fakeRoot }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
@@ -564,6 +611,11 @@ async function assertDurableOutboxCrash(): Promise<void> {
 
 async function routeFakeRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url ?? "/", fakeRoot);
+  if (url.pathname === "/olx/blocked") {
+    response.writeHead(403, { "content-type": "text/html" });
+    response.end("<html><title>Forbidden</title></html>");
+    return;
+  }
   if (url.pathname === "/olx/api/v1/offers") {
     const id = url.searchParams.get("id") ?? "";
     if (!expectedIds.includes(id)) return json(response, 404, { error: "unknown deterministic advert" });

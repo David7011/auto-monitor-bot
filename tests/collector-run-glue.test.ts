@@ -142,6 +142,49 @@ const listing = {
 };
 
 describe("collector.run glue preflight invariants", () => {
+  it("checkpoints page-one candidates before a page-two 403 without dispatch or boundary advancement", async () => {
+    mocks.getCollector.mockReturnValueOnce({ collect: vi.fn().mockResolvedValue({
+      listings: [listing], rateLimited: true, responseStatus: 403, pageCount: 1, requestCount: 2,
+    }) });
+    const order: string[] = [];
+    mocks.recordPendingObservations.mockImplementationOnce(async () => { order.push("journal"); return new Map(); });
+    mocks.handleExternalProtection.mockImplementationOnce(async () => { order.push("protection"); });
+    await processCollectorRun({ source: "OLX", lane: "BACKFILL" });
+    expect(order).toEqual(["journal", "protection"]);
+    expect(mocks.recordPendingObservations).toHaveBeenCalledWith([listing], "BACKFILL");
+    expect(mocks.dispatchListings).not.toHaveBeenCalled();
+    expect(mocks.markSourceSearchSuccess).not.toHaveBeenCalled();
+  });
+
+  it("preserves a collected candidate when monitoring stops, without initiating a send", async () => {
+    mocks.scheduledJobState.mockResolvedValueOnce({ stale: false }).mockResolvedValueOnce({ stale: true, reason: "STOPPED" });
+    await processCollectorRun({ source: "OLX", monitoringGeneration: 1 });
+    expect(mocks.recordPendingObservations).toHaveBeenCalledWith([listing], "REALTIME");
+    expect(mocks.dispatchListings).not.toHaveBeenCalled();
+    expect(mocks.markSourceSearchSuccess).not.toHaveBeenCalled();
+    expect(mocks.finishRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "CANCELLED_BY_USER" }));
+  });
+
+  it.each([
+    { rateLimited: true, responseStatus: 429 },
+    { captchaDetected: true, responseStatus: 200 },
+    { quotaDeferredSeconds: 300 },
+  ])("checkpoints terminal protection/quota result %j", async (terminal) => {
+    mocks.getCollector.mockReturnValueOnce({ collect: vi.fn().mockResolvedValue({ listings: [listing], ...terminal }) });
+    await processCollectorRun({ source: "OLX", lane: "BACKFILL" });
+    expect(mocks.recordPendingObservations).toHaveBeenCalledWith([listing], "BACKFILL");
+    expect(mocks.dispatchListings).not.toHaveBeenCalled();
+    expect(mocks.markSourceSearchSuccess).not.toHaveBeenCalled();
+  });
+
+  it("checkpoints the returned batch if a post-collect state query fails", async () => {
+    mocks.scheduledJobState.mockResolvedValueOnce({ stale: false }).mockRejectedValueOnce(new Error("state query unavailable"));
+    await processCollectorRun({ source: "OLX", lane: "BACKFILL" });
+    expect(mocks.recordPendingObservations).toHaveBeenCalledWith([listing], "BACKFILL");
+    expect(mocks.dispatchListings).not.toHaveBeenCalled();
+    expect(mocks.markSourceSearchSuccess).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     for (const mock of Object.values(mocks)) mock.mockReset();
     mocks.getCollector.mockReturnValue({

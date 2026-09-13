@@ -165,6 +165,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
   let rejectedCount = 0;
   let duplicateCount = 0;
   let dispatchedCount = 0;
+  let pendingPartialResult: NormalizedListing[] = [];
   const semanticWarnings = new Set<string>();
   const coverageMetrics: Array<Record<string, string | number | boolean | null>> = [];
   if (job.trigger === "COVERAGE") {
@@ -245,6 +246,13 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         ? await olxLaneArbiter.runRealtime(() => collector.collect(scanContext, state, contextScan))
         : await collector.collect(scanContext, state, contextScan);
       const collectedListings = normalizeCollectedBatch(result.listings, lane);
+      pendingPartialResult = collectedListings.filter((listing) => !earlyDispatchedExternalIds.has(listing.externalId));
+      // Terminal outcomes must preserve partial work without dispatching it or
+      // claiming source coverage. Hot handoff candidates are already durable.
+      const checkpointPartialResult = async (): Promise<void> => {
+        if (pendingPartialResult.length > 0) await recordPendingObservations(pendingPartialResult, lane);
+        pendingPartialResult = [];
+      };
       const normallyFreshListings = context.freshnessMode === "ALL_TIME"
         ? collectedListings
         : filterReliableFreshListings(collectedListings, context.freshnessMode);
@@ -278,6 +286,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         checkRecoveryPending: false,
       });
       if (staleAfterCollect.stale) {
+        await checkpointPartialResult();
         await finishRun(run.id, {
           status: "CANCELLED_BY_USER",
           startedAt,
@@ -294,6 +303,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       }
 
       if (result.rateLimited || result.captchaDetected) {
+        await checkpointPartialResult();
         if (lane === "BACKFILL") {
           const oldestObservedAt = collectedListings.reduce<Date | null>((oldest, listing) => {
             if (!listing.publishedAt) return oldest;
@@ -327,6 +337,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       }
 
       if (result.quotaDeferredSeconds) {
+        await checkpointPartialResult();
         const nextCheckAt = new Date(Date.now() + Math.max(1, result.quotaDeferredSeconds) * 1000);
         limitedReason = result.limitedReason ?? "Локальный планировщик сохранил квоту API";
         await prisma.source.update({
@@ -401,6 +412,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
 
       const unprocessedListings = collectedListings.filter((listing) => !processedExternalIds.has(listing.externalId));
       if (unprocessedListings.length > 0) await recordPendingObservations(unprocessedListings, lane);
+      pendingPartialResult = [];
 
       const stateUpdate = await markSourceSearchSuccess(scanContext, state, collectedListings, {
         initialSyncCompleted: needsInitialSync || Boolean(state.initialSyncCompletedAt),
@@ -557,6 +569,13 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       await log.info("collector", `${source} ${lane} initial sync completed, skipped ${skippedInitialSync} existing listings`);
     }
   } catch (error) {
+    // A failure after collect (including a state query/dispatch timeout) must
+    // not discard the returned normalized batch. If PG is still unavailable,
+    // propagate failure; never report successful coverage over that batch.
+    if (pendingPartialResult.length > 0) {
+      await recordPendingObservations(pendingPartialResult, lane);
+      pendingPartialResult = [];
+    }
     const message = error instanceof Error ? error.message : String(error);
     if (isNetworkTimeoutError(error, message)) {
       if (isBackgroundDiscoveryLane(lane)) {
