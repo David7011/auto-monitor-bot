@@ -5,6 +5,8 @@ export function olxParityPermission(input: {
   pausedUntil?: Date | null;
   incidentDetectedAt?: Date | null;
   incidentCooldownUntil?: Date | null;
+  incidentStatus?: string | null;
+  incidentRecoveredAt?: Date | null;
   coolingSeconds: number;
   now?: Date;
 }): { allowed: boolean; reason: string | null } {
@@ -18,6 +20,8 @@ export function olxParityPermission(input: {
   const cooling = olxProtectionCoolingState({
     detectedAt: input.incidentDetectedAt ?? undefined,
     cooldownUntil: input.incidentCooldownUntil ?? undefined,
+    status: input.incidentStatus,
+    recoveredAt: input.incidentRecoveredAt,
     coolingSeconds: input.coolingSeconds,
     now,
   });

@@ -7,6 +7,8 @@ export type OlxProtectionCoolingState = {
 export function olxProtectionCoolingState(input: {
   detectedAt?: Date | null;
   cooldownUntil?: Date | null;
+  status?: string | null;
+  recoveredAt?: Date | null;
   coolingSeconds: number;
   now?: Date;
 }): OlxProtectionCoolingState {
@@ -19,8 +21,12 @@ export function olxProtectionCoolingState(input: {
     0,
     Math.trunc(input.coolingSeconds * 1_000),
   );
-  const configuredUntilMs = input.detectedAt.getTime() + configuredCoolingMs;
-  const serverCooldownUntilMs = input.cooldownUntil?.getTime() ?? 0;
+  const recovered = input.status === "RESOLVED" && input.recoveredAt != null
+    && Number.isFinite(input.recoveredAt.getTime()) && input.recoveredAt >= input.detectedAt;
+  // A confirmed successful recovery ends the old incident's pause, not the
+  // post-recovery quiet window. Missing/inconsistent recovery evidence fails closed.
+  const configuredUntilMs = (recovered ? input.recoveredAt!.getTime() : input.detectedAt.getTime()) + configuredCoolingMs;
+  const serverCooldownUntilMs = recovered ? 0 : input.cooldownUntil?.getTime() ?? 0;
   const until = new Date(Math.max(configuredUntilMs, serverCooldownUntilMs));
   const remainingMs = Math.max(0, until.getTime() - now.getTime());
 

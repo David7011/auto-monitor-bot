@@ -10,7 +10,7 @@ try {
     prisma.challengeIncident.findFirst({
       where: { source: { source: "OLX" } },
       orderBy: { detectedAt: "desc" },
-      select: { detectedAt: true, cooldownUntil: true },
+      select: { detectedAt: true, cooldownUntil: true, status: true, recoveredAt: true },
     }),
   ]);
   if (!source) throw new Error("OLX source row is missing");
@@ -19,6 +19,8 @@ try {
     pausedUntil: source.pausedUntil,
     incidentDetectedAt: incident?.detectedAt,
     incidentCooldownUntil: incident?.cooldownUntil,
+    incidentStatus: incident?.status,
+    incidentRecoveredAt: incident?.recoveredAt,
     coolingSeconds: env.OLX_PROTECTION_COOLING_SECONDS,
   });
   if (!permission.allowed) {

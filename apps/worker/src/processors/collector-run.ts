@@ -100,12 +100,14 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
     ? await prisma.challengeIncident.findFirst({
         where: { sourceId: sourceRecord.id },
         orderBy: { detectedAt: "desc" },
-        select: { detectedAt: true, cooldownUntil: true },
+        select: { detectedAt: true, cooldownUntil: true, status: true, recoveredAt: true },
       })
     : null;
   const olxProtectionCooling = olxProtectionCoolingState({
     detectedAt: latestOlxProtectionIncident?.detectedAt,
     cooldownUntil: latestOlxProtectionIncident?.cooldownUntil,
+    status: latestOlxProtectionIncident?.status,
+    recoveredAt: latestOlxProtectionIncident?.recoveredAt,
     coolingSeconds: env.OLX_PROTECTION_COOLING_SECONDS,
   });
   if (source === "OLX" && isBackgroundDiscoveryLane(lane) && olxProtectionCooling.active) {
