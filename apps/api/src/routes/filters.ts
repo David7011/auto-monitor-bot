@@ -164,6 +164,7 @@ export async function filtersRoutes(app: FastifyInstance): Promise<void> {
       mileageTo: data.mileageTo ?? null,
     };
     const result = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('statement_timeout', '3s', true), set_config('lock_timeout', '500ms', true)`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('auto-monitor-bot:filter-mutation'))`;
       const activeFilters = await tx.filter.findMany({ where: { enabled: true } });
       const duplicate = findExactActiveFilter(
@@ -190,6 +191,7 @@ export async function filtersRoutes(app: FastifyInstance): Promise<void> {
 
     const data = normalizeFilterGeo(parsed.data);
     const result = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('statement_timeout', '3s', true), set_config('lock_timeout', '500ms', true)`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('auto-monitor-bot:filter-mutation'))`;
       const existing = await tx.filter.findUnique({ where: { id: req.params.id } });
       if (!existing) return { notFound: true as const, duplicate: null, filter: null };
@@ -205,6 +207,10 @@ export async function filtersRoutes(app: FastifyInstance): Promise<void> {
         ...(data.regions ? { regions: nextRegions, cities: nextCities } : {}),
       };
       const nextFilter = { ...existing, ...updateData };
+      const mergedValidation = filterInputSchema.safeParse(nextFilter);
+      if (!mergedValidation.success) {
+        return { notFound: false as const, duplicate: null, filter: null, validationError: mergedValidation.error.issues.map((issue) => issue.message).join("; ") };
+      }
       const nextCategory = nextFilter.categoryKey;
       const unsupportedSource = nextFilter.sources.find((source) => !sourceSupportsCategory(source, nextCategory as import("@amb/shared").MarketplaceCategoryKey));
       if (unsupportedSource) {
