@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { env } from "../env.js";
+import { prisma } from "@amb/db";
 
 export type OlxRequestClass = "REALTIME" | "COVERAGE" | "BACKFILL" | "RECOVERY" | "ENRICHMENT";
 type OlxProtectionClassification = "RATE_LIMITED" | "CHALLENGE" | "ACCESS_DENIED";
@@ -94,7 +95,7 @@ type CoordinatorOptions = {
   challengePauseMs?: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
-  beforeRequest?: () => Promise<void>;
+  beforeRequest?: (requestClass: OlxRequestClass) => Promise<void>;
   realtimeQuietCanary?: Partial<RealtimeQuietCanaryOptions>;
 };
 
@@ -123,7 +124,7 @@ export class OlxRequestCoordinator {
   private readonly challengePauseMs: number;
   private readonly now: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
-  private beforeRequest: () => Promise<void>;
+  private beforeRequest: (requestClass: OlxRequestClass) => Promise<void>;
   private readonly started = emptyCounters();
   private readonly completed = emptyCounters();
   private readonly totalWaitMs = emptyCounters();
@@ -210,7 +211,7 @@ export class OlxRequestCoordinator {
     };
   }
 
-  setBeforeRequest(guard: () => Promise<void>): void {
+  setBeforeRequest(guard: (requestClass: OlxRequestClass) => Promise<void>): void {
     this.beforeRequest = guard;
   }
 
@@ -225,7 +226,8 @@ export class OlxRequestCoordinator {
       // Fence every origin request, not merely every BullMQ job. A stale
       // process that resumes after losing the leader lease must fail before it
       // can bypass the newly promoted replica's global OLX pacing.
-      await this.beforeRequest();
+      await this.assertRequestAllowed(entry.requestClass);
+      controller.signal.throwIfAborted();
       entry.operationStartedAt = this.now();
       entry.onStarted?.({
         queuedAt: new Date(entry.enqueuedAt),
@@ -268,6 +270,10 @@ export class OlxRequestCoordinator {
       }
       void this.drain();
     }
+  }
+
+  assertRequestAllowed(requestClass: OlxRequestClass): Promise<void> {
+    return this.beforeRequest(requestClass);
   }
 
   private preemptActiveBackground(): void {
@@ -416,7 +422,28 @@ export class OlxRequestCoordinator {
 }
 
 export function setOlxRequestLeadershipGuard(guard: () => Promise<void>): void {
-  olxRequestCoordinator.setBeforeRequest(guard);
+  olxRequestCoordinator.setBeforeRequest(createOlxOriginPolicy(guard));
+}
+
+export function createOlxOriginPolicy(guard: () => Promise<void>): (requestClass: OlxRequestClass) => Promise<void> {
+  return async (requestClass) => {
+    await guard();
+    const source = await prisma.source.findUnique({
+      where: { source: "OLX" }, select: { enabled: true, status: true, pausedUntil: true },
+    });
+    if (!source?.enabled || (source.pausedUntil && source.pausedUntil.getTime() > Date.now())
+      || (requestClass !== "REALTIME" && !["ACTIVE", "LIMITED"].includes(source.status))) {
+      throw new OlxOriginDeferredError();
+    }
+  };
+}
+
+/** Local scheduling denial, not a new upstream 403/429/CAPTCHA incident. */
+export class OlxOriginDeferredError extends Error {
+  constructor() {
+    super("OLX request deferred by durable origin policy or non-owner worker");
+    this.name = "OlxOriginDeferredError";
+  }
 }
 
 export class OlxCircuitOpenError extends Error {
@@ -593,6 +620,7 @@ function percentile95(values: number[]): number | null {
 }
 
 export const olxRequestCoordinator = new OlxRequestCoordinator({
+  beforeRequest: createOlxOriginPolicy(async () => { throw new OlxOriginDeferredError(); }),
   maxBackgroundConcurrency: 1,
   backgroundMinIntervalMs: env.OLX_BACKGROUND_REQUEST_MIN_INTERVAL_MS,
   backgroundQuietAfterRealtimeMs: env.OLX_BACKGROUND_AFTER_REALTIME_QUIET_MS,

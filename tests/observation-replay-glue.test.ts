@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   redisSet: vi.fn(),
   redisEval: vi.fn(),
+  enqueue: vi.fn(),
   filterFindMany: vi.fn(),
   observationFindMany: vi.fn(),
   observationCount: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock("../packages/db/src/index.js", () => ({
 }));
 vi.mock("../apps/worker/src/lib/queues.js", () => ({
   redisConnection: { set: mocks.redisSet, eval: mocks.redisEval },
+  enqueue: mocks.enqueue,
 }));
 vi.mock("../apps/worker/src/lib/log.js", () => ({ log: { info: mocks.logInfo, warn: mocks.logWarn } }));
 vi.mock("../apps/worker/src/modules/observation-journal.js", () => ({
@@ -60,6 +62,7 @@ describe("observation replay glue invariants", () => {
     vi.clearAllMocks();
     mocks.redisSet.mockResolvedValue("OK");
     mocks.redisEval.mockResolvedValue(1);
+    mocks.enqueue.mockResolvedValue(undefined);
     mocks.filterFindMany.mockResolvedValue([]);
     mocks.buildFilterSetRevision.mockReturnValue("revision-1");
     mocks.releaseIncompleteObservationIds.mockResolvedValue(0);
@@ -104,8 +107,8 @@ describe("observation replay glue invariants", () => {
         { source: "OLX", externalId: "replay-2", normalizedData: { id: 2 } },
       ]);
     mocks.deserializeNormalizedListing
-      .mockReturnValueOnce(normalizedListing)
-      .mockReturnValueOnce({ ...normalizedListing, externalId: "replay-2" });
+      .mockReturnValueOnce({ ...normalizedListing, source: "AUTO_RIA" })
+      .mockReturnValueOnce({ ...normalizedListing, source: "AUTO_RIA", externalId: "replay-2" });
     mocks.processListingDetected
       .mockResolvedValueOnce({ outcome: "DISPATCHED", matchedFilterIds: ["filter-1"], rejectionReasons: [] })
       .mockResolvedValueOnce({ outcome: "DUPLICATE", matchedFilterIds: ["filter-1"], rejectionReasons: [] });
@@ -132,7 +135,7 @@ describe("observation replay glue invariants", () => {
     expect(mocks.redisEval).toHaveBeenCalledOnce();
   });
 
-  it("falls back to reconstructable journal data when OLX detail hydration fails", async () => {
+  it("routes reconstructable OLX hydration to the hot owner without background HTTP", async () => {
     const row = {
       source: "OLX",
       externalId: "incomplete-1",
@@ -160,12 +163,9 @@ describe("observation replay glue invariants", () => {
     await processObservationReplay({ trigger: "STARTUP" });
 
     expect(mocks.reconstructObservationListing).toHaveBeenCalledWith(row);
-    expect(mocks.processListingDetected).toHaveBeenCalledWith(expect.objectContaining({ observationPersisted: true }));
-    expect(mocks.logWarn).toHaveBeenCalledWith(
-      "completeness",
-      expect.stringContaining("detail hydration failed"),
-      "detail unavailable",
-    );
+    expect(mocks.processListingDetected).not.toHaveBeenCalled();
+    expect(mocks.fetchOlxDetailListing).not.toHaveBeenCalled();
+    expect(mocks.enqueue).toHaveBeenCalledWith("listing.detected", "replay", expect.objectContaining({ observationPersisted: true, hydrateObservation: true }), expect.objectContaining({ priority: 10 }));
     expect(mocks.redisEval).toHaveBeenCalledOnce();
   });
 

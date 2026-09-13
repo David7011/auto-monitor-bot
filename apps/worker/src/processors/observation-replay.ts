@@ -8,7 +8,8 @@ import {
   releaseIncompleteObservationIds,
 } from "../modules/observation-journal.js";
 import { processListingDetected } from "./listing-detected.js";
-import { fetchOlxDetailListing } from "../collectors/olx.js";
+import { enqueue } from "../lib/queues.js";
+import { QUEUE_NAMES } from "@amb/shared";
 import { reconstructObservationListing } from "../modules/observation-recovery.js";
 
 const REPLAY_LOCK_KEY = "observation-replay:lock";
@@ -42,6 +43,7 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
     dispatched: 0,
     alreadyHandled: 0,
     failed: 0,
+    queued: 0,
   };
   const sourceCounts = new Map<ListingSource, number>();
 
@@ -107,6 +109,13 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
 
       sourceCounts.set(observation.source, (sourceCounts.get(observation.source) ?? 0) + 1);
       try {
+        if (listing.source === "OLX") {
+          await enqueue(QUEUE_NAMES.LISTING_DETECTED, "replay", {
+            listing, discoveryLane: "BACKFILL", bypassHotClaim: true, observationPersisted: true, hydrateObservation: true,
+          }, { priority: 10, deduplicationId: `observation-replay-${listing.source}-${listing.externalId}` });
+          counts.queued += 1;
+          continue;
+        }
         const result = await processListingDetected({
           listing,
           discoveryLane: "BACKFILL",
@@ -163,6 +172,7 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
         details: {
           sources: Object.fromEntries(sourceCounts),
           hydratedDetails: hydrated.length,
+          queuedForHotOwner: counts.queued,
           limitReached: observations.length >= limit,
         },
       },
@@ -246,8 +256,8 @@ async function hydrateIncompleteObservations(cutoff: Date): Promise<Array<{
     const batch = rows.slice(index, index + DETAIL_HYDRATION_CONCURRENCY);
     const results = await Promise.all(batch.map(async (row) => {
       try {
-        const detailedListing = row.source === "OLX" ? await fetchOlxDetailListing(row.url) : undefined;
-        const listing = detailedListing ?? reconstructObservationListing(row);
+        // External detail hydration belongs to the elected hot origin owner.
+        const listing = reconstructObservationListing(row);
         if (listing) {
           listing.firstSeenAt = row.firstSeenAt;
           listing.publishedAt ??= row.publishedAt ?? undefined;

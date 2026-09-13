@@ -9,7 +9,7 @@ import { QUEUE_NAMES, olxRecoveryAttemptGeneration, summarizeMetric, type Normal
 import { fetchOlxApiFeed, isAdsResult } from "../../apps/worker/src/collectors/olx-feed.js";
 import { selectOlxCandidates } from "../../apps/worker/src/collectors/olx.js";
 import { closeSourceHttpClient } from "../../apps/worker/src/collectors/source-http-client.js";
-import { bullConnection, closeQueues, getQueue } from "../../apps/worker/src/lib/queues.js";
+import { bullConnection, closeQueues, getQueue, redisConnection } from "../../apps/worker/src/lib/queues.js";
 import { configureTelegramApiRootForIntegrationTest, sendListingLink, stageListingForFlash, createTelegramFlashBundle, sendTelegramFlashBundle } from "../../apps/worker/src/modules/telegram-service.js";
 import { recordPendingObservation, recordPendingObservations } from "../../apps/worker/src/modules/observation-journal.js";
 import { checkDuplicate, findStrongDuplicate } from "../../apps/worker/src/modules/duplicate-guard.js";
@@ -25,7 +25,8 @@ import { processTelegramSend } from "../../apps/worker/src/processors/telegram.j
 import { processCollectorRun } from "../../apps/worker/src/processors/collector-run.js";
 import { getCollector } from "../../apps/worker/src/collectors/index.js";
 import { SourceHttpClient } from "../../apps/worker/src/collectors/source-http-client.js";
-import { OlxRequestCoordinator } from "../../apps/worker/src/modules/olx-request-coordinator.js";
+import { OlxOriginDeferredError, OlxRequestCoordinator, setOlxRequestLeadershipGuard } from "../../apps/worker/src/modules/olx-request-coordinator.js";
+import { HotWorkerLeadership } from "../../apps/worker/src/modules/hot-worker-leadership.js";
 
 type TelegramMode = "SUCCESS" | "FAIL" | "STOP_DB_AFTER_ACCEPT";
 
@@ -43,6 +44,7 @@ const telegramDeliveries = new Map<string, number>();
 let telegramMode: TelegramMode = "SUCCESS";
 let stopDatabaseOnNextTelegram = false;
 let fakeRoot = "";
+let originProbeRequests = 0;
 
 const fakeServer = createServer(async (request, response) => {
   try {
@@ -54,6 +56,7 @@ const fakeServer = createServer(async (request, response) => {
 });
 
 async function main(): Promise<void> {
+  await redisConnection.connect();
   await new Promise<void>((resolve, reject) => {
     fakeServer.once("error", reject);
     fakeServer.listen(0, "127.0.0.1", () => resolve());
@@ -69,6 +72,8 @@ async function main(): Promise<void> {
     progress("reset and seed");
     await resetDatabase();
     await seedCatchAllFilter();
+    await prisma.source.upsert({ where: { source: "OLX" }, create: { source: "OLX", name: "Loopback OLX", enabled: true }, update: { enabled: true, status: "ACTIVE", pausedUntil: null } });
+    setOlxRequestLeadershipGuard(async () => {});
 
     progress("database hot-path benchmark");
     dbHotPathBenchmark = await benchmarkDbHotPath();
@@ -159,6 +164,8 @@ async function main(): Promise<void> {
     assertFinalInvariantViaFreshConnection();
     await assertPartialCollectorCheckpoint();
     checks.push("real collector handler + loopback page1/page2-403 -> durable partial journal, no boundary advancement; STOPPED -> journal only");
+    await assertOriginPolicyRestart();
+    checks.push("persisted origin pause + elected hot/background child restarts -> zero HTTP; owned expired-pause realtime probe -> exactly one HTTP");
     console.log(JSON.stringify({
       result: "PASS",
       invariant: "every deterministic OLX advert is NOTIFIED or remains in an explicit recoverable state",
@@ -470,7 +477,28 @@ void entrypoint.then(
 );
 
 async function runProbe(mode: string): Promise<void> {
+  await redisConnection.connect();
   if (process.env.AMB_TEST_FAKE_ROOT) fakeRoot = process.env.AMB_TEST_FAKE_ROOT;
+  setOlxRequestLeadershipGuard(async () => {});
+  if (mode.startsWith("--probe-origin-")) {
+    const owner = new HotWorkerLeadership({ redis: redisConnection, instanceId: "a", onPromoted: async () => {}, onDemoted: async () => {} });
+    try {
+      if (mode === "--probe-origin-background") {
+        setOlxRequestLeadershipGuard(async () => { throw new OlxOriginDeferredError(); });
+      } else {
+        await owner.start();
+        setOlxRequestLeadershipGuard(() => owner.assertOwnership());
+      }
+      const client = new SourceHttpClient();
+      try {
+        const result = await client.text(`${fakeRoot}/origin-probe`, { source: "OLX", requestClass: mode === "--probe-origin-background" ? "RECOVERY" : "REALTIME" });
+        assert(mode === "--probe-origin-allowed" && result.classification === "SUCCESS", "paused/non-owner process reached HTTP");
+      } catch (error) {
+        assert(mode !== "--probe-origin-allowed" && error instanceof OlxOriginDeferredError, "unexpected origin policy result");
+      }
+    } finally { await owner.stop(); }
+    return;
+  }
   if (mode === "--probe-outbox-crash") {
     configureListingCommittedHookForIntegrationTest(async () => {
       console.log("OUTBOX_COMMITTED_BEFORE_SEND");
@@ -513,6 +541,22 @@ async function runProbe(mode: string): Promise<void> {
 }
 
 function envChatId(): string { return process.env.TELEGRAM_CHAT_ID || "not-configured"; }
+
+async function assertOriginPolicyRestart(): Promise<void> {
+  const previous = await prisma.source.findUniqueOrThrow({ where: { source: "OLX" } });
+  const requestsBefore = originProbeRequests;
+  try {
+    await prisma.source.update({ where: { source: "OLX" }, data: { status: "PAUSED", pausedUntil: new Date(Date.now() + 60_000) } });
+    await runChild("--probe-origin-paused", true);
+    await runChild("--probe-origin-background", true);
+    assert(originProbeRequests === requestsBefore, "fresh owner/background bypassed persisted pause");
+    await prisma.source.update({ where: { source: "OLX" }, data: { pausedUntil: new Date(0) } });
+    await runChild("--probe-origin-allowed", true);
+    assert(originProbeRequests === requestsBefore + 1, "owned realtime probe did not execute exactly once");
+  } finally {
+    await prisma.source.update({ where: { source: "OLX" }, data: { status: previous.status, pausedUntil: previous.pausedUntil } });
+  }
+}
 
 async function assertLegacyOrphanRepair(): Promise<void> {
   const rows: string[] = [];
@@ -611,6 +655,10 @@ async function assertDurableOutboxCrash(): Promise<void> {
 
 async function routeFakeRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url ?? "/", fakeRoot);
+  if (url.pathname === "/origin-probe") {
+    originProbeRequests += 1;
+    response.writeHead(200, { "content-type": "text/html" }); response.end("ok"); return;
+  }
   if (url.pathname === "/olx/blocked") {
     response.writeHead(403, { "content-type": "text/html" });
     response.end("<html><title>Forbidden</title></html>");

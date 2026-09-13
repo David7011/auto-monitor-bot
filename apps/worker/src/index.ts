@@ -64,7 +64,7 @@ import {
   writeWorkerHeartbeatFile,
 } from "./modules/worker-heartbeat.js";
 import { HotWorkerLeadership } from "./modules/hot-worker-leadership.js";
-import { setOlxRequestLeadershipGuard } from "./modules/olx-request-coordinator.js";
+import { OlxOriginDeferredError, setOlxRequestLeadershipGuard } from "./modules/olx-request-coordinator.js";
 
 const workers: Worker[] = [];
 const timers: NodeJS.Timeout[] = [];
@@ -81,6 +81,9 @@ let shutdownRunning = false;
 
 const HOT_JOB_LOCK_DURATION_MS = 10_000;
 const HOT_JOB_STALLED_INTERVAL_MS = 2_000;
+
+// Fail-fast control commands must not be issued before connection readiness.
+await redisConnection.connect();
 
 function createWorker<T>(queueName: QueueName, processor: (data: T) => Promise<unknown>, concurrency = 2): void {
   const worker = new Worker(
@@ -146,6 +149,9 @@ if (workerRole === "hot") {
   await writeWorkerHeartbeat();
   await hotLeadership.start();
 } else {
+  // Background/replay processes never become a second OLX origin owner.
+  // Legacy all-role mode also fails closed: production uses elected hot replicas.
+  setOlxRequestLeadershipGuard(async () => { throw new OlxOriginDeferredError(); });
   await bootstrapWorkerRuntime({
     prewarmDatabase: prewarmWorkerDatabase,
     createQueueWorkers,

@@ -9,6 +9,7 @@ import { findStrongDuplicate } from "../modules/duplicate-guard.js";
 import { enqueue } from "../lib/queues.js";
 import { log } from "../lib/log.js";
 import { env } from "../env.js";
+import { fetchOlxDetailListing } from "../collectors/olx.js";
 import {
   sendListingLink,
   stageListingForFlash,
@@ -38,6 +39,7 @@ export type ListingDetectedJob = {
   observationPersisted?: boolean;
   persistedObservationState?: PendingObservationState;
   flashBundleId?: string;
+  hydrateObservation?: boolean;
 };
 
 export type ListingProcessingResult = {
@@ -56,6 +58,23 @@ export type ListingProcessingResult = {
  * notification is persisted, so telegram.update always has a message target.
  */
 export async function processListingDetected(job: ListingDetectedJob): Promise<ListingProcessingResult> {
+  if (job.hydrateObservation && job.listing.source === "OLX") {
+    const retained = await prisma.sourceSeenListing.findUnique({
+      where: { source_externalId: { source: "OLX", externalId: job.listing.externalId } },
+      select: { decision: true, listingId: true, matchedFilterIds: true },
+    });
+    if (retained?.decision === "NOTIFIED") {
+      return { outcome: "DUPLICATE", listingId: retained.listingId ?? undefined, matchedFilterIds: retained.matchedFilterIds, rejectionReasons: [] };
+    }
+    const filters = await loadEnabledFilters(job.filterIds ?? []);
+    const evaluation = matchFiltersDetailed(job.listing, filters);
+    if (evaluation.matched.length === 0 && evaluation.evaluations.some((item) => item.outcome === "UNKNOWN")) {
+      const detail = await fetchOlxDetailListing(job.listing.url, new Date(), "RECOVERY");
+      if (detail && detail.externalId === job.listing.externalId) {
+        job = { ...job, listing: { ...job.listing, ...detail, firstSeenAt: job.listing.firstSeenAt }, observationPersisted: false };
+      }
+    }
+  }
   const discoveryLane = job.discoveryLane ?? "REALTIME";
   let persistedState = job.persistedObservationState;
   // PostgreSQL is the durable recovery boundary. Persist before taking the

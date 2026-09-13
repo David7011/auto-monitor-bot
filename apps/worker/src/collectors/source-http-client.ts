@@ -154,6 +154,9 @@ export class SourceHttpClient {
     const retryCount = options.method === "POST" ? 0 : Math.max(0, this.transientRetryCount);
     for (let attempt = 0; ; attempt += 1) {
       preemptionSignal?.throwIfAborted();
+      if (attempt > 0 && options.source === "OLX") {
+        await this.olxCoordinator.assertRequestAllowed(options.requestClass ?? "ENRICHMENT");
+      }
       const result = await this.performTextRequest(url, options, preemptionSignal);
       if (
         attempt >= retryCount

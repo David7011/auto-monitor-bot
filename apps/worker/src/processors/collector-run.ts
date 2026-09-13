@@ -23,6 +23,7 @@ import {
 } from "../modules/source-search-plan.js";
 import { olxLaneArbiter } from "../modules/olx-lane-arbiter.js";
 import { olxProtectionCoolingState } from "../modules/olx-protection-cooling.js";
+import { OlxOriginDeferredError } from "../modules/olx-request-coordinator.js";
 import { laneOwnsSourceHealth } from "../modules/source-health-ownership.js";
 import { recordPendingObservations } from "../modules/observation-journal.js";
 import type { ListingProcessingResult } from "./listing-detected.js";
@@ -575,6 +576,10 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
     if (pendingPartialResult.length > 0) {
       await recordPendingObservations(pendingPartialResult, lane);
       pendingPartialResult = [];
+    }
+    if (error instanceof OlxOriginDeferredError) {
+      await finishRun(run.id, { status: "CANCELLED_BY_USER", startedAt, foundCount, newCount, recoveredCount, pageCount, requestCount, observedCount, semanticWarnings, errorMessage: error.message });
+      return;
     }
     const message = error instanceof Error ? error.message : String(error);
     if (isNetworkTimeoutError(error, message)) {

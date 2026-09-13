@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   enqueue: vi.fn(),
   sendListingLink: vi.fn(),
   stageListingForFlash: vi.fn(),
+  fetchOlxDetailListing: vi.fn(),
   claimHotListing: vi.fn(),
   releaseHotListingClaim: vi.fn(),
   recordPendingObservation: vi.fn(),
@@ -43,6 +44,7 @@ vi.mock("../packages/db/src/index.js", () => ({
   },
 }));
 vi.mock("../apps/worker/src/modules/filter-engine.js", () => ({ matchFiltersDetailed: mocks.matchFiltersDetailed }));
+vi.mock("../apps/worker/src/collectors/olx.js", () => ({ fetchOlxDetailListing: mocks.fetchOlxDetailListing }));
 vi.mock("../apps/worker/src/modules/duplicate-guard.js", () => ({ findStrongDuplicate: mocks.findStrongDuplicate }));
 vi.mock("../apps/worker/src/lib/queues.js", () => ({ enqueue: mocks.enqueue }));
 vi.mock("../apps/worker/src/lib/log.js", () => ({ log: { info: mocks.logInfo, warn: mocks.logWarn } }));
@@ -123,6 +125,8 @@ describe("listing.detected glue invariants", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.filterFindMany.mockResolvedValue([filter]);
+    mocks.observationFindUnique.mockResolvedValue(null);
+    mocks.fetchOlxDetailListing.mockResolvedValue(undefined);
     mocks.recordPendingObservation.mockResolvedValue(undefined);
     mocks.claimHotListing.mockResolvedValue("claim-token");
     mocks.releaseHotListingClaim.mockResolvedValue(undefined);
@@ -196,6 +200,21 @@ describe("listing.detected glue invariants", () => {
     expect(mocks.listingCreate).not.toHaveBeenCalled();
     expect(mocks.sendListingLink).not.toHaveBeenCalled();
     expect(mocks.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("uses at most one owned detail request for an UNKNOWN replay candidate", async () => {
+    mocks.matchFiltersDetailed.mockReturnValueOnce({ matched: [], evaluations: [{ outcome: "UNKNOWN", unknownReasons: ["ENGINE_VOLUME"] }], rejectionReasons: [] });
+    mocks.fetchOlxDetailListing.mockResolvedValueOnce({ ...listing, engineVolume: 2 });
+    await processListingDetected({ listing, hydrateObservation: true, discoveryLane: "BACKFILL" });
+    expect(mocks.fetchOlxDetailListing).toHaveBeenCalledExactlyOnceWith(listing.url, expect.any(Date), "RECOVERY");
+  });
+
+  it("does not hydrate a proven match or a retained terminal notification", async () => {
+    await processListingDetected({ listing, hydrateObservation: true });
+    expect(mocks.fetchOlxDetailListing).not.toHaveBeenCalled();
+    mocks.observationFindUnique.mockResolvedValueOnce({ decision: "NOTIFIED", listingId: null, matchedFilterIds: [] });
+    await processListingDetected({ listing, hydrateObservation: true });
+    expect(mocks.fetchOlxDetailListing).not.toHaveBeenCalled();
   });
 
   it("persists and journals dispatch before performing the first Telegram send", async () => {
