@@ -1,11 +1,14 @@
 import { createServer } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { olxRequestCoordinator } from "../apps/worker/src/modules/olx-request-coordinator.js";
 import {
   fetchOlxFeed,
   isAdsResult,
 } from "../apps/worker/src/collectors/olx-feed.js";
 
 const openServers: ReturnType<typeof createServer>[] = [];
+// Loopback parser test only; production singleton remains fail-closed by default.
+vi.mock("../packages/db/src/index.js", () => ({ prisma: {} }));
 
 afterEach(async () => {
   await Promise.all(openServers.splice(0).map((server) => new Promise<void>((resolve, reject) => {
@@ -15,6 +18,7 @@ afterEach(async () => {
 
 describe("OLX public feed preference", () => {
   it("uses the public HTML page first and does not call the internal API after success", async () => {
+    olxRequestCoordinator.setBeforeRequest(async () => {});
     let apiRequests = 0;
     const server = createServer((request, response) => {
       if (request.url?.startsWith("/api")) {

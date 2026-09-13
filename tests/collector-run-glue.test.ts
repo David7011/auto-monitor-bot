@@ -256,6 +256,22 @@ describe("collector.run glue preflight invariants", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("journals a returned batch after a failed periodic renewal and clears its timer", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.getCollector.mockReturnValueOnce({ collect: vi.fn(async () => {
+        await vi.advanceTimersByTimeAsync(20_001);
+        return { listings: [listing], requestCount: 1 };
+      }) });
+      await processCollectorRun({ source: "OLX" });
+      expect(mocks.recordPendingObservations).toHaveBeenCalledWith([listing], "REALTIME");
+      expect(mocks.dispatchListings).not.toHaveBeenCalled();
+      expect(mocks.markSourceSearchSuccess).not.toHaveBeenCalled();
+      expect(mocks.releaseLock).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("journals returned candidates but cancels dispatch and coverage after lease loss", async () => {
     mocks.getCollector.mockReturnValueOnce({ collect: vi.fn(async () => {
       mocks.redisGet.mockResolvedValue("foreign-owner");
