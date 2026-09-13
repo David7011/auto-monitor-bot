@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   getCollector: vi.fn(),
   buildSourceSearchPlan: vi.fn(),
   redisSet: vi.fn(),
+  redisGet: vi.fn(),
   enqueue: vi.fn(),
   scheduledJobState: vi.fn(),
   retryLockCollision: vi.fn(),
@@ -53,7 +54,7 @@ vi.mock("../apps/worker/src/lib/log.js", () => ({ log: {
 } }));
 vi.mock("../apps/worker/src/lib/queues.js", () => ({
   enqueue: mocks.enqueue,
-  redisConnection: { set: mocks.redisSet },
+  redisConnection: { set: mocks.redisSet, get: mocks.redisGet },
 }));
 vi.mock("../apps/worker/src/modules/challenge-incident.js", () => ({
   markChallengeProbePending: mocks.markChallengeProbePending,
@@ -198,6 +199,7 @@ describe("collector.run glue preflight invariants", () => {
     mocks.incidentFindFirst.mockResolvedValue(null);
     mocks.olxProtectionCoolingState.mockReturnValue({ active: false, until: null });
     mocks.redisSet.mockResolvedValue("OK");
+    mocks.redisGet.mockImplementation(async () => mocks.redisSet.mock.calls.at(-1)?.[1]);
     mocks.runCreate.mockResolvedValue({ id: "run-1" });
     mocks.retryLockCollision.mockResolvedValue(undefined);
     mocks.logWarn.mockResolvedValue(undefined);
@@ -242,6 +244,28 @@ describe("collector.run glue preflight invariants", () => {
     expect(mocks.logWarn).toHaveBeenCalledWith("collector", "No collector registered for OLX, skipping");
     expect(mocks.buildSourceSearchPlan).not.toHaveBeenCalled();
     expect(mocks.redisSet).not.toHaveBeenCalled();
+  });
+
+  it("releases the acquired lease and timer when PostgreSQL bootstrap fails", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.runCreate.mockRejectedValueOnce(new Error("bootstrap database failure"));
+      await expect(processCollectorRun({ source: "OLX" })).rejects.toThrow("bootstrap database failure");
+      expect(mocks.releaseLock).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("journals returned candidates but cancels dispatch and coverage after lease loss", async () => {
+    mocks.getCollector.mockReturnValueOnce({ collect: vi.fn(async () => {
+      mocks.redisGet.mockResolvedValue("foreign-owner");
+      return { listings: [listing], requestCount: 1 };
+    }) });
+    await processCollectorRun({ source: "OLX" });
+    expect(mocks.recordPendingObservations).toHaveBeenCalledWith([listing], "REALTIME");
+    expect(mocks.dispatchListings).not.toHaveBeenCalled();
+    expect(mocks.markSourceSearchSuccess).not.toHaveBeenCalled();
+    expect(mocks.finishRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "CANCELLED_BY_USER" }));
   });
 
   it("does not create runs for disabled, paused, or unreferenced sources", async () => {

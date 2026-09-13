@@ -1,6 +1,7 @@
 import { env } from "../env.js";
 import { Agent, setGlobalDispatcher } from "undici";
 import { readResponseBuffer, ResponseTooLargeError } from "../lib/response-body.js";
+import { activeCollectorLease } from "../modules/collector-lease.js";
 import {
   OlxCircuitOpenError,
   type OlxRequestCoordinator,
@@ -106,8 +107,11 @@ export class SourceHttpClient {
   }
 
   async text(url: string, options: SourceHttpOptions): Promise<SourceHttpTextResult> {
+    const collectorLease = activeCollectorLease();
     const operation = (signal?: AbortSignal) =>
-      this.performTextRequestWithTransientRetries(url, options, signal);
+      collectorLease
+        ? collectorLease.run(() => this.performTextRequestWithTransientRetries(url, options, signal))
+        : this.performTextRequestWithTransientRetries(url, options, signal);
     if (options.source !== "OLX") return operation();
 
     try {
@@ -179,6 +183,8 @@ export class SourceHttpClient {
     options: SourceHttpOptions,
     preemptionSignal?: AbortSignal,
   ): Promise<SourceHttpTextResult> {
+    const collectorLease = activeCollectorLease();
+    if (collectorLease) await collectorLease.assertOwnership();
     const requestId = sourceRequestId(options.source);
     const requestStartedAt = new Date();
     const timeoutController = new AbortController();
@@ -186,9 +192,9 @@ export class SourceHttpClient {
       () => timeoutController.abort(new DOMException("Source HTTP request timed out", "TimeoutError")),
       options.timeoutMs ?? env.SOURCE_HTTP_TIMEOUT_MS,
     );
-    const requestSignal = preemptionSignal
-      ? AbortSignal.any([preemptionSignal, timeoutController.signal])
-      : timeoutController.signal;
+    const requestSignal = AbortSignal.any([
+      timeoutController.signal, ...(preemptionSignal ? [preemptionSignal] : []), ...(collectorLease ? [collectorLease.signal] : []),
+    ]);
 
     try {
       requestSignal.throwIfAborted();
@@ -247,6 +253,7 @@ export class SourceHttpClient {
         network,
       };
     } catch (error) {
+      if (collectorLease?.signal.aborted) throw collectorLease.signal.reason;
       if (preemptionSignal?.aborted) {
         throw preemptionSignal.reason instanceof Error
           ? preemptionSignal.reason

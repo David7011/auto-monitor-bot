@@ -24,6 +24,7 @@ import {
 import { olxLaneArbiter } from "../modules/olx-lane-arbiter.js";
 import { olxProtectionCoolingState } from "../modules/olx-protection-cooling.js";
 import { OlxOriginDeferredError } from "../modules/olx-request-coordinator.js";
+import { CollectorLease, CollectorLeaseLostError } from "../modules/collector-lease.js";
 import { laneOwnsSourceHealth } from "../modules/source-health-ownership.js";
 import { recordPendingObservations } from "../modules/observation-journal.js";
 import type { ListingProcessingResult } from "./listing-detected.js";
@@ -135,11 +136,11 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
     await retryLockCollision(job, lane);
     return;
   }
-  const lockRenewal = setInterval(() => {
-    void renewLock(lockKey, lockValue, lockTtlMs);
-  }, Math.max(5_000, Math.floor(lockTtlMs / 3)));
-  lockRenewal.unref();
-
+  let lease: CollectorLease | undefined;
+  try {
+  lease = new CollectorLease({ ttlMs: lockTtlMs, renew: () => renewLock(lockKey, lockValue, lockTtlMs), owns: async () => await redisConnection.get(lockKey) === lockValue });
+  const ownedLease = lease;
+  await lease.run(async () => {
   const startedAt = new Date();
   const runCategoryKey = contexts.length === 1 ? contexts[0]!.categoryKey : "mixed";
   const runFingerprint = contexts.length === 1 ? contexts[0]!.fingerprint : null;
@@ -222,6 +223,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
                 .filter((listing) => !earlyDispatchedExternalIds.has(listing.externalId));
               if (freshCandidates.length === 0) return;
               try {
+                await ownedLease.assertOwnership();
                 const dispatched = await dispatchListings(
                   freshCandidates,
                   context.filterIds,
@@ -254,6 +256,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         if (pendingPartialResult.length > 0) await recordPendingObservations(pendingPartialResult, lane);
         pendingPartialResult = [];
       };
+      await ownedLease.assertOwnership();
       const normallyFreshListings = context.freshnessMode === "ALL_TIME"
         ? collectedListings
         : filterReliableFreshListings(collectedListings, context.freshnessMode);
@@ -391,6 +394,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         listingsToDispatch = notifiableListings.filter((listing) => !state.knownExternalIds.has(listing.externalId));
       }
 
+      await ownedLease.assertOwnership();
       const dispatches = [
         ...earlyDispatches,
         ...await dispatchListings(
@@ -415,6 +419,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       if (unprocessedListings.length > 0) await recordPendingObservations(unprocessedListings, lane);
       pendingPartialResult = [];
 
+      await ownedLease.assertOwnership();
       const stateUpdate = await markSourceSearchSuccess(scanContext, state, collectedListings, {
         initialSyncCompleted: needsInitialSync || Boolean(state.initialSyncCompletedAt),
         newestFirstVerified: Boolean(collector.supportsNewestFirst && collector.newestFirstVerified),
@@ -540,6 +545,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         },
       });
     }
+    await ownedLease.assertOwnership();
     await finishRun(run.id, {
       status: limited ? "LIMITED" : "SUCCESS",
       startedAt,
@@ -577,7 +583,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       await recordPendingObservations(pendingPartialResult, lane);
       pendingPartialResult = [];
     }
-    if (error instanceof OlxOriginDeferredError) {
+    if (error instanceof OlxOriginDeferredError || error instanceof CollectorLeaseLostError) {
       await finishRun(run.id, { status: "CANCELLED_BY_USER", startedAt, foundCount, newCount, recoveredCount, pageCount, requestCount, observedCount, semanticWarnings, errorMessage: error.message });
       return;
     }
@@ -676,8 +682,10 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       errorMessage: message,
     });
     await log.error("collector", `${source} ${lane} collector failed`, message);
+  }
+  });
   } finally {
-    clearInterval(lockRenewal);
+    lease?.stop();
     await releaseLock(lockKey, lockValue);
   }
 }

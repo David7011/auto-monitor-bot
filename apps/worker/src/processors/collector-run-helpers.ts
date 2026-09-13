@@ -661,17 +661,18 @@ export async function releaseLock(lockKey: string, lockValue: string): Promise<v
   }
 }
 
-export async function renewLock(lockKey: string, lockValue: string, ttlMs: number): Promise<void> {
+export async function renewLock(lockKey: string, lockValue: string, ttlMs: number): Promise<boolean> {
   try {
-    await redisConnection.eval(
+    const renewed = await redisConnection.eval(
       "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
       1,
       lockKey,
       lockValue,
       String(ttlMs),
     );
+    return Number(renewed) === 1;
   } catch {
-    // The original TTL and queue retry remain the recovery path.
+    return false;
   }
 }
 
