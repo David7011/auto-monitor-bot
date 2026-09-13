@@ -30,6 +30,7 @@ import {
   releaseFlashListingsToCards,
 } from "./modules/telegram-service.js";
 import { env } from "./env.js";
+import { reconcileOrphanDeliveryIntents, selectPendingCardDeliveryIntents } from "./modules/delivery-outbox.js";
 import { closePhotoOcrWorker } from "./modules/photo-identifier-ocr.js";
 import { closeSourceHttpClient } from "./collectors/source-http-client.js";
 import {
@@ -386,6 +387,7 @@ async function recoverStartupPipeline(): Promise<void> {
 async function recoverInterruptedPipeline(closeStaleRuns = true): Promise<void> {
   const now = new Date();
   if (closeStaleRuns) await closeStaleCollectorRuns();
+  await reconcileOrphanDeliveryIntents(env.TELEGRAM_CHAT_ID, env.STARTUP_RECOVERY_LIMIT);
   await prisma.telegramNotification.updateMany({
     where: {
       status: "PROCESSING",
@@ -450,15 +452,7 @@ async function recoverInterruptedPipeline(closeStaleRuns = true): Promise<void> 
     );
   }
 
-  const pendingNotifications = await prisma.telegramNotification.findMany({
-    where: {
-      status: { in: ["PENDING", "RETRY_PENDING", "FAILED"] },
-      attemptCount: { lt: 10 },
-    },
-    select: { listingId: true },
-    orderBy: { createdAt: "asc" },
-    take: env.STARTUP_RECOVERY_LIMIT,
-  });
+  const pendingNotifications = await selectPendingCardDeliveryIntents(env.STARTUP_RECOVERY_LIMIT);
   for (const notification of pendingNotifications) {
     await enqueue(
       QUEUE_NAMES.TELEGRAM_SEND,

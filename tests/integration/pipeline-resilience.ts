@@ -3,12 +3,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { once } from "node:events";
 import { appendFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
+import { Worker } from "bullmq";
 import { prisma, compactSourceSearchStates } from "@amb/db";
 import { QUEUE_NAMES, olxRecoveryAttemptGeneration, summarizeMetric, type NormalizedListing } from "@amb/shared";
 import { fetchOlxApiFeed, isAdsResult } from "../../apps/worker/src/collectors/olx-feed.js";
 import { selectOlxCandidates } from "../../apps/worker/src/collectors/olx.js";
 import { closeSourceHttpClient } from "../../apps/worker/src/collectors/source-http-client.js";
-import { closeQueues, getQueue } from "../../apps/worker/src/lib/queues.js";
+import { bullConnection, closeQueues, getQueue } from "../../apps/worker/src/lib/queues.js";
 import { configureTelegramApiRootForIntegrationTest, sendListingLink, stageListingForFlash, createTelegramFlashBundle, sendTelegramFlashBundle } from "../../apps/worker/src/modules/telegram-service.js";
 import { recordPendingObservation, recordPendingObservations } from "../../apps/worker/src/modules/observation-journal.js";
 import { checkDuplicate, findStrongDuplicate } from "../../apps/worker/src/modules/duplicate-guard.js";
@@ -18,7 +19,8 @@ import {
   loadSourceSearchState,
   markSourceSearchSuccess,
 } from "../../apps/worker/src/modules/source-search-plan.js";
-import { processListingDetected } from "../../apps/worker/src/processors/listing-detected.js";
+import { configureListingCommittedHookForIntegrationTest, processListingDetected } from "../../apps/worker/src/processors/listing-detected.js";
+import { reconcileOrphanDeliveryIntents, selectPendingCardDeliveryIntents } from "../../apps/worker/src/modules/delivery-outbox.js";
 import { processTelegramSend } from "../../apps/worker/src/processors/telegram.js";
 
 type TelegramMode = "SUCCESS" | "FAIL" | "STOP_DB_AFTER_ACCEPT";
@@ -31,7 +33,7 @@ const redisServer = requiredEnv("AMB_TEST_REDIS_SERVER");
 const redisCli = requiredEnv("AMB_TEST_REDIS_CLI");
 const redisConfig = requiredEnv("AMB_TEST_REDIS_CONFIG");
 const redisPort = Number(requiredEnv("AMB_TEST_REDIS_PORT"));
-const expectedIds = ["100001", "100002", "100003", "100004", "100005", "100006"];
+const expectedIds = ["100001", "100002", "100003", "100004", "100005", "100006", "100007", "100008"];
 const olxRequests = new Map<string, number>();
 const telegramDeliveries = new Map<string, number>();
 let telegramMode: TelegramMode = "SUCCESS";
@@ -94,6 +96,11 @@ async function main(): Promise<void> {
     await assertSent("100001");
     await assertStageTimestamps("100001");
     checks.push("healthy OLX -> request/first-byte/hot/journal/Telegram timestamps");
+
+    progress("real process kill after durable listing/outbox, before Telegram");
+    await assertLegacyOrphanRepair();
+    await assertDurableOutboxCrash();
+    checks.push("real child kill after DISPATCHED -> restart selector + BullMQ consumer -> NOTIFIED once; no second source fetch");
 
     progress("Telegram endpoint failure");
     const telegramFailure = await fetchKnownListing("100004");
@@ -458,6 +465,32 @@ void entrypoint.then(
 
 async function runProbe(mode: string): Promise<void> {
   if (process.env.AMB_TEST_FAKE_ROOT) fakeRoot = process.env.AMB_TEST_FAKE_ROOT;
+  if (mode === "--probe-outbox-crash") {
+    configureListingCommittedHookForIntegrationTest(async () => {
+      console.log("OUTBOX_COMMITTED_BEFORE_SEND");
+      await new Promise<void>(() => {});
+    });
+    await processListingDetected({ listing: await fetchKnownListing("100008"), discoveryLane: "REALTIME", bypassHotClaim: true });
+    throw new Error("Crash checkpoint must not proceed to Telegram");
+  }
+  if (mode === "--probe-outbox-restart") {
+    configureTelegramApiRootForIntegrationTest(requiredEnv("AMB_TEST_FAKE_ROOT"));
+    await reconcileOrphanDeliveryIntents(envChatId(), 500);
+    const pending = await selectPendingCardDeliveryIntents(500);
+    const target = await prisma.listing.findUniqueOrThrow({ where: { source_externalId: { source: "OLX", externalId: "100008" } } });
+    assert(pending.some((row) => row.listingId === target.id), "Real recovery selector did not choose committed outbox");
+    const worker = new Worker(QUEUE_NAMES.TELEGRAM_SEND, (job) => processTelegramSend(job.data), {
+      connection: bullConnection, concurrency: 1,
+    });
+    try {
+      await worker.waitUntilReady();
+      await getQueue(QUEUE_NAMES.TELEGRAM_SEND).add("send", { listingId: target.id }, { jobId: `outbox-crash-${target.id}` });
+      await retryUntil(async () => (await pipelineRow("100008"))?.decision === "NOTIFIED", "Outbox notification after restart");
+    } finally {
+      await worker.close();
+    }
+    return;
+  }
   const externalId = mode === "--probe-db-before-journal" ? "100002"
     : mode === "--probe-db-after-journal" ? "100003"
       : "100005";
@@ -470,6 +503,62 @@ async function runProbe(mode: string): Promise<void> {
     await recordPendingObservations([probeListing(externalId)], "REALTIME");
   } else {
     throw new Error(`Unknown probe mode: ${mode}`);
+  }
+}
+
+function envChatId(): string { return process.env.TELEGRAM_CHAT_ID || "not-configured"; }
+
+async function assertLegacyOrphanRepair(): Promise<void> {
+  const rows: string[] = [];
+  try {
+    for (const [name, mode] of [["orphan", "LIVE"], ["shadow", "SHADOW"], ["retained", "LIVE"]] as const) {
+      const listing = await prisma.listing.create({ data: {
+        source: "OLX", externalId: `legacy-${name}`, url: `${fakeRoot}/legacy-${name}`,
+        canonicalUrl: `${fakeRoot}/legacy-${name}`, status: "MATCHED", notificationMode: mode,
+      } });
+      rows.push(listing.id);
+      if (name === "retained") {
+        await prisma.sourceSeenListing.create({ data: {
+          source: "OLX", externalId: "legacy-retained", url: listing.url, canonicalUrl: listing.canonicalUrl,
+          listingId: listing.id, decision: "NOTIFIED", notifiedAt: new Date(),
+        } });
+      }
+    }
+    assert(await reconcileOrphanDeliveryIntents(envChatId(), 500) === 1, "Only live orphan should be repaired");
+    assert(await reconcileOrphanDeliveryIntents(envChatId(), 500) === 0, "Legacy orphan repair is not idempotent");
+    const pending = await selectPendingCardDeliveryIntents(500);
+    assert(pending.some((row) => row.listingId === rows[0]), "Repaired orphan is not actionable");
+    assert(!pending.some((row) => row.listingId === rows[1] || row.listingId === rows[2]), "Shadow/retained records revived");
+  } finally {
+    await prisma.listing.deleteMany({ where: { id: { in: rows } } });
+  }
+}
+
+async function assertDurableOutboxCrash(): Promise<void> {
+  const child = spawn(process.execPath, [...process.execArgv, process.argv[1] ?? "", "--probe-outbox-crash"], {
+    env: { ...process.env, AMB_TEST_FAKE_ROOT: fakeRoot }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  child.stderr?.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); });
+  try {
+    await retryUntil(async () => {
+      if (child.exitCode !== null) throw new Error(`Checkpoint child exited ${child.exitCode}: ${output}`);
+      return output.includes("OUTBOX_COMMITTED_BEFORE_SEND");
+    }, "Listing/outbox commit checkpoint");
+    child.kill("SIGKILL");
+    await waitForChildExit(child, 5_000);
+    assert((telegramDeliveries.get("100008") ?? 0) === 0, "Telegram sent before crash checkpoint");
+    const committed = await pipelineRow("100008");
+    assert(committed?.decision === "DISPATCHED" && committed.notificationStatus === "PENDING", "Missing committed delivery owner");
+    const sourceRequests = olxRequests.get("100008") ?? 0;
+    await runChild("--probe-outbox-restart", true);
+    await assertSent("100008");
+    assert((telegramDeliveries.get("100008") ?? 0) === 1, "Crash/restart delivery must occur exactly once in this unambiguous scenario");
+    assert((olxRequests.get("100008") ?? 0) === sourceRequests, "Recovery unexpectedly fetched source ID again");
+    assert(await reconcileOrphanDeliveryIntents(envChatId(), 500) === 0, "Reconciler should be idempotent on committed outbox");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
 }
 
@@ -778,7 +867,7 @@ async function runChild(mode: string, expectedSuccess: boolean): Promise<void> {
   if (expectedSuccess && (exit.timedOut || exit.code !== 0)) {
     throw new Error(`${mode} failed: ${Buffer.concat(output).toString("utf8").trim()}`);
   }
-  progress(`${mode}: ${exit.timedOut ? "TIMED_OUT_AND_TERMINATED" : `FAILED_${exit.code}`} ${Buffer.concat(output).toString("utf8").trim()}`);
+  progress(`${mode}: ${exit.timedOut ? "TIMED_OUT_AND_TERMINATED" : `${expectedSuccess ? "PASS" : "FAILED"}_${exit.code}`} ${Buffer.concat(output).toString("utf8").trim()}`);
 }
 
 async function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<{ code: number; timedOut: boolean }> {

@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   listingFindFirst: vi.fn(),
   listingMatchCreateMany: vi.fn(),
   listingUpdateMany: vi.fn(),
+  notificationUpsert: vi.fn(),
   transaction: vi.fn(),
   matchFiltersDetailed: vi.fn(),
   findStrongDuplicate: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("../packages/db/src/index.js", () => ({
       findFirst: mocks.listingFindFirst,
     },
     listingMatch: { createMany: mocks.listingMatchCreateMany },
+    telegramNotification: { upsert: mocks.notificationUpsert },
     $transaction: mocks.transaction,
   },
 }));
@@ -66,7 +68,7 @@ vi.mock("../apps/worker/src/modules/observation-journal.js", () => ({
   markObservationOutcome: mocks.markObservationOutcome,
 }));
 
-import { processListingDetected } from "../apps/worker/src/processors/listing-detected.js";
+import { configureListingCommittedHookForIntegrationTest, processListingDetected } from "../apps/worker/src/processors/listing-detected.js";
 
 const filter = {
   id: "filter-1",
@@ -96,6 +98,28 @@ function matchedEvaluation(matched: Filter[] = [filter]) {
 }
 
 describe("listing.detected glue invariants", () => {
+  it("restricts the committed checkpoint hook to the isolated integration stand", async () => {
+    expect(() => configureListingCommittedHookForIntegrationTest(async () => {})).toThrow(/restricted/);
+    vi.stubEnv("AMB_PIPELINE_INTEGRATION_TEST", "1");
+    const hook = vi.fn(async () => {});
+    try {
+      configureListingCommittedHookForIntegrationTest(hook);
+      await processListingDetected({ listing });
+      expect(hook).toHaveBeenCalledOnce();
+      expect(hook.mock.invocationCallOrder[0]).toBeLessThan(mocks.sendListingLink.mock.invocationCallOrder[0]!);
+    } finally {
+      configureListingCommittedHookForIntegrationTest(null);
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("atomically stages a flash intent instead of creating a competing card intent", async () => {
+    await processListingDetected({ listing, flashBundleId: "flash-1" });
+    expect(mocks.listingCreate).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      telegramNotifications: { create: expect.objectContaining({ status: "FLASH_PENDING", flashBundleId: "flash-1" }) },
+    }) }));
+    expect(mocks.sendListingLink).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.filterFindMany.mockResolvedValue([filter]);
@@ -109,6 +133,7 @@ describe("listing.detected glue invariants", () => {
     mocks.listingFindFirst.mockResolvedValue(null);
     mocks.listingMatchCreateMany.mockResolvedValue({ count: 1 });
     mocks.listingUpdateMany.mockResolvedValue({ count: 1 });
+    mocks.notificationUpsert.mockResolvedValue({ id: "intent-1" });
     mocks.transaction.mockImplementation(async (operations: unknown[]) => Promise.all(operations));
     mocks.sendListingLink.mockResolvedValue(undefined);
     mocks.stageListingForFlash.mockResolvedValue(true);
@@ -176,6 +201,12 @@ describe("listing.detected glue invariants", () => {
       matchedFilterIds: ["filter-1"],
     });
     expect(order).toEqual(["listing", "outcome", "telegram"]);
+    expect(mocks.listingCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        matches: { create: [{ filterId: "filter-1" }] },
+        telegramNotifications: { create: expect.objectContaining({ status: "PENDING" }) },
+      }),
+    }));
     expect(mocks.enqueue).toHaveBeenCalledWith("listing.enrich", "enrich", { listingId: "listing-1" });
   });
 
@@ -189,6 +220,7 @@ describe("listing.detected glue invariants", () => {
       listingId: "listing-1",
     });
     expect(mocks.sendListingLink).not.toHaveBeenCalled();
+    expect(mocks.listingCreate.mock.calls[0]?.[0].data.telegramNotifications).toBeUndefined();
   });
 
   it("refreshes a strong duplicate and relies on the receipt-aware first notification path", async () => {

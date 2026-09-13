@@ -223,6 +223,17 @@ async function processClaimedListing(
     matches: {
       create: matched.map((f) => ({ filterId: f.id })),
     },
+    // Prisma nested writes commit listing, matches and outbox together. An
+    // interrupted inline/flash send must not depend on redis or source replay.
+    ...(!shadowOnly ? {
+      telegramNotifications: {
+        create: {
+          chatId: env.TELEGRAM_CHAT_ID || "not-configured",
+          status: job.flashBundleId ? "FLASH_PENDING" as const : "PENDING" as const,
+          flashBundleId: job.flashBundleId ?? null,
+        },
+      },
+    } : {}),
   } satisfies Prisma.ListingCreateInput;
 
   let saved;
@@ -282,6 +293,7 @@ async function processClaimedListing(
     decision: "DISPATCHED",
     listingId: saved.id,
   });
+  if (integrationListingCommittedHook) await integrationListingCommittedHook();
   const flashStaged = job.flashBundleId
     ? await stageListingForFlash(saved.id, job.flashBundleId, snapshot)
     : false;
@@ -348,7 +360,22 @@ async function authorizeExistingNotification(
       where: { id: listingId, notificationMode: "SHADOW" },
       data: { notificationMode: "LIVE", provisionalReasons },
     }),
+    prisma.telegramNotification.upsert({
+      where: { listingId },
+      create: { listingId, chatId: env.TELEGRAM_CHAT_ID || "not-configured", status: "PENDING" },
+      update: {},
+    }),
   ]);
+}
+
+let integrationListingCommittedHook: (() => Promise<void>) | null = null;
+
+/** Only the isolated loopback acceptance stand can inject a process pause. */
+export function configureListingCommittedHookForIntegrationTest(hook: (() => Promise<void>) | null): void {
+  if (process.env.AMB_PIPELINE_INTEGRATION_TEST !== "1") {
+    throw new Error("Listing checkpoint hook is restricted to pipeline integration tests");
+  }
+  integrationListingCommittedHook = hook;
 }
 
 async function loadEnabledFilters(filterIds: string[]): Promise<Filter[]> {
