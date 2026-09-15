@@ -10,6 +10,7 @@ import {
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const MINIMUM_RETRY_DELAY_MS = 15 * 60 * 1000;
+const RATE_LIMIT_RETRY_DELAY_MS = 30 * 60 * 1000;
 
 export type ListingRetentionSummary = {
   selected: number;
@@ -18,6 +19,7 @@ export type ListingRetentionSummary = {
   telegramCleared: number;
   legacyLocalOnly: number;
   deferred: number;
+  deferredReasons: Record<string, number>;
   skipped: number;
 };
 
@@ -32,16 +34,51 @@ export function listingRetentionCutoffs(
   };
 }
 
-function cleanupRetryBefore(now: Date): Date {
-  return new Date(now.getTime() - Math.max(MINIMUM_RETRY_DELAY_MS, env.LISTING_CLEANUP_INTERVAL_MS));
+export function cleanupRetryBefore(now: Date, errorCode?: string | null): Date {
+  const errorDelay = errorCode === "TELEGRAM_RATE_LIMITED"
+    ? RATE_LIMIT_RETRY_DELAY_MS
+    : MINIMUM_RETRY_DELAY_MS;
+  return new Date(now.getTime() - Math.max(errorDelay, env.LISTING_CLEANUP_INTERVAL_MS));
+}
+
+/**
+ * Never-attempted work is selected first. Retried work becomes eligible only
+ * after its class-specific backoff, then sorts behind untouched rows by the
+ * oldest attempt timestamp. This is a durable fair cursor without a separate
+ * process-local offset that would be lost on restart.
+ */
+export function cleanupClaimAvailableWhere(now: Date): Prisma.TelegramNotificationWhereInput {
+  return {
+    OR: [
+      { cleanupAttemptedAt: null },
+      {
+        lastErrorCode: "TELEGRAM_RATE_LIMITED",
+        cleanupAttemptedAt: { lte: cleanupRetryBefore(now, "TELEGRAM_RATE_LIMITED") },
+      },
+      {
+        OR: [
+          { lastErrorCode: null },
+          { lastErrorCode: { not: "TELEGRAM_RATE_LIMITED" } },
+        ],
+        cleanupAttemptedAt: { lte: cleanupRetryBefore(now) },
+      },
+    ],
+  };
+}
+
+export function retentionCandidateOrder(): Prisma.TelegramNotificationOrderByWithRelationInput[] {
+  return [
+    { cleanupAttemptedAt: { sort: "asc", nulls: "first" } },
+    { deleteAfter: { sort: "asc", nulls: "last" } },
+    { retainUntil: { sort: "asc", nulls: "last" } },
+    { sentAt: { sort: "asc", nulls: "last" } },
+    { id: "asc" },
+  ];
 }
 
 function dueListingWhere(now: Date): Prisma.ListingWhereInput {
   const { regular } = listingRetentionCutoffs(now);
-  const retryBefore = cleanupRetryBefore(now);
-  const claimAvailable: Prisma.TelegramNotificationWhereInput = {
-    OR: [{ cleanupAttemptedAt: null }, { cleanupAttemptedAt: { lte: retryBefore } }],
-  };
+  const claimAvailable = cleanupClaimAvailableWhere(now);
 
   return {
     OR: [
@@ -190,54 +227,54 @@ export async function runListingRetentionMaintenance(
   now = new Date(),
   batchSize = env.LISTING_CLEANUP_BATCH_SIZE,
 ): Promise<ListingRetentionSummary> {
-  const candidates = await prisma.listing.findMany({
-    where: dueListingWhere(now),
-    orderBy: [{ firstSeenAt: "asc" }, { id: "asc" }],
+  const { regular } = listingRetentionCutoffs(now);
+  const notifications = await prisma.telegramNotification.findMany({
+    where: {
+      AND: [cleanupClaimAvailableWhere(now), notificationCleanupEligibility(now, regular)],
+    },
+    orderBy: retentionCandidateOrder(),
     take: Math.max(1, batchSize),
     select: {
       id: true,
-      source: true,
-      externalId: true,
-      url: true,
-      canonicalUrl: true,
-      firstSeenAt: true,
-      discoveryLane: true,
-      telegramNotifications: {
-        orderBy: { createdAt: "desc" },
-        take: 1,
+      chatId: true,
+      messageId: true,
+      status: true,
+      sentAt: true,
+      deleteAfter: true,
+      favoritedAt: true,
+      retainUntil: true,
+      retentionPolicyAppliedAt: true,
+      cleanupAttemptedAt: true,
+      lastErrorCode: true,
+      listing: {
         select: {
           id: true,
-          chatId: true,
-          messageId: true,
-          status: true,
-          sentAt: true,
-          deleteAfter: true,
-          favoritedAt: true,
-          retainUntil: true,
-          retentionPolicyAppliedAt: true,
-          cleanupAttemptedAt: true,
+          source: true,
+          externalId: true,
+          url: true,
+          canonicalUrl: true,
+          firstSeenAt: true,
+          discoveryLane: true,
         },
       },
     },
   });
 
   const summary: ListingRetentionSummary = {
-    selected: candidates.length,
+    selected: notifications.length,
     deletedListings: 0,
     detachedObservations: 0,
     telegramCleared: 0,
     legacyLocalOnly: 0,
     deferred: 0,
+    deferredReasons: {},
     skipped: 0,
   };
-  const retryBefore = cleanupRetryBefore(now);
-  const { regular } = listingRetentionCutoffs(now);
 
-  for (const candidate of candidates) {
-    const notification = candidate.telegramNotifications[0];
-    if (!notification) continue;
+  for (const notification of notifications) {
+    const candidate = notification.listing;
 
-    const claim = await claimListingRetention(candidate.id, notification.id, now, retryBefore, regular);
+    const claim = await claimListingRetention(candidate.id, notification.id, now, regular);
     if (!claim) {
       summary.skipped += 1;
       continue;
@@ -260,6 +297,8 @@ export async function runListingRetentionMaintenance(
         },
       });
       summary.deferred += 1;
+      summary.deferredReasons[telegramResult.errorCode] =
+        (summary.deferredReasons[telegramResult.errorCode] ?? 0) + 1;
       continue;
     }
 
@@ -272,9 +311,13 @@ export async function runListingRetentionMaintenance(
   }
 
   if (summary.deletedListings || summary.deferred) {
+    const reasonHistogram = Object.entries(summary.deferredReasons)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([code, count]) => `${code}=${count}`)
+      .join(", ") || "none";
     await log.info(
       "listing-retention",
-      `Selected ${summary.selected}; deleted ${summary.deletedListings} listings, cleared ${summary.telegramCleared} Telegram messages, preserved ${summary.detachedObservations} dedupe tombstones, locally purged ${summary.legacyLocalOnly} legacy rows, deferred ${summary.deferred}`,
+      `Selected ${summary.selected}; deleted ${summary.deletedListings} listings, cleared ${summary.telegramCleared} Telegram messages, preserved ${summary.detachedObservations} dedupe tombstones, locally purged ${summary.legacyLocalOnly} legacy rows, deferred ${summary.deferred}; reasons ${reasonHistogram}`,
     );
   }
   return summary;
@@ -294,7 +337,6 @@ async function claimListingRetention(
   listingId: string,
   notificationId: string,
   now: Date,
-  retryBefore: Date,
   regular: Date,
 ): Promise<{
   id: string;
@@ -318,10 +360,14 @@ async function claimListingRetention(
         retainUntil: true,
         retentionPolicyAppliedAt: true,
         cleanupAttemptedAt: true,
+        lastErrorCode: true,
       },
     });
     if (!notification) return null;
-    if (notification.cleanupAttemptedAt && notification.cleanupAttemptedAt > retryBefore) return null;
+    if (
+      notification.cleanupAttemptedAt
+      && notification.cleanupAttemptedAt > cleanupRetryBefore(now, notification.lastErrorCode)
+    ) return null;
     if (!notificationCleanupDue(notification, now, regular)) return null;
 
     await tx.telegramNotification.update({

@@ -6,8 +6,11 @@ import {
   telegramListingKeyboard,
 } from "../packages/shared/src/index.js";
 import {
+  cleanupClaimAvailableWhere,
+  cleanupRetryBefore,
   listingRetentionCutoffs,
   notificationStillDue,
+  retentionCandidateOrder,
 } from "../apps/worker/src/modules/listing-retention.js";
 import {
   isTelegramDeleteTooOldError,
@@ -48,6 +51,34 @@ describe("Telegram listing retention", () => {
       regular: new Date("2026-07-22T00:00:00.000Z"),
       favorite: new Date("2026-07-12T12:00:00.000Z"),
     });
+  });
+
+  it("backs rate-limited cleanup off longer than ordinary failures", () => {
+    const now = new Date("2026-09-15T12:00:00.000Z");
+    expect(cleanupRetryBefore(now)).toEqual(new Date("2026-09-15T11:45:00.000Z"));
+    expect(cleanupRetryBefore(now, "TELEGRAM_DELETE_FAILED")).toEqual(new Date("2026-09-15T11:45:00.000Z"));
+    expect(cleanupRetryBefore(now, "TELEGRAM_RATE_LIMITED")).toEqual(new Date("2026-09-15T11:30:00.000Z"));
+  });
+
+  it("uses a durable fair cursor that drains untouched rows before retries", () => {
+    const now = new Date("2026-09-15T12:00:00.000Z");
+    expect(cleanupClaimAvailableWhere(now)).toMatchObject({
+      OR: [
+        { cleanupAttemptedAt: null },
+        { lastErrorCode: "TELEGRAM_RATE_LIMITED", cleanupAttemptedAt: { lte: new Date("2026-09-15T11:30:00.000Z") } },
+        {
+          OR: [{ lastErrorCode: null }, { lastErrorCode: { not: "TELEGRAM_RATE_LIMITED" } }],
+          cleanupAttemptedAt: { lte: new Date("2026-09-15T11:45:00.000Z") },
+        },
+      ],
+    });
+    expect(retentionCandidateOrder()).toEqual([
+      { cleanupAttemptedAt: { sort: "asc", nulls: "first" } },
+      { deleteAfter: { sort: "asc", nulls: "last" } },
+      { retainUntil: { sort: "asc", nulls: "last" } },
+      { sentAt: { sort: "asc", nulls: "last" } },
+      { id: "asc" },
+    ]);
   });
 
   it("recognizes Telegram's expected cleanup outcomes", () => {
