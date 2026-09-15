@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import ts from 'typescript';
 
 export const COLLECTOR_COVERAGE_PATH = 'apps/worker/src/processors/collector-run.ts';
+export const CRITICAL_COVERAGE_GATES = Object.freeze({
+  [COLLECTOR_COVERAGE_PATH]: Object.freeze({ statements: 80, branches: 80, functions: 85, lines: 80 }),
+  'apps/worker/src/modules/delivery-outbox.ts': Object.freeze({ statements: 90, branches: 90, functions: 90, lines: 90 }),
+  'apps/worker/src/modules/listing-retention.ts': Object.freeze({ statements: 90, branches: 90, functions: 90, lines: 90 }),
+});
 
 function property(object, name) {
   assert.ok(object && ts.isObjectLiteralExpression(object), `Static object required for ${name}`);
@@ -41,14 +46,19 @@ export function validateCollectorCoveragePolicy(source) {
     && expression.expression.text === 'defineConfig' && expression.arguments.length === 1,
   'Static defineConfig object required');
   const coverage = property(property(expression.arguments[0], 'test'), 'coverage');
-  const gate = property(property(coverage, 'thresholds'), COLLECTOR_COVERAGE_PATH);
-  for (const [name, minimum] of Object.entries({ statements: 80, branches: 80, functions: 85, lines: 80 })) {
-    const value = property(gate, name);
-    assert.ok(ts.isNumericLiteral(value) && Number(value.text) >= minimum,
-      `collector-run.ts ${name} threshold must be >= ${minimum}`);
+  const thresholds = property(coverage, 'thresholds');
+  const include = strings(property(coverage, 'include'));
+  const exclude = strings(property(coverage, 'exclude'));
+  for (const [path, minimums] of Object.entries(CRITICAL_COVERAGE_GATES)) {
+    const gate = property(thresholds, path);
+    for (const [name, minimum] of Object.entries(minimums)) {
+      const value = property(gate, name);
+      assert.ok(ts.isNumericLiteral(value) && Number(value.text) >= minimum,
+        `${path} ${name} threshold must be >= ${minimum}`);
+    }
+    assert.ok(include.some((pattern) => matches(pattern, path)),
+      `Coverage include must cover ${path}`);
+    assert.ok(!exclude.some((pattern) => matches(pattern, path)),
+      `Coverage exclude must not remove ${path}`);
   }
-  assert.ok(strings(property(coverage, 'include')).some((pattern) => matches(pattern, COLLECTOR_COVERAGE_PATH)),
-    'Coverage include must cover collector-run.ts');
-  assert.ok(!strings(property(coverage, 'exclude')).some((pattern) => matches(pattern, COLLECTOR_COVERAGE_PATH)),
-    'Coverage exclude must not remove collector-run.ts');
 }

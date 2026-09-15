@@ -39,6 +39,18 @@ export default defineConfig({
           functions: 85,
           lines: 80,
         },
+        "apps/worker/src/modules/delivery-outbox.ts": {
+          statements: 90,
+          branches: 90,
+          functions: 90,
+          lines: 90,
+        },
+        "apps/worker/src/modules/listing-retention.ts": {
+          statements: 90,
+          branches: 90,
+          functions: 90,
+          lines: 90,
+        },
         "apps/worker/src/processors/listing-detected.ts": {
           statements: 70,
           branches: 85,

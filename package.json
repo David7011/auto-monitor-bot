@@ -77,6 +77,7 @@
     "test": "vitest run",
     "test:related": "vitest related --run",
     "test:coverage": "vitest run --coverage",
+    "test:critical-coverage": "vitest run tests/delivery-outbox.test.ts tests/listing-retention-runtime.test.ts tests/telegram-listing-retention.test.ts --coverage --coverage.include=apps/worker/src/modules/delivery-outbox.ts --coverage.include=apps/worker/src/modules/listing-retention.ts",
     "test:powershell": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/validate-powershell.ps1",
     "test:backup-crypto": "node scripts/test-backup-crypto.mjs",
     "test:ci-policy": "node scripts/validate-ci-policy.mjs",

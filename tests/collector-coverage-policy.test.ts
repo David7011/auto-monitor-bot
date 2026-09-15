@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { validateCollectorCoveragePolicy } from '../scripts/collector-coverage-policy.mjs';
+import { CRITICAL_COVERAGE_GATES, validateCollectorCoveragePolicy } from '../scripts/collector-coverage-policy.mjs';
 
 const source = readFileSync(new URL('../vitest.config.ts', import.meta.url), 'utf8');
 describe('collector coverage CI policy', () => {
@@ -18,6 +18,16 @@ describe('collector coverage CI policy', () => {
     expect(() => validateCollectorCoveragePolicy(source.replace('exclude: [', 'exclude: ["**/collector-run.ts",'))).toThrow();
     expect(() => validateCollectorCoveragePolicy(source.replace('"apps/worker/src/**/*.ts",', ''))).toThrow();
   });
+  it.each(Object.entries(CRITICAL_COVERAGE_GATES).filter(([path]) => path.includes('/modules/')))(
+    'rejects a missing or weakened critical module gate for %s', (path) => {
+      const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const gate = new RegExp(`"${escaped}":\\s*\\{[^}]+\\},`);
+      expect(() => validateCollectorCoveragePolicy(source.replace(gate, ''))).toThrow();
+      expect(() => validateCollectorCoveragePolicy(
+        source.replace(gate, (block) => block.replace('branches: 90', 'branches: 89')),
+      )).toThrow();
+    },
+  );
   it('ignores comments as policy evidence', () => {
     expect(() => validateCollectorCoveragePolicy('// ' + source.replace(/\n/g, '\n// '))).toThrow();
   });

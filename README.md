@@ -292,9 +292,9 @@ OLX collector сначала одной batch-операцией сохраня�
 
 `check` и обычный `build` собирают TypeScript и Next.js в изолированные временные каталоги, не меняя запущенные `dist`/`.next`. Рабочие артефакты обновляет только `build:deploy` во время контролируемого старта. Локальный E2E использует отдельный dashboard на `127.0.0.1:3101` и `.next-e2e`, поэтому не останавливает production-сайт на порту 3001.
 
-`check` также запускает V8 coverage для API/worker/shared и применяет минимальные пороги statements/lines 40%, branches 70%, functions 50%. Порог намеренно фиксирует текущий доказанный baseline и не позволяет покрытию тихо ухудшаться.
+`check` также запускает V8 coverage для API/worker/shared и применяет минимальные глобальные пороги statements/lines 40%, branches 70%, functions 50%. Глобальный baseline не заменяет targeted gates: delivery outbox и listing retention обязаны сохранять не менее 90% statements/branches/functions/lines. Быстрая локальная проверка этих critical modules: `.\amb.cmd test:critical-coverage`.
 
-CI policy дополнительно разбирает `vitest.config.ts` и требует точный file gate `collector-run.ts` не ниже statements/branches/functions/lines `80/80/85/80`, совпадающий coverage include и отсутствие matching exclude. Vitest остаётся единственным источником измеренного coverage.
+CI policy дополнительно разбирает `vitest.config.ts` и защищает file gates collector-run (`80/80/85/80`), delivery outbox (`90/90/90/90`) и listing retention (`90/90/90/90`), совпадающий coverage include и отсутствие matching exclude. Vitest остаётся единственным источником измеренного coverage. Отключённый RST collector намеренно не включён в этот приоритетный gate.
 
 Диагностика:
 
