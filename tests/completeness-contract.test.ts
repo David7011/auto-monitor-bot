@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyObservationContract,
   summarizeCompletenessFacts,
+  summarizeCompletenessGroups,
 } from "../apps/worker/src/modules/completeness-contract.js";
 
 describe("zero silent internal loss contract", () => {
@@ -54,5 +55,52 @@ describe("zero silent internal loss contract", () => {
       { code: "BOUNDARY_AHEAD_OF_INCOMPLETE_OBSERVATION", identity: "OLX:3" },
     ]);
     expect(summary).toMatchObject({ impossibleCount: 1, recoverableCount: 2, ok: false });
+  });
+
+  it("separates exact totals from a truncated sample and continuity-only evidence", () => {
+    const summary = summarizeCompletenessGroups([
+      {
+        code: "KNOWN_ID_WITHOUT_OBSERVATION",
+        totalCount: 120,
+        oldestRecoverableAt: "2026-09-01T00:00:00.000Z",
+        sample: [{ identity: "OLX:anchor" }],
+      },
+      {
+        code: "STALE_REPLAYABLE_OBSERVATION",
+        totalCount: 3,
+        oldestRecoverableAt: "2026-09-02T00:00:00.000Z",
+        sample: [{ identity: "OLX:pending" }],
+      },
+    ]);
+    expect(summary).toMatchObject({
+      totalCount: 123,
+      sampleCount: 2,
+      truncated: true,
+      impossibleCount: 0,
+      recoverableCount: 123,
+      replayable: 3,
+      continuityOnly: 120,
+      oldestRecoverableAt: "2026-09-02T00:00:00.000Z",
+      ok: true,
+      fullyRecoverable: false,
+      clean: false,
+    });
+    expect(summary.findings).toEqual([
+      expect.objectContaining({ identity: "OLX:anchor", recovery: "CONTINUITY_ONLY" }),
+      expect.objectContaining({ identity: "OLX:pending", recovery: "REPLAYABLE" }),
+    ]);
+  });
+
+  it("reports fullyRecoverable only when every non-clean finding is replayable", () => {
+    expect(summarizeCompletenessGroups([{
+      code: "STALE_REPLAYABLE_OBSERVATION",
+      totalCount: 1,
+      sample: [{ identity: "OLX:pending" }],
+    }])).toMatchObject({ ok: true, fullyRecoverable: true, replayable: 1, continuityOnly: 0 });
+    expect(summarizeCompletenessGroups([{
+      code: "LISTING_WITHOUT_OBSERVATION",
+      totalCount: 1,
+      sample: [{ identity: "OLX:broken" }],
+    }])).toMatchObject({ ok: false, fullyRecoverable: false, impossibleCount: 1 });
   });
 });

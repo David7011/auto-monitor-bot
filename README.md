@@ -264,7 +264,7 @@ Telegram card/flash send lease сохраняет владельца по ном
 .\amb.cmd metrics:hot-path
 ```
 
-`completeness:check` — read-only consistency checker. Он классифицирует durable observation как terminal, replayable, recovery-pending либо impossible и завершает команду с ошибкой при невозможном состоянии. Автоматический repair намеренно отсутствует; параметр `--apply` отклоняется.
+`completeness:check` — read-only consistency checker, выполняемый в согласованном PostgreSQL `REPEATABLE READ` snapshot. Он классифицирует durable observation как terminal, replayable, recovery-pending либо impossible и завершает команду с ошибкой при невозможном состоянии. `totalCount` — точное число всех находок, `sampleCount` — число выведенных примеров, а `truncated` явно показывает усечение с заданным `sampleLimitPerCode`. `ok` означает отсутствие impossible-состояний; более строгий `fullyRecoverable` требует, чтобы не было ни impossible, ни `continuityOnly` находок. `oldestRecoverableAt` относится только к действительно replayable journal rows: у legacy continuity anchors нет отдельного достоверного timestamp. Автоматический repair намеренно отсутствует; параметр `--apply` отклоняется.
 
 OLX collector сначала одной batch-операцией сохраняет весь нормализованный burst в PostgreSQL, и только затем начинает Redis claim, filtering и Telegram dispatch. Поэтому авария на середине burst оставляет durable replayable tail. BullMQ job ID остаётся только координацией: durable `coverageRecoveryPending` и `CoverageRecoveryWindow` являются источником истины, а обычный background scheduler повторно ставит recovery, если immediate job был коалесцирован с уже активным.
 

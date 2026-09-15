@@ -1,10 +1,15 @@
-import { closeDatabase, prisma } from "@amb/db";
+import { closeDatabase, Prisma, prisma } from "@amb/db";
 import {
-  summarizeCompletenessFacts,
+  summarizeCompletenessGroups,
   type CompletenessIssueCode,
 } from "../modules/completeness-contract.js";
 
-type FactRow = { identity: string; detail: string | null };
+type FactRow = {
+  identity: string;
+  detail: string | null;
+  totalCount: number;
+  oldestRecoverableAt: Date | null;
+};
 
 const staleHours = boundedInteger(argumentValue("--stale-hours"), 1, 24 * 30, 24);
 const sampleLimit = boundedInteger(argumentValue("--sample-limit"), 1, 500, 50);
@@ -15,19 +20,30 @@ if (process.argv.includes("--apply")) {
   process.exitCode = 2;
 } else {
   try {
-    const groups = await collectFacts(staleBefore, sampleLimit);
-    const facts = groups.flatMap(({ code, rows }) => rows.map((row) => ({
+    const groups = await prisma.$transaction(
+      (transaction) => collectFacts(transaction, staleBefore, sampleLimit),
+      { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 },
+    );
+    const summary = summarizeCompletenessGroups(groups.map(({ code, rows }) => ({
       code,
-      identity: row.identity,
-      detail: row.detail ?? undefined,
+      totalCount: rows[0]?.totalCount ?? 0,
+      oldestRecoverableAt: rows[0]?.oldestRecoverableAt ?? null,
+      sample: rows.map((row) => ({ identity: row.identity, detail: row.detail ?? undefined })),
     })));
-    const summary = summarizeCompletenessFacts(facts);
     console.log(JSON.stringify({
       checkedAt: new Date().toISOString(),
       mode: "READ_ONLY",
       staleHours,
       sampleLimit,
+      sampleLimitPerCode: sampleLimit,
+      totalCount: summary.totalCount,
+      sampleCount: summary.sampleCount,
+      truncated: summary.truncated,
+      oldestRecoverableAt: summary.oldestRecoverableAt,
+      replayable: summary.replayable,
+      continuityOnly: summary.continuityOnly,
       ok: summary.ok,
+      fullyRecoverable: summary.fullyRecoverable,
       impossibleCount: summary.impossibleCount,
       recoverableCount: summary.recoverableCount,
       findings: summary.findings,
@@ -38,11 +54,17 @@ if (process.argv.includes("--apply")) {
   }
 }
 
-async function collectFacts(stale: Date, limit: number): Promise<Array<{ code: CompletenessIssueCode; rows: FactRow[] }>> {
+async function collectFacts(
+  database: Prisma.TransactionClient,
+  stale: Date,
+  limit: number,
+): Promise<Array<{ code: CompletenessIssueCode; rows: FactRow[] }>> {
   return Promise.all([
-    fact("KNOWN_ID_WITHOUT_OBSERVATION", prisma.$queryRaw<FactRow[]>`
+    fact("KNOWN_ID_WITHOUT_OBSERVATION", database.$queryRaw<FactRow[]>`
       SELECT concat(state.source::text, ':', state.fingerprint, ':', ids."externalId") AS identity,
-             'legacy/current continuity anchor has no journal row; retain as recovery evidence' AS detail
+             'legacy/current continuity anchor has no journal row; retain as recovery evidence' AS detail,
+             count(*) OVER ()::int AS "totalCount",
+             NULL::timestamp AS "oldestRecoverableAt"
       FROM source_search_states state
       CROSS JOIN LATERAL unnest(state."knownExternalIds") AS ids("externalId")
       LEFT JOIN source_seen_listings seen
@@ -51,9 +73,10 @@ async function collectFacts(stale: Date, limit: number): Promise<Array<{ code: C
       ORDER BY state."updatedAt" DESC
       LIMIT ${limit}
     `),
-    fact("LISTING_WITHOUT_OBSERVATION", prisma.$queryRaw<FactRow[]>`
+    fact("LISTING_WITHOUT_OBSERVATION", database.$queryRaw<FactRow[]>`
       SELECT concat(listing.source::text, ':', listing."externalId") AS identity,
-             concat('listingId=', listing.id) AS detail
+             concat('listingId=', listing.id) AS detail,
+             count(*) OVER ()::int AS "totalCount", NULL::timestamp AS "oldestRecoverableAt"
       FROM listings listing
       LEFT JOIN source_seen_listings seen
         ON seen.source = listing.source AND seen."externalId" = listing."externalId"
@@ -61,17 +84,19 @@ async function collectFacts(stale: Date, limit: number): Promise<Array<{ code: C
       ORDER BY listing."firstSeenAt" DESC
       LIMIT ${limit}
     `),
-    fact("TELEGRAM_WITHOUT_LISTING", prisma.$queryRaw<FactRow[]>`
+    fact("TELEGRAM_WITHOUT_LISTING", database.$queryRaw<FactRow[]>`
       SELECT notification.id AS identity, concat('listingId=', notification."listingId") AS detail
+             , count(*) OVER ()::int AS "totalCount", NULL::timestamp AS "oldestRecoverableAt"
       FROM telegram_notifications notification
       LEFT JOIN listings listing ON listing.id = notification."listingId"
       WHERE listing.id IS NULL
       ORDER BY notification."createdAt" DESC
       LIMIT ${limit}
     `),
-    fact("OBSERVATION_DANGLING_LISTING", prisma.$queryRaw<FactRow[]>`
+    fact("OBSERVATION_DANGLING_LISTING", database.$queryRaw<FactRow[]>`
       SELECT concat(seen.source::text, ':', seen."externalId") AS identity,
-             concat('listingId=', seen."listingId") AS detail
+             concat('listingId=', seen."listingId") AS detail,
+             count(*) OVER ()::int AS "totalCount", NULL::timestamp AS "oldestRecoverableAt"
       FROM source_seen_listings seen
       LEFT JOIN listings listing ON listing.id = seen."listingId"
       WHERE seen."listingId" IS NOT NULL AND listing.id IS NULL
@@ -80,9 +105,10 @@ async function collectFacts(stale: Date, limit: number): Promise<Array<{ code: C
       ORDER BY seen."lastSeenAt" DESC
       LIMIT ${limit}
     `),
-    fact("NOTIFIED_WITHOUT_ACCEPTED_NOTIFICATION", prisma.$queryRaw<FactRow[]>`
+    fact("NOTIFIED_WITHOUT_ACCEPTED_NOTIFICATION", database.$queryRaw<FactRow[]>`
       SELECT concat(seen.source::text, ':', seen."externalId") AS identity,
-             concat('listingId=', coalesce(seen."listingId", 'NULL'), '; notification=', coalesce(notification.status::text, 'NULL')) AS detail
+             concat('listingId=', coalesce(seen."listingId", 'NULL'), '; notification=', coalesce(notification.status::text, 'NULL')) AS detail,
+             count(*) OVER ()::int AS "totalCount", NULL::timestamp AS "oldestRecoverableAt"
       FROM source_seen_listings seen
       LEFT JOIN telegram_notifications notification ON notification."listingId" = seen."listingId"
       WHERE seen.decision = 'NOTIFIED'::"ObservationDecision"
@@ -92,9 +118,10 @@ async function collectFacts(stale: Date, limit: number): Promise<Array<{ code: C
       ORDER BY seen."lastSeenAt" DESC
       LIMIT ${limit}
     `),
-    fact("DISPATCH_WITHOUT_NOTIFICATION_STATE", prisma.$queryRaw<FactRow[]>`
+    fact("DISPATCH_WITHOUT_NOTIFICATION_STATE", database.$queryRaw<FactRow[]>`
       SELECT concat(seen.source::text, ':', seen."externalId") AS identity,
-             concat('decision=', seen.decision::text, '; listingId=', coalesce(seen."listingId", 'NULL')) AS detail
+             concat('decision=', seen.decision::text, '; listingId=', coalesce(seen."listingId", 'NULL')) AS detail,
+             count(*) OVER ()::int AS "totalCount", NULL::timestamp AS "oldestRecoverableAt"
       FROM source_seen_listings seen
       LEFT JOIN listings listing ON listing.id = seen."listingId"
       LEFT JOIN telegram_notifications notification ON notification."listingId" = seen."listingId"
@@ -106,9 +133,11 @@ async function collectFacts(stale: Date, limit: number): Promise<Array<{ code: C
       ORDER BY seen."dispatchAttemptedAt" ASC
       LIMIT ${limit}
     `),
-    fact("STALE_REPLAYABLE_OBSERVATION", prisma.$queryRaw<FactRow[]>`
+    fact("STALE_REPLAYABLE_OBSERVATION", database.$queryRaw<FactRow[]>`
       SELECT concat(seen.source::text, ':', seen."externalId") AS identity,
-             concat('decision=', seen.decision::text, '; updatedAt=', seen."updatedAt"::text) AS detail
+             concat('decision=', seen.decision::text, '; updatedAt=', seen."updatedAt"::text) AS detail,
+             count(*) OVER ()::int AS "totalCount",
+             min(seen."updatedAt") OVER () AS "oldestRecoverableAt"
       FROM source_seen_listings seen
       WHERE seen.decision IN ('PENDING', 'FAILED', 'MATCHED', 'DISPATCHED')
         AND seen."updatedAt" < ${stale}
@@ -118,20 +147,27 @@ async function collectFacts(stale: Date, limit: number): Promise<Array<{ code: C
       ORDER BY seen."updatedAt" ASC
       LIMIT ${limit}
     `),
-    fact("BOUNDARY_AHEAD_OF_INCOMPLETE_OBSERVATION", prisma.$queryRaw<FactRow[]>`
-      SELECT DISTINCT concat(state.source::text, ':', state.fingerprint, ':', seen."externalId") AS identity,
-             concat('boundary=', state."lastSuccessfulScanAt"::text, '; decision=', seen.decision::text) AS detail
-      FROM source_search_states state
-      JOIN source_seen_listings seen ON seen.source = state.source
-      WHERE state."lastSuccessfulScanAt" IS NOT NULL
-        AND seen."journalPersistedAt" <= state."lastSuccessfulScanAt"
-        AND seen.decision IN ('PENDING', 'FAILED')
+    fact("BOUNDARY_AHEAD_OF_INCOMPLETE_OBSERVATION", database.$queryRaw<FactRow[]>`
+      SELECT identity, detail, count(*) OVER ()::int AS "totalCount",
+             min("recoverableAt") OVER () AS "oldestRecoverableAt"
+      FROM (
+        SELECT concat(state.source::text, ':', state.fingerprint, ':', seen."externalId") AS identity,
+               concat('boundary=', state."lastSuccessfulScanAt"::text, '; decision=', seen.decision::text) AS detail,
+               min(seen."journalPersistedAt") AS "recoverableAt"
+        FROM source_search_states state
+        JOIN source_seen_listings seen ON seen.source = state.source
+        WHERE state."lastSuccessfulScanAt" IS NOT NULL
+          AND seen."journalPersistedAt" <= state."lastSuccessfulScanAt"
+          AND seen.decision IN ('PENDING', 'FAILED')
+        GROUP BY state.source, state.fingerprint, seen."externalId", state."lastSuccessfulScanAt", seen.decision
+      ) findings
       ORDER BY identity
       LIMIT ${limit}
     `),
-    fact("PENDING_STATE_WITHOUT_WINDOW", prisma.$queryRaw<FactRow[]>`
+    fact("PENDING_STATE_WITHOUT_WINDOW", database.$queryRaw<FactRow[]>`
       SELECT concat(state.source::text, ':', state.fingerprint) AS identity,
-             'coverageRecoveryPending=true but no PENDING window exists' AS detail
+             'coverageRecoveryPending=true but no PENDING window exists' AS detail,
+             count(*) OVER ()::int AS "totalCount", NULL::timestamp AS "oldestRecoverableAt"
       FROM source_search_states state
       WHERE state."coverageRecoveryPending" = true
         AND NOT EXISTS (
@@ -141,18 +177,20 @@ async function collectFacts(stale: Date, limit: number): Promise<Array<{ code: C
       ORDER BY state."updatedAt" DESC
       LIMIT ${limit}
     `),
-    fact("PENDING_WINDOW_WITHOUT_STATE", prisma.$queryRaw<FactRow[]>`
+    fact("PENDING_WINDOW_WITHOUT_STATE", database.$queryRaw<FactRow[]>`
       SELECT recovery.id AS identity,
-             concat('stateId=', recovery."sourceSearchStateId") AS detail
+             concat('stateId=', recovery."sourceSearchStateId") AS detail,
+             count(*) OVER ()::int AS "totalCount", NULL::timestamp AS "oldestRecoverableAt"
       FROM coverage_recovery_windows recovery
       JOIN source_search_states state ON state.id = recovery."sourceSearchStateId"
       WHERE recovery.status = 'PENDING' AND state."coverageRecoveryPending" = false
       ORDER BY recovery."detectedAt" DESC
       LIMIT ${limit}
     `),
-    fact("VERIFIED_WITHOUT_EVIDENCE", prisma.$queryRaw<FactRow[]>`
+    fact("VERIFIED_WITHOUT_EVIDENCE", database.$queryRaw<FactRow[]>`
       SELECT recovery.id AS identity,
-             concat('method=', coalesce(recovery."verificationMethod"::text, 'NULL'), '; verifiedRunId=', coalesce(recovery."verifiedRunId", 'NULL')) AS detail
+             concat('method=', coalesce(recovery."verificationMethod"::text, 'NULL'), '; verifiedRunId=', coalesce(recovery."verifiedRunId", 'NULL')) AS detail,
+             count(*) OVER ()::int AS "totalCount", NULL::timestamp AS "oldestRecoverableAt"
       FROM coverage_recovery_windows recovery
       WHERE recovery.status = 'VERIFIED'
         AND (

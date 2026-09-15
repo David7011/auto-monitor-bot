@@ -21,6 +21,14 @@ export type CompletenessFact = {
 
 export type CompletenessFinding = CompletenessFact & {
   severity: CompletenessSeverity;
+  recovery: "REPLAYABLE" | "CONTINUITY_ONLY" | null;
+};
+
+export type CompletenessFactGroup = {
+  code: CompletenessIssueCode;
+  totalCount: number;
+  sample: readonly Omit<CompletenessFact, "code">[];
+  oldestRecoverableAt?: Date | string | null;
 };
 
 export type ObservationContractInput = {
@@ -60,10 +68,13 @@ export function classifyObservationContract(input: ObservationContractInput): Ob
 }
 
 export function classifyCompletenessFact(fact: CompletenessFact): CompletenessFinding {
-  const recoverable = fact.code === "KNOWN_ID_WITHOUT_OBSERVATION"
-    || fact.code === "STALE_REPLAYABLE_OBSERVATION"
-    || fact.code === "BOUNDARY_AHEAD_OF_INCOMPLETE_OBSERVATION";
-  return { ...fact, severity: recoverable ? "RECOVERABLE" : "IMPOSSIBLE" };
+  const recovery = fact.code === "KNOWN_ID_WITHOUT_OBSERVATION"
+    ? "CONTINUITY_ONLY" as const
+    : fact.code === "STALE_REPLAYABLE_OBSERVATION"
+      || fact.code === "BOUNDARY_AHEAD_OF_INCOMPLETE_OBSERVATION"
+      ? "REPLAYABLE" as const
+      : null;
+  return { ...fact, severity: recovery ? "RECOVERABLE" : "IMPOSSIBLE", recovery };
 }
 
 export function summarizeCompletenessFacts(facts: readonly CompletenessFact[]) {
@@ -75,5 +86,46 @@ export function summarizeCompletenessFacts(facts: readonly CompletenessFact[]) {
     recoverableCount: findings.filter((finding) => finding.severity === "RECOVERABLE").length,
     ok: impossibleCount === 0,
     clean: findings.length === 0,
+  };
+}
+
+export function summarizeCompletenessGroups(groups: readonly CompletenessFactGroup[]) {
+  const findings = groups.flatMap((group) => group.sample.map((item) => classifyCompletenessFact({
+    code: group.code,
+    ...item,
+  })));
+  let impossibleCount = 0;
+  let replayable = 0;
+  let continuityOnly = 0;
+  const oldestRecoverableTimes: number[] = [];
+
+  for (const group of groups) {
+    const classification = classifyCompletenessFact({ code: group.code, identity: "classification-probe" });
+    if (classification.recovery === "REPLAYABLE") replayable += group.totalCount;
+    else if (classification.recovery === "CONTINUITY_ONLY") continuityOnly += group.totalCount;
+    else impossibleCount += group.totalCount;
+    if (classification.recovery === "REPLAYABLE" && group.oldestRecoverableAt) {
+      const timestamp = new Date(group.oldestRecoverableAt).getTime();
+      if (Number.isFinite(timestamp)) oldestRecoverableTimes.push(timestamp);
+    }
+  }
+
+  const totalCount = groups.reduce((sum, group) => sum + group.totalCount, 0);
+  const sampleCount = findings.length;
+  return {
+    findings,
+    totalCount,
+    sampleCount,
+    truncated: sampleCount < totalCount,
+    impossibleCount,
+    recoverableCount: replayable + continuityOnly,
+    replayable,
+    continuityOnly,
+    oldestRecoverableAt: oldestRecoverableTimes.length
+      ? new Date(Math.min(...oldestRecoverableTimes)).toISOString()
+      : null,
+    ok: impossibleCount === 0,
+    fullyRecoverable: impossibleCount === 0 && continuityOnly === 0,
+    clean: totalCount === 0,
   };
 }
