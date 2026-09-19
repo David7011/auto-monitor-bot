@@ -479,11 +479,14 @@ function Set-AmbCodeRevision {
   $revision = "unknown"
   $git = Get-Command git.exe -ErrorAction SilentlyContinue
   if ($git) {
-    $resolved = @(& $git.Source -C $ProjectRoot rev-parse --verify HEAD 2>$null) |
+    # The SYSTEM task and the repository owner differ. Scope Git's trust to
+    # this exact invocation instead of changing machine-wide safe.directory.
+    $safeDirectory = "safe.directory=$($ProjectRoot.Replace('\', '/'))"
+    $resolved = @(& $git.Source -c $safeDirectory -C $ProjectRoot rev-parse --verify HEAD 2>$null) |
       Select-Object -First 1
     if ($resolved -and $resolved.ToString().Trim() -match '^[0-9a-fA-F]{40}$') {
       $revision = $resolved.ToString().Trim().ToLowerInvariant()
-      $dirty = @(& $git.Source -C $ProjectRoot status --porcelain --untracked-files=no 2>$null)
+      $dirty = @(& $git.Source -c $safeDirectory -C $ProjectRoot status --porcelain --untracked-files=no 2>$null)
       if ($dirty.Count -gt 0) { $revision = "$revision-dirty" }
     }
   }

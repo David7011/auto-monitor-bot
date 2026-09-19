@@ -17,6 +17,10 @@ describe("OLX experiment serialization contract", () => {
   it("injects the deployed git revision into every managed process", () => {
     const start = readFileSync("scripts/start.ps1", "utf8");
     expect(start).toContain("function Set-AmbCodeRevision");
+    expect(start).toContain('safe.directory=$($ProjectRoot.Replace');
+    expect(start).toContain("-c $safeDirectory -C $ProjectRoot rev-parse --verify HEAD");
+    expect(start).toContain("-c $safeDirectory -C $ProjectRoot status --porcelain --untracked-files=no");
+    expect(start).not.toMatch(/config\s+--(?:global|system)\s+--add\s+safe\.directory/u);
     expect(start).toContain('[Environment]::SetEnvironmentVariable("AMB_CODE_REVISION", $revision, "Process")');
     expect(start).toContain("Set-AmbCodeRevision");
   });
