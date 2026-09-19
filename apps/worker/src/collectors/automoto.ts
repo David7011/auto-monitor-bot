@@ -2,6 +2,7 @@ import {
   canonicalizeUrl,
   extractPlateFromText,
   inferVehicleAttributes,
+  startOfTodayInKyiv,
   type NormalizedListing,
 } from "@amb/shared";
 import { env } from "../env.js";
@@ -247,10 +248,16 @@ function decodedAttribute(card: string, name: string): string | undefined {
   return value ? decodeHtmlEntities(value).trim() : undefined;
 }
 
-function parseDayOnlyDate(value: string): Date | undefined {
+export function parseDayOnlyDate(value: string): Date | undefined {
   const match = value.match(/^(?<day>\d{2})\.(?<month>\d{2})\.(?<year>\d{4})$/u);
   if (!match?.groups) return undefined;
   const utcNoon = Date.UTC(Number(match.groups.year), Number(match.groups.month) - 1, Number(match.groups.day), 12);
   const parsed = new Date(utcNoon);
-  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+  if (Number.isNaN(parsed.getTime())
+    || parsed.getUTCFullYear() !== Number(match.groups.year)
+    || parsed.getUTCMonth() !== Number(match.groups.month) - 1
+    || parsed.getUTCDate() !== Number(match.groups.day)) return undefined;
+  // A calendar day is not a noon publication time. Use its lower bound in
+  // the source timezone and retain LOW confidence (never exact-time evidence).
+  return startOfTodayInKyiv(parsed);
 }

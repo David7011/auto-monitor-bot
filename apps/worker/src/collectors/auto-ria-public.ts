@@ -81,7 +81,6 @@ export class AutoRiaPublicCollector implements SourceCollector {
         semanticWarnings.push(`AUTO.RIA public card schema unverified: ${parsed.cards.length} cards, ${parsed.malformedCount} malformed`);
       }
       const candidates: NormalizedListing[] = [];
-      let newIdsOnPage = 0;
       for (const card of parsed.cards) {
         const id = String(card.id);
         if (observedIds.has(id)) continue;
@@ -90,7 +89,6 @@ export class AutoRiaPublicCollector implements SourceCollector {
           classifiedIds.add(id);
           continue;
         }
-        newIdsOnPage += 1;
         if (listings.length >= maxCandidates) continue;
         const listing = normalizePublicCard(card, new Date(), scan.lane === "REALTIME");
         if (!listing) {
@@ -104,7 +102,9 @@ export class AutoRiaPublicCollector implements SourceCollector {
         candidates.push(listing);
       }
       if (candidates.length > 0 && scan.onHotCandidates) await scan.onHotCandidates(candidates);
-      if (parsed.cards.length === 0 || listings.length >= maxCandidates || newIdsOnPage === 0) break;
+      // Refreshed/promoted cards invalidate known-ID early exit: an unseen
+      // advert can still be on the next page of the bounded background scan.
+      if (parsed.cards.length === 0 || listings.length >= maxCandidates) break;
     }
     return {
       listings,

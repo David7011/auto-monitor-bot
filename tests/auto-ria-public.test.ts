@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildAutoRiaPublicSearchUrl,
   parseAutoRiaPublicCards,
+  AutoRiaPublicCollector,
 } from "../apps/worker/src/collectors/auto-ria-public.js";
+import { sourceHttpClient } from "../apps/worker/src/collectors/source-http-client.js";
 import type { SourceSearchContext } from "../apps/worker/src/collectors/base.js";
 
 const context = {
@@ -26,6 +28,30 @@ const context = {
 } satisfies SourceSearchContext;
 
 describe("AUTO.RIA public search", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("continues bounded backfill past known promoted cards and keeps realtime to one page", async () => {
+    const body = (id: number) => '"advertisementCard":' + JSON.stringify({ data: {
+      id, type: "Auto", link: `/auto_test_${id}.html`, title: { content: "Toyota Camry 2018" },
+    } });
+    const request = vi.spyOn(sourceHttpClient, "text").mockImplementation(async (url) => ({
+      requestId: "test", status: 200, classification: "SUCCESS", contentType: "text/html",
+      body: body(Number(new URL(url).searchParams.get("page")) === 0 ? 123 : 456),
+    }));
+    const state = { id: "test", fingerprint: "test", knownExternalIds: new Set(["123"]) };
+    const collector = new AutoRiaPublicCollector();
+    const result = await collector.collect(context, state, {
+      lane: "BACKFILL", maxPages: 2, maxCandidates: 50, deadlineAt: new Date(Date.now() + 20_000),
+    });
+    expect(result.listings.map((listing) => listing.externalId)).toEqual(["456"]);
+    expect(result.pageCount).toBe(2);
+    expect(result.limited).toBe(true);
+    request.mockClear();
+    await collector.collect(context, state, {
+      lane: "REALTIME", maxPages: 3, maxCandidates: 50, deadlineAt: new Date(Date.now() + 20_000),
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
   it("uses a bounded newest-first public query without a credential", () => {
     const url = new URL(buildAutoRiaPublicSearchUrl(context));
     expect(url.origin + url.pathname).toBe("https://auto.ria.com/uk/search/");

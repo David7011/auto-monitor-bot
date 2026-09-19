@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { FUEL_TYPE_OPTIONS, findAttributeValue } from "../packages/shared/src/utils/vehicle-attributes.js";
 import { decodeHtmlEntities, parseEngineVolume } from "../apps/worker/src/collectors/html-utils.js";
-import { autoMotoListingIsInFreshnessWindow } from "../apps/worker/src/collectors/automoto.js";
+import { autoMotoListingIsInFreshnessWindow, parseDayOnlyDate } from "../apps/worker/src/collectors/automoto.js";
+import { isReliableFreshListing } from "../packages/shared/src/utils/freshness.js";
 
 describe("fuel classification", () => {
   it("classifies dual-fuel 'газ / бензин' as gas, not gasoline", () => {
@@ -42,6 +43,18 @@ describe("decodeHtmlEntities", () => {
 });
 
 describe("AutoMoto freshness traversal", () => {
+  it("accepts today's day-only card before noon without inventing a future publication", () => {
+    const publishedAt = parseDayOnlyDate("19.09.2026");
+    expect(publishedAt?.toISOString()).toBe("2026-09-18T21:00:00.000Z");
+    expect(isReliableFreshListing({ source: "AUTOMOTO", externalId: "1", publishedAt,
+      timestampConfidence: "LOW" }, "TODAY", new Date("2026-09-18T21:10:00.000Z"))).toBe(true);
+  });
+
+  it("uses Kyiv winter time and rejects impossible calendar dates", () => {
+    expect(parseDayOnlyDate("10.01.2026")?.toISOString()).toBe("2026-01-09T22:00:00.000Z");
+    expect(parseDayOnlyDate("31.02.2026")).toBeUndefined();
+    expect(parseDayOnlyDate("00.09.2026")).toBeUndefined();
+  });
   it("skips an old card without treating the unordered page as exhausted", () => {
     const cutoff = new Date("2026-08-16T00:00:00.000Z");
     expect(autoMotoListingIsInFreshnessWindow(new Date("2026-08-15T12:00:00.000Z"), cutoff)).toBe(false);
