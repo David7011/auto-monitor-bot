@@ -5,6 +5,7 @@ import {
   summarizeOlxNetworkSamples,
 } from "../collectors/olx-network-metrics.js";
 import type { SourceNetworkTelemetry } from "../collectors/source-http-network-telemetry.js";
+import { qualificationEvidence, selectQualificationSamples } from "./hot-path-qualification.js";
 
 const hoursArgument = process.argv.slice(2).find((value) => /^\d+$/u.test(value));
 const hours = Math.max(1, Math.min(24 * 30, Number(hoursArgument ?? 24)));
@@ -73,11 +74,14 @@ try {
   const collectorNetworkSamples = collectorRuns.flatMap((run) => networkSamplesFromCoverageMetrics(run.coverageMetrics));
   const acceptedListingNetworkSamples = completeAcceptedObservations.flatMap((observation) =>
     networkSampleFromNormalizedData("normalizedData" in observation ? observation.normalizedData : undefined));
-  const qualificationCompleteAcceptedHotPathSamples = monitoringState
-    ? completeAcceptedObservations.filter((sample) => sample.firstSeenAt >= monitoringState.olxCanaryQualificationStartedAt).length
-    : 0;
+  const qualificationCompleteAcceptedObservations = selectQualificationSamples(
+    completeAcceptedObservations,
+    monitoringState?.olxCanaryQualificationStartedAt,
+  );
+  const qualificationCompleteAcceptedHotPathSamples = qualificationCompleteAcceptedObservations.length;
   const stages = summarizeJournalLatencies(observations);
   const completeAcceptedStages = summarizeJournalLatencies(completeAcceptedObservations);
+  const qualificationCompleteAcceptedStages = summarizeJournalLatencies(qualificationCompleteAcceptedObservations);
   console.log(JSON.stringify({
     generatedAt: until,
     since,
@@ -86,6 +90,11 @@ try {
     observations: observations.length,
     completeAcceptedHotPathSamples: completeAcceptedObservations.length,
     qualificationCompleteAcceptedHotPathSamples,
+    qualificationBaseline: {
+      startedAt: monitoringState?.olxCanaryQualificationStartedAt ?? null,
+      ...qualificationEvidence(qualificationCompleteAcceptedHotPathSamples),
+      stages: qualifyStages(qualificationCompleteAcceptedStages),
+    },
     cadenceCanary: monitoringState ? {
       mode: monitoringState.olxCanaryMode,
       qualificationRuns: monitoringState.olxCanaryCleanRunCount,

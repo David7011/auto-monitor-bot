@@ -270,6 +270,8 @@ OLX collector сначала одной batch-операцией сохраня�
 
 `GET /metrics -> olxHotPath` и блок Dashboard «OLX Hot Path» показывают T1–T7, полный internal path, OLX origin pressure и protection events за 24 часа. p50 скрыт до 5 samples, p95 — до 30, p99 — до 100; до порога возвращается `INSUFFICIENT_DATA`. Внешняя `publishedAt` latency считается только для `HIGH`/`MEDIUM` confidence и не смешивается с internal SLO.
 
+CLI `metrics:hot-path` отдельно выводит `qualificationBaseline`: этот блок содержит только полные хронологические traces не старше текущего `qualificationStartedAt`. `p99Ready` остаётся `false`, а p99 каждого этапа — `null`, пока в этом однородном baseline не накоплено 100 полных accepted traces; историческая выборка не используется для снятия этого ограничения.
+
 `GET /search-plan -> discoveryProofs` показывает доказательство отдельно для каждого source/category/fingerprint. Глобальный `proved=true` невозможен, если хотя бы один активный shard остаётся `PENDING` или `UNRESOLVED`; historical gap при этом не помечает живой realtime worker как DOWN.
 
 `acceptance:extended` поднимает на случайных loopback-портах полностью изолированные PostgreSQL и Redis 6+, запускает локальные OLX/Telegram HTTP-заглушки и физически проверяет отказы Redis, PostgreSQL и Telegram в критических точках pipeline. Рабочая `.env`, основная база, реальные OLX и Telegram не используются. Приёмка завершается только если каждое детерминированное объявление подтверждённо отправлено либо осталось в явном состоянии восстановления; в тот же прогон входит транзакционная проверка сброса 2000 OLX ID с реальной строкой Telegram-избранного.
