@@ -107,7 +107,7 @@ describe("source search plan", () => {
       lastSuccessfulScanAt: new Date("2026-09-01T09:59:30.000Z"),
       currentPending: false, coverageGap: false, knownIdsReset: true,
       contextCutoffAt: new Date("2026-08-31T10:00:00.000Z"),
-      outageDetectionSeconds: 120, lookbackHours: 24, safetyOverlapSeconds: 300,
+      lookbackHours: 24, safetyOverlapSeconds: 300,
     };
     expect(planCoverageRecovery(options).requiredCutoffAt)
       .toEqual(new Date("2026-09-01T09:54:30.000Z"));
@@ -216,7 +216,7 @@ describe("source search plan", () => {
       currentPending: false,
       coverageGap: false,
       knownIdsReset: false,
-      outageDetectionSeconds: 120,
+      outageSchedule: outageScheduleAfter(boundary, 120, 20),
       lookbackHours: 24,
       safetyOverlapSeconds: 300,
     });
@@ -245,7 +245,7 @@ describe("source search plan", () => {
       currentPending: false,
       coverageGap: false,
       knownIdsReset: false,
-      outageDetectionSeconds: 120,
+      outageSchedule: outageScheduleAfter(boundary, 120, 20),
       lookbackHours: 24,
       safetyOverlapSeconds: 300,
     });
@@ -275,7 +275,7 @@ describe("source search plan", () => {
       currentPending: false,
       coverageGap: false,
       knownIdsReset: false,
-      outageDetectionSeconds: 120,
+      outageSchedule: outageScheduleAfter(new Date("2026-08-29T10:00:00.000Z"), 120, 20),
       lookbackHours: 24,
       safetyOverlapSeconds: 300,
     });
@@ -300,7 +300,6 @@ describe("source search plan", () => {
       currentPending: false,
       coverageGap: true,
       knownIdsReset: false,
-      outageDetectionSeconds: 120,
       lookbackHours: 24,
       safetyOverlapSeconds: 300,
     });
@@ -321,7 +320,6 @@ describe("source search plan", () => {
       currentCutoffAt: existingCutoff,
       coverageGap: false,
       knownIdsReset: false,
-      outageDetectionSeconds: 120,
       lookbackHours: 24,
       safetyOverlapSeconds: 300,
     });
@@ -338,7 +336,6 @@ describe("source search plan", () => {
       currentPending: false,
       coverageGap: false,
       knownIdsReset: false,
-      outageDetectionSeconds: 120,
       lookbackHours: 24,
       safetyOverlapSeconds: 300,
     });
@@ -347,6 +344,15 @@ describe("source search plan", () => {
     expect(plan.persistedBoundaryAt).toBeNull();
   });
 });
+
+function outageScheduleAfter(boundary: Date, intervalSeconds: number, jitterSeconds: number) {
+  return {
+    mode: "STANDARD" as const,
+    nextExpectedRunAt: new Date(boundary.getTime() + intervalSeconds * 1_000),
+    jitterSeconds,
+    schedulerToleranceSeconds: 5,
+  };
+}
 
 function testFilter(overrides: Partial<Filter> = {}): Filter {
   return {

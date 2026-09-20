@@ -166,6 +166,7 @@ Telegram card/flash send lease сохраняет владельца по ном
 | OLX полнота | `WORKER_CONCURRENCY_COLLECTOR_COVERAGE` | `1` | Параллельность отдельной coverage очереди |
 | OLX полнота | `OLX_HTML_COVERAGE_INTERVAL_SECONDS` | `60` | Интервал HTML-сверки |
 | OLX полнота | `OLX_PRIVATE_COVERAGE_INTERVAL_SECONDS` | `90` | Интервал private-сверки |
+| OLX recovery | `OLX_SCHEDULER_TOLERANCE_SECONDS` | `5` | Допуск scheduler после nextExpectedRunAt + jitter перед открытием outage |
 | Backfill | `BACKFILL_INTERVAL_SECONDS` | `300` | Интервал фоновой сверки |
 | Backfill | `OLX_BACKFILL_MIN_INTERVAL_SECONDS` | `900` | Минимальный интервал фоновой OLX-сверки |
 | Backfill | `BACKFILL_MAX_CANDIDATES` | `800` | Лимит кандидатов одной сверки |

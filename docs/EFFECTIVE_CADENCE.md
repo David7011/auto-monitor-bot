@@ -22,3 +22,20 @@ value source changes.
 The migration seeds the snapshot from the existing persisted OLX source row. It
 does not change `sources.intervalSeconds`, `sources.jitterSeconds`,
 `monitoring_state`, protection state, or canary state.
+
+## Outage deadline
+
+OLX outage detection uses the scheduler evidence attached to each scheduled
+realtime job. The deadline is:
+
+`previous nextExpectedRunAt + effective jitter + scheduler tolerance`
+
+The worker does not infer an outage from a fixed age of the last successful
+scan. A job without a valid previous scheduler deadline cannot open an offline
+recovery window on timing evidence alone. This keeps `STANDARD 120±20s` runs,
+normal scheduler delay, protected cadence, and recovery ramps from creating
+false recovery pressure while still detecting a real restart after intentional
+downtime.
+
+`OLX_SCHEDULER_TOLERANCE_SECONDS` is a bounded execution-delay allowance after
+the cadence jitter. It does not change request cadence.

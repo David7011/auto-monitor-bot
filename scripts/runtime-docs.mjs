@@ -47,6 +47,7 @@ const settings = [
   ["OLX полнота", "WORKER_CONCURRENCY_COLLECTOR_COVERAGE", "Параллельность отдельной coverage очереди", [["apps/api/src/env.ts", "number"], ["apps/worker/src/env.ts", "number"]]],
   ["OLX полнота", "OLX_HTML_COVERAGE_INTERVAL_SECONDS", "Интервал HTML-сверки", [["apps/api/src/env.ts", "number"], ["apps/worker/src/env.ts", "number"]]],
   ["OLX полнота", "OLX_PRIVATE_COVERAGE_INTERVAL_SECONDS", "Интервал private-сверки", [["apps/api/src/env.ts", "number"], ["apps/worker/src/env.ts", "number"]]],
+  ["OLX recovery", "OLX_SCHEDULER_TOLERANCE_SECONDS", "Допуск scheduler после nextExpectedRunAt + jitter перед открытием outage", [["apps/worker/src/env.ts", "number"]]],
   ["Backfill", "BACKFILL_INTERVAL_SECONDS", "Интервал фоновой сверки", [["apps/api/src/env.ts", "number"]]],
   ["Backfill", "OLX_BACKFILL_MIN_INTERVAL_SECONDS", "Минимальный интервал фоновой OLX-сверки", [["apps/api/src/env.ts", "number"]]],
   ["Backfill", "BACKFILL_MAX_CANDIDATES", "Лимит кандидатов одной сверки", [["apps/worker/src/env.ts", "number"]]],

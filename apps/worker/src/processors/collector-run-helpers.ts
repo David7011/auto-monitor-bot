@@ -8,6 +8,7 @@ import {
   isBackgroundDiscoveryLane,
   sortListingsNewestFirst,
   type ListingDiscoveryLane,
+  type EffectiveCadenceMode,
   type NormalizedListing,
 } from "@amb/shared";
 import type { CollectorResult } from "../collectors/base.js";
@@ -51,6 +52,10 @@ export type CollectorRunJob = {
   lane?: ListingDiscoveryLane;
   monitoringGeneration?: number;
   scheduledAt?: string;
+  expectedRunAt?: string;
+  cadenceMode?: EffectiveCadenceMode;
+  cadenceIntervalSeconds?: number;
+  cadenceJitterSeconds?: number;
   manual?: boolean;
   lockRetryCount?: number;
   backfillProfile?: BackfillProfile;

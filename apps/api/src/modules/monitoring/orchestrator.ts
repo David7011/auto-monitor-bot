@@ -352,6 +352,10 @@ export class MonitoringOrchestrator {
             lane: "REALTIME",
             monitoringGeneration: state.generation,
             scheduledAt: now.toISOString(),
+            expectedRunAt: source.source === "OLX" ? source.nextCheckAt?.toISOString() : undefined,
+            cadenceMode: effectiveCadence?.mode,
+            cadenceIntervalSeconds: effectiveCadence?.intervalSeconds,
+            cadenceJitterSeconds: effectiveCadence?.jitterSeconds,
           },
           {
             jobId: `collector-${source.source}-${state.generation}-${dueTimestamp}`,

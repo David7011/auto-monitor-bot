@@ -14,6 +14,7 @@ import {
 import type { SourceSearchContext, SourceSearchState } from "../collectors/base.js";
 import { env } from "../env.js";
 import { log } from "../lib/log.js";
+import { detectOlxScheduledOutage, type OlxOutageSchedule } from "./olx-outage-detection.js";
 
 const MAX_CONTEXT_KNOWN_IDS = 5000;
 const MAX_COVERAGE_ANCHOR_IDS = 50;
@@ -39,7 +40,7 @@ export function planCoverageRecovery(options: {
   contextCutoffAt?: Date;
   coverageGap: boolean;
   knownIdsReset: boolean;
-  outageDetectionSeconds: number;
+  outageSchedule?: OlxOutageSchedule;
   lookbackHours: number;
   safetyOverlapSeconds: number;
 }): {
@@ -49,10 +50,13 @@ export function planCoverageRecovery(options: {
   persistedBoundaryAt: Date | null;
   requiredCutoffAt: Date | null;
 } {
-  const outageDetected = options.source === "OLX"
-    && options.lane === "REALTIME"
-    && Boolean(options.lastSuccessfulScanAt)
-    && options.now.getTime() - options.lastSuccessfulScanAt!.getTime() >= options.outageDetectionSeconds * 1_000;
+  const outageDetected = detectOlxScheduledOutage({
+    source: options.source,
+    lane: options.lane,
+    now: options.now,
+    lastSuccessfulScanAt: options.lastSuccessfulScanAt,
+    schedule: options.outageSchedule,
+  }).outageDetected;
   const newRequest = outageDetected || options.coverageGap || options.knownIdsReset;
   const requested = options.currentPending || newRequest;
   if (!requested) {
@@ -564,6 +568,7 @@ export async function markSourceSearchSuccess(
       htmlCoveragePausedUntil?: Date | null;
       lastPrivateCoverageAt?: Date;
     };
+    outageSchedule?: OlxOutageSchedule;
   },
 ): Promise<{
   clearedKnownIdCount: number;
@@ -641,7 +646,7 @@ export async function markSourceSearchSuccess(
       contextCutoffAt: context.publishedAfter,
       coverageGap: Boolean(options.coverageGap),
       knownIdsReset: knownIdRotation.reset,
-      outageDetectionSeconds: env.OLX_OUTAGE_DETECTION_SECONDS,
+      outageSchedule: options.outageSchedule,
       lookbackHours: env.OLX_OUTAGE_RECOVERY_LOOKBACK_HOURS,
       safetyOverlapSeconds: env.OLX_OUTAGE_SAFETY_OVERLAP_SECONDS,
     });

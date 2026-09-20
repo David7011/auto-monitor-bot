@@ -109,7 +109,14 @@ describe("orchestrator background isolation", () => {
     source.nextCheckAt = now;
     await runtime.tick();
     expect(mocks.enqueue).toHaveBeenCalledWith(expect.any(String), "collect",
-      expect.objectContaining({ source: "OLX", lane: "REALTIME" }), expect.any(Object));
+      expect.objectContaining({
+        source: "OLX",
+        lane: "REALTIME",
+        expectedRunAt: now.toISOString(),
+        cadenceMode: "STANDARD",
+        cadenceIntervalSeconds: 4,
+        cadenceJitterSeconds: 0,
+      }), expect.any(Object));
     expect(mocks.recovery.findMany).toHaveBeenCalledTimes(1);
     release([]);
     await finishBackground();
