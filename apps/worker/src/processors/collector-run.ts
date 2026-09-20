@@ -438,6 +438,10 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         observedCount: result.observedCount,
         oldestObservedAt: result.oldestObservedAt,
         backfillResumePage: result.backfillResumePage,
+        recoveryProgressPage: result.recoveryProgressPage,
+        recoveryOverlapPage: result.recoveryOverlapPage,
+        recoveryOverlapExternalIds: result.recoveryOverlapExternalIds,
+        recoveryNoProgressReason: result.recoveryNoProgressReason,
         advanceSuccessBoundary: !(
           source === "OLX"
           && (result.parserHealth === "DEGRADED" || (result.limited && (result.observedCount ?? 0) === 0))
@@ -477,6 +481,9 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         lane === "BACKFILL" && stateUpdate.recoveryRequired
       );
       if (immediateRecoveryRequired) {
+        const recoveryDelayMs = stateUpdate.recoveryNextAttemptAt
+          ? Math.max(0, stateUpdate.recoveryNextAttemptAt.getTime() - Date.now())
+          : 0;
         await enqueue(
           QUEUE_NAMES.COLLECTOR_BACKFILL,
           "collect",
@@ -499,6 +506,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
               recoveryWindowId: stateUpdate.recoveryWindowId,
               recoveryAttemptCount: stateUpdate.recoveryAttemptCount,
             }),
+            ...(recoveryDelayMs > 0 ? { delay: recoveryDelayMs } : {}),
           },
         );
       }

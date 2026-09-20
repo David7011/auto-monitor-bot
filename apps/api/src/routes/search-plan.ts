@@ -145,6 +145,13 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
         verificationMethod: recovery?.verificationMethod ?? null,
         unresolvedReason: recovery?.unresolvedReason ?? null,
         lastRecoveryAttemptAt: recovery?.lastAttemptAt?.toISOString() ?? null,
+        recoveryProgressPage: state.recoveryProgressPage ?? recovery?.progressPage ?? null,
+        recoveryOverlapPage: state.recoveryOverlapPage ?? recovery?.overlapPage ?? null,
+        consecutiveNoProgress: state.recoveryConsecutiveNoProgress,
+        lastNoProgressReason: state.recoveryLastNoProgressReason ?? recovery?.lastNoProgressReason ?? null,
+        nextRecoveryAttemptAt: state.recoveryNextAttemptAt?.toISOString()
+          ?? recovery?.nextAttemptAt?.toISOString()
+          ?? null,
         lastFullAuditAt: lastFullAudit?.finishedAt?.toISOString() ?? lastFullAudit?.startedAt.toISOString() ?? null,
         lastFullAuditPassed: lastFullAudit ? lastFullAudit.failedCount === 0 && lastFullAudit.pendingCount === 0 : null,
       };
@@ -245,6 +252,12 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
               pageCount: latestRecovery.pageCount,
               requestCount: latestRecovery.requestCount,
               observedCount: latestRecovery.observedCount,
+              progressPage: latestRecovery.progressPage,
+              overlapPage: latestRecovery.overlapPage,
+              overlapExternalIds: latestRecovery.overlapExternalIds,
+              consecutiveNoProgress: latestRecovery.consecutiveNoProgress,
+              lastNoProgressReason: latestRecovery.lastNoProgressReason,
+              nextAttemptAt: latestRecovery.nextAttemptAt?.toISOString() ?? null,
             }
           : null,
       },
@@ -332,6 +345,12 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
           coverageRecoveryPending: true,
           coverageRecoveryCutoffAt: cutoff,
           lastPage: 1,
+          recoveryProgressPage: 1,
+          recoveryOverlapPage: null,
+          recoveryOverlapExternalIds: [],
+          recoveryConsecutiveNoProgress: 0,
+          recoveryLastNoProgressReason: null,
+          recoveryNextAttemptAt: new Date(),
         },
       });
       return window;
@@ -486,6 +505,12 @@ function buildPlanRow({
     oldestScannedPublishedAt: state?.oldestScannedPublishedAt?.toISOString() ?? null,
     lastCompletedCutoff: state?.lastCompletedCutoff?.toISOString() ?? null,
     lastPage: state?.lastPage ?? null,
+    recoveryProgressPage: state?.recoveryProgressPage ?? null,
+    recoveryOverlapPage: state?.recoveryOverlapPage ?? null,
+    recoveryOverlapEvidenceCount: state?.recoveryOverlapExternalIds.length ?? 0,
+    recoveryConsecutiveNoProgress: state?.recoveryConsecutiveNoProgress ?? 0,
+    recoveryLastNoProgressReason: state?.recoveryLastNoProgressReason ?? null,
+    recoveryNextAttemptAt: state?.recoveryNextAttemptAt?.toISOString() ?? null,
     newestFirstVerifiedAt: state?.newestFirstVerifiedAt?.toISOString() ?? sourceRecord?.newestFirstVerifiedAt?.toISOString() ?? null,
     lastRegionalCoverageAt: state?.lastRegionalCoverageAt?.toISOString() ?? null,
     lastHtmlCoverageAt: state?.lastHtmlCoverageAt?.toISOString() ?? null,

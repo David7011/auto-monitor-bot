@@ -63,8 +63,6 @@ export type { OlxFeedTargetOptions } from "./olx-feed.js";
 export { normalizeOlxAd } from "./olx-normalization.js";
 export type { OlxAd } from "./olx-normalization.js";
 
-const OLX_RECOVERY_PAGE_OVERLAP = 2;
-
 export function olxBackfillPageWindow(input: {
   pageBudget: number;
   maxOffsetPages: number;
@@ -85,10 +83,12 @@ export function olxBackfillPageWindow(input: {
 export function nextOlxRecoveryResumePage(
   startPage: number,
   lastPageScanned: number,
-  overlapPages = OLX_RECOVERY_PAGE_OVERLAP,
 ): number {
   if (lastPageScanned < startPage) return Math.max(1, startPage);
-  return Math.max(1, lastPageScanned - Math.max(0, Math.trunc(overlapPages) - 1));
+  // Durable progress points to the next never-scanned page. Mutable-offset
+  // overlap is retained separately as page/ID evidence and must never pull
+  // this cursor backwards to page 1.
+  return Math.max(1, lastPageScanned + 1);
 }
 
 export function olxEmptyPageProvesExhaustion(input: {
@@ -228,7 +228,7 @@ export class OlxCollector implements SourceCollector {
       pageBudget,
       maxOffsetPages,
       recovery: isBackfill && Boolean(scan.recovery) && Boolean(state.coverageRecoveryPending),
-      persistedResumePage: state.lastPage,
+      persistedResumePage: state.recoveryProgressPage ?? state.lastPage,
     });
     let pageCount = 0;
     let lastPageScanned = pageWindow.startPage - 1;
@@ -240,6 +240,9 @@ export class OlxCollector implements SourceCollector {
     let degradedReason: string | undefined;
     let parserDegraded = false;
     let coverageUnresolvedReason: "PUBLIC_OFFSET_CAP" | "SOURCE_EXHAUSTED_BEFORE_BOUNDARY" | undefined;
+    let recoveryProgressPage = pageWindow.startPage;
+    let recoveryOverlapPage = state.recoveryOverlapPage;
+    let recoveryOverlapExternalIds = [...state.recoveryOverlapExternalIds ?? []];
     const recoveryAttemptGeneration = olxRecoveryAttemptGeneration({
       pageSize: olxApiPageSize(),
       maxOffset: env.OLX_API_MAX_OFFSET,
@@ -682,6 +685,7 @@ export class OlxCollector implements SourceCollector {
       pageCount += 1;
       lastPageScanned = page;
       let observedOnPage = 0;
+      const externalIdsOnPage = new Set<string>();
       let pageAnchored = true;
       let pageCutoff = Boolean(context.publishedAfter);
       const continuityIgnoredExternalIds = isBackfill && Boolean(scan.recovery)
@@ -710,6 +714,7 @@ export class OlxCollector implements SourceCollector {
         });
         listings.push(...selection.listings);
         for (const externalId of selection.scannedExternalIds) scannedExternalIds.add(externalId);
+        for (const externalId of selection.scannedExternalIds) externalIdsOnPage.add(externalId);
         observedCount += selection.observedCount;
         observedOnPage += selection.observedCount;
         if (
@@ -736,6 +741,17 @@ export class OlxCollector implements SourceCollector {
         pageCutoff = false;
         degradedReason = `${feedErrors.length} OLX feed(s) failed on page ${page}`;
         semanticWarnings.push(degradedReason);
+      }
+      if (
+        isBackfill
+        && Boolean(scan.recovery)
+        && state.coverageRecoveryPending
+        && observedOnPage > 0
+        && feedErrors.length === 0
+      ) {
+        recoveryProgressPage = nextOlxRecoveryResumePage(pageWindow.startPage, page);
+        recoveryOverlapPage = page;
+        recoveryOverlapExternalIds = [...externalIdsOnPage].slice(0, 100);
       }
       const feedsExhausted = successfulFeeds.every((feed) => feed.ads.length === 0);
       if (feedsExhausted) {
@@ -828,7 +844,22 @@ export class OlxCollector implements SourceCollector {
       coverageUnresolvedReason,
       coverageAttemptGeneration: coverageUnresolvedReason ? recoveryAttemptGeneration : undefined,
       backfillResumePage: isBackfill && !anchored && !cutoffReached
-        ? nextOlxRecoveryResumePage(pageWindow.startPage, lastPageScanned)
+        ? recoveryProgressPage
+        : undefined,
+      recoveryProgressPage: isBackfill && Boolean(scan.recovery) ? recoveryProgressPage : undefined,
+      recoveryOverlapPage: isBackfill && Boolean(scan.recovery) ? recoveryOverlapPage : undefined,
+      recoveryOverlapExternalIds: isBackfill && Boolean(scan.recovery)
+        ? recoveryOverlapExternalIds
+        : undefined,
+      recoveryNoProgressReason: isBackfill
+        && Boolean(scan.recovery)
+        && !anchored
+        && !cutoffReached
+        && !coverageUnresolvedReason
+        && recoveryProgressPage <= pageWindow.startPage
+        ? degradedReason ?? (pageCount === 0
+          ? "BACKGROUND_SLOT_UNAVAILABLE"
+          : "NO_EVIDENCE_BEARING_PAGE")
         : undefined,
       coverageStateUpdate: {
         lastRegionalCoverageAt,

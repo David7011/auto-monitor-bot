@@ -116,8 +116,8 @@ describe("OLX durable recovery pagination", () => {
     })).toEqual({ startPage: 6, endPage: 9 });
   });
 
-  it("overlaps the two deepest pages to absorb offset drift", () => {
-    expect(nextOlxRecoveryResumePage(6, 9)).toBe(8);
+  it("advances durable progress while overlap evidence remains separate", () => {
+    expect(nextOlxRecoveryResumePage(6, 9)).toBe(10);
     expect(nextOlxRecoveryResumePage(6, 5)).toBe(6);
   });
 

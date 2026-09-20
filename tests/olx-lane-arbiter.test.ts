@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { OlxLaneArbiter } from "../apps/worker/src/modules/olx-lane-arbiter.js";
 
 describe("OLX lane arbiter", () => {
-  it("lets realtime run immediately and holds backfill until the quiet window", async () => {
+  it("defers immediately while realtime owns the slot instead of waiting", async () => {
     let now = 1_000;
     let releaseRealtime!: () => void;
     const realtimeBlocked = new Promise<void>((resolve) => {
@@ -21,30 +21,23 @@ describe("OLX lane arbiter", () => {
       await realtimeBlocked;
       return "ok";
     });
-    const backfill = arbiter.waitForBackfillWindow(new Date(2_000), 100);
-
+    expect(await arbiter.waitForBackfillWindow(new Date(2_000), 100)).toBe(false);
+    releaseRealtime();
     expect(await realtime).toBe("ok");
-    expect(await backfill).toBe(true);
-    expect(now).toBeGreaterThanOrEqual(1_150);
+    now += 100;
+    expect(await arbiter.waitForBackfillWindow(new Date(2_000), 100)).toBe(true);
   });
 
   it("reserves only one backfill page per realtime completion", async () => {
     let now = 1_000;
-    let nextRealtimeAt = 1_200;
     const arbiter = new OlxLaneArbiter({
       now: () => now,
-      sleep: async (milliseconds) => {
-        now += milliseconds;
-        if (now >= nextRealtimeAt) {
-          nextRealtimeAt = Number.POSITIVE_INFINITY;
-          await arbiter.runRealtime(async () => undefined);
-        }
-      },
     });
 
     expect(await arbiter.waitForBackfillWindow(new Date(2_000), 0)).toBe(true);
-    const secondPage = arbiter.waitForBackfillWindow(new Date(2_000), 0);
-    expect(await secondPage).toBe(true);
-    expect(now).toBeGreaterThanOrEqual(1_200);
+    expect(await arbiter.waitForBackfillWindow(new Date(2_000), 0)).toBe(false);
+    now = 1_200;
+    await arbiter.runRealtime(async () => undefined);
+    expect(await arbiter.waitForBackfillWindow(new Date(2_000), 0)).toBe(true);
   });
 });

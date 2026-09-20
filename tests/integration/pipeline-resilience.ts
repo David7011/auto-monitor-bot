@@ -517,7 +517,9 @@ async function assertConcurrentRecoveryWritersSerialize(): Promise<void> {
       requestCount: 1,
       observedCount: 1,
       oldestObservedAt: first.publishedAt,
-      backfillResumePage: 2,
+      recoveryProgressPage: 2,
+      recoveryOverlapPage: 1,
+      recoveryOverlapExternalIds: ["race-worker-a"],
       runId: "race-worker-a",
     }),
     markSourceSearchSuccess(context, sharedStaleState, [second], {
@@ -527,7 +529,9 @@ async function assertConcurrentRecoveryWritersSerialize(): Promise<void> {
       requestCount: 2,
       observedCount: 1,
       oldestObservedAt: second.publishedAt,
-      backfillResumePage: 3,
+      recoveryProgressPage: 3,
+      recoveryOverlapPage: 2,
+      recoveryOverlapExternalIds: ["race-worker-b"],
       runId: "race-worker-b",
     }),
   ]);
@@ -537,6 +541,12 @@ async function assertConcurrentRecoveryWritersSerialize(): Promise<void> {
   assert(persisted.coverageRecoveryCutoffAt?.getTime() === cutoff.getTime(), "Concurrent writers narrowed the durable cutoff");
   assert(persisted.knownExternalIds.includes("race-worker-a"), "First worker anchor was lost");
   assert(persisted.knownExternalIds.includes("race-worker-b"), "Second worker anchor was lost");
+  assert(persisted.recoveryProgressPage === 3, "Concurrent recovery progress did not advance monotonically to page 3");
+  assert(persisted.recoveryOverlapPage === 2 && persisted.recoveryOverlapExternalIds.includes("race-worker-b"),
+    "Durable progress and overlap evidence were not persisted independently");
+  const afterRestart = await loadSourceSearchState(context);
+  assert(afterRestart.recoveryProgressPage === 3 && afterRestart.recoveryOverlapPage === 2,
+    "Fresh process state did not resume from the proved recovery position");
   const evidence = await prisma.coverageRecoveryWindow.findUniqueOrThrow({ where: { id: window.id } });
   assert(evidence.status === "PENDING", "Concurrent incomplete attempts changed recovery status");
   assert(evidence.attemptCount === 2, `Expected two serialized attempts, received ${evidence.attemptCount}`);

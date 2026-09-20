@@ -499,6 +499,12 @@ export type SearchPlanResponse<DateValue = string> = {
       pageCount: number;
       requestCount: number;
       observedCount: number;
+      progressPage: number | null;
+      overlapPage: number | null;
+      overlapExternalIds: string[];
+      consecutiveNoProgress: number;
+      lastNoProgressReason: string | null;
+      nextAttemptAt: DateValue | null;
     } | null;
   };
   discoveryProofs: Array<{
@@ -522,6 +528,11 @@ export type SearchPlanResponse<DateValue = string> = {
     verificationMethod: "KNOWN_TAIL" | "CUTOFF" | "EXHAUSTED" | null;
     unresolvedReason: "PUBLIC_OFFSET_CAP" | "UNSTABLE_PAGINATION" | "NON_PARTITIONABLE_RANGE" | "SOURCE_EXHAUSTED_BEFORE_BOUNDARY" | null;
     lastRecoveryAttemptAt: DateValue | null;
+    recoveryProgressPage: number | null;
+    recoveryOverlapPage: number | null;
+    consecutiveNoProgress: number;
+    lastNoProgressReason: string | null;
+    nextRecoveryAttemptAt: DateValue | null;
     lastFullAuditAt: DateValue | null;
     lastFullAuditPassed: boolean | null;
   }>;
@@ -581,6 +592,12 @@ export type SearchPlanRow<DateValue = string> = {
   oldestScannedPublishedAt: DateValue | null;
   lastCompletedCutoff: DateValue | null;
   lastPage: number | null;
+  recoveryProgressPage: number | null;
+  recoveryOverlapPage: number | null;
+  recoveryOverlapEvidenceCount: number;
+  recoveryConsecutiveNoProgress: number;
+  recoveryLastNoProgressReason: string | null;
+  recoveryNextAttemptAt: DateValue | null;
   newestFirstVerifiedAt: DateValue | null;
   lastRegionalCoverageAt: DateValue | null;
   lastHtmlCoverageAt: DateValue | null;

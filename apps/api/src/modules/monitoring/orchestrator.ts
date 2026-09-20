@@ -496,10 +496,23 @@ export class MonitoringOrchestrator {
 
       const lastBackfillAt = evidence?.runs[0]?.startedAt;
       const recoveryPending = source.source === "OLX" && (evidence?.pendingRecoveryCount ?? 0) > 0;
+      const recoveryDue = recoveryPending
+        ? await prisma.sourceSearchState.count({
+            where: {
+              source: "OLX",
+              coverageRecoveryPending: true,
+              OR: [
+                { recoveryNextAttemptAt: null },
+                { recoveryNextAttemptAt: { lte: now } },
+              ],
+            },
+          }) > 0
+        : false;
       // Pending is durable urgency, not permission to bypass origin cooldowns.
       // Otherwise a pending window defeats PROTECTION/UNRESOLVED backoff and
       // adds another deep job on every scheduler attempt.
       if (source.source === "OLX" && !backfillDue(lastBackfillAt, scheduledDecision, now)) continue;
+      if (recoveryPending && !recoveryDue) continue;
 
       const queuedTrigger = recoveryPending ? "RECOVERY" : "BACKFILL";
       if (!await this.backgroundGenerationCurrent(generation)) return { deferred: false };
@@ -844,6 +857,12 @@ async function rearmOlxRecoveryForChangedCapability(now: Date): Promise<number> 
           coverageRecoveryPending: true,
           coverageRecoveryCutoffAt: cutoff,
           lastPage: 1,
+          recoveryProgressPage: 1,
+          recoveryOverlapPage: null,
+          recoveryOverlapExternalIds: [],
+          recoveryConsecutiveNoProgress: 0,
+          recoveryLastNoProgressReason: null,
+          recoveryNextAttemptAt: new Date(),
         },
       });
       return true;

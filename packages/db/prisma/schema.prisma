@@ -490,6 +490,12 @@ model SourceSearchState {
   oldestScannedPublishedAt DateTime?
   lastCompletedCutoff    DateTime?
   lastPage               Int?
+  recoveryProgressPage   Int?
+  recoveryOverlapPage    Int?
+  recoveryOverlapExternalIds String[] @default([])
+  recoveryConsecutiveNoProgress Int    @default(0)
+  recoveryLastNoProgressReason String?
+  recoveryNextAttemptAt  DateTime?
   realtimeCursor         Json?
   backfillCursor         Json?
   newestFirstVerifiedAt  DateTime?
@@ -547,6 +553,12 @@ model CoverageRecoveryWindow {
   pageCount             Int                        @default(0)
   requestCount          Int                        @default(0)
   observedCount         Int                        @default(0)
+  progressPage          Int?
+  overlapPage           Int?
+  overlapExternalIds    String[]                   @default([])
+  consecutiveNoProgress Int                        @default(0)
+  lastNoProgressReason  String?
+  nextAttemptAt         DateTime?
   createdAt             DateTime                   @default(now())
   updatedAt             DateTime                   @updatedAt
 

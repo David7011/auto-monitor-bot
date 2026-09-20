@@ -13,12 +13,12 @@ export class OlxLaneArbiter {
   private lastRealtimeFinishedAt = 0;
   private lastReservedBackfillEpoch = -1;
   private readonly now: () => number;
-  private readonly sleep: (milliseconds: number) => Promise<void>;
 
   constructor(dependencies: ArbiterDependencies = {}) {
     this.now = dependencies.now ?? Date.now;
-    this.sleep = dependencies.sleep ?? ((milliseconds) =>
-      new Promise((resolve) => setTimeout(resolve, milliseconds)));
+    // Keep the injected sleep dependency source-compatible with older tests;
+    // slot admission itself is deliberately non-blocking.
+    void dependencies.sleep;
   }
 
   async runRealtime<T>(operation: () => Promise<T>): Promise<T> {
@@ -34,22 +34,19 @@ export class OlxLaneArbiter {
   async waitForBackfillWindow(deadlineAt: Date, quietMs: number): Promise<boolean> {
     const deadline = deadlineAt.getTime();
     const quiet = Math.max(0, quietMs);
-    while (this.now() < deadline) {
-      const remainingQuiet = Math.max(0, this.lastRealtimeFinishedAt + quiet - this.now());
-      if (
-        this.activeRealtimeScans === 0
-        && remainingQuiet === 0
-        && this.lastReservedBackfillEpoch !== this.lastRealtimeFinishedAt
-      ) {
-        // Reserve at most one deep page between two realtime completions. This
-        // prevents a multi-page backfill burst from consuming the whole
-        // current realtime request window and triggering protection.
-        this.lastReservedBackfillEpoch = this.lastRealtimeFinishedAt;
-        return true;
-      }
-      await this.sleep(Math.max(10, Math.min(100, remainingQuiet || 50)));
-    }
-    return false;
+    const now = this.now();
+    if (now >= deadline) return false;
+    const remainingQuiet = Math.max(0, this.lastRealtimeFinishedAt + quiet - now);
+    if (
+      this.activeRealtimeScans > 0
+      || remainingQuiet > 0
+      || this.lastReservedBackfillEpoch === this.lastRealtimeFinishedAt
+    ) return false;
+    // Reserve at most one deep page between two realtime completions. A
+    // missing slot defers the BullMQ job instead of occupying a worker until
+    // its ~90-second scan deadline.
+    this.lastReservedBackfillEpoch = this.lastRealtimeFinishedAt;
+    return true;
   }
 }
 

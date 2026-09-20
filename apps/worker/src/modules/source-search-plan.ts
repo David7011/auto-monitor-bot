@@ -15,6 +15,7 @@ import type { SourceSearchContext, SourceSearchState } from "../collectors/base.
 import { env } from "../env.js";
 import { log } from "../lib/log.js";
 import { detectOlxScheduledOutage, type OlxOutageSchedule } from "./olx-outage-detection.js";
+import { decideRecoveryProgress } from "./recovery-progress.js";
 
 const MAX_CONTEXT_KNOWN_IDS = 5000;
 const MAX_COVERAGE_ANCHOR_IDS = 50;
@@ -347,6 +348,12 @@ export async function loadSourceSearchState(context: SourceSearchContext): Promi
     oldestScannedPublishedAt: record.oldestScannedPublishedAt ?? undefined,
     lastCompletedCutoff: record.lastCompletedCutoff ?? undefined,
     lastPage: record.lastPage ?? undefined,
+    recoveryProgressPage: record.recoveryProgressPage ?? undefined,
+    recoveryOverlapPage: record.recoveryOverlapPage ?? undefined,
+    recoveryOverlapExternalIds: new Set(record.recoveryOverlapExternalIds),
+    recoveryConsecutiveNoProgress: record.recoveryConsecutiveNoProgress,
+    recoveryLastNoProgressReason: record.recoveryLastNoProgressReason ?? undefined,
+    recoveryNextAttemptAt: record.recoveryNextAttemptAt ?? undefined,
     newestFirstVerifiedAt: record.newestFirstVerifiedAt ?? undefined,
     lastSuccessfulScanAt: record.lastSuccessfulScanAt ?? undefined,
     nextCheckAt: record.nextCheckAt ?? undefined,
@@ -558,6 +565,10 @@ export async function markSourceSearchSuccess(
     observedCount?: number;
     oldestObservedAt?: Date;
     backfillResumePage?: number;
+    recoveryProgressPage?: number;
+    recoveryOverlapPage?: number;
+    recoveryOverlapExternalIds?: string[];
+    recoveryNoProgressReason?: string;
     /** Do not move the durable success boundary on semantically suspicious responses. */
     advanceSuccessBoundary?: boolean;
     parserHealth?: "HEALTHY" | "DEGRADED" | "UNKNOWN";
@@ -581,6 +592,10 @@ export async function markSourceSearchSuccess(
   recoveryUnresolvedReason: OlxRecoveryUnresolvedReason | null;
   recoveryAttemptCount: number;
   requiredCutoffAt: Date | null;
+  recoveryProgressPage: number | null;
+  recoveryConsecutiveNoProgress: number;
+  recoveryLastNoProgressReason: string | null;
+  recoveryNextAttemptAt: Date | null;
 }> {
   if (state.fingerprint !== context.fingerprint || state.categoryKey !== context.categoryKey
     || listings.some((listing) => listing.source !== context.source
@@ -610,6 +625,10 @@ export async function markSourceSearchSuccess(
       recoveryUnresolvedReason: null,
       recoveryAttemptCount: 0,
       requiredCutoffAt: null,
+      recoveryProgressPage: null,
+      recoveryConsecutiveNoProgress: 0,
+      recoveryLastNoProgressReason: null,
+      recoveryNextAttemptAt: null,
     };
     if (current.source !== context.source || current.fingerprint !== context.fingerprint
       || current.categoryKey !== context.categoryKey) {
@@ -678,6 +697,27 @@ export async function markSourceSearchSuccess(
     const newestFirstVerifiedAt = options.newestFirstVerified
       ? current.newestFirstVerifiedAt ?? now
       : current.newestFirstVerifiedAt;
+    const progress = lane === "BACKFILL" && recoveryWasRequested
+      ? decideRecoveryProgress({
+          currentProgressPage: current.recoveryProgressPage ?? current.lastPage,
+          attemptedProgressPage: options.recoveryProgressPage ?? options.backfillResumePage,
+          currentConsecutiveNoProgress: current.recoveryConsecutiveNoProgress,
+          noProgressReason: options.recoveryNoProgressReason,
+        })
+      : null;
+    const recoveryNextAttemptAt = recoveryRequired && progress
+      ? new Date(now.getTime() + progress.retryDelayMs)
+      : null;
+    const progressEvidenceUpdate = progress ? {
+      progressPage: progress.progressPage,
+      overlapPage: options.recoveryOverlapPage ?? recoveryWindow?.overlapPage ?? null,
+      overlapExternalIds: options.recoveryOverlapExternalIds?.slice(0, 100)
+        ?? recoveryWindow?.overlapExternalIds
+        ?? [],
+      consecutiveNoProgress: progress.consecutiveNoProgress,
+      lastNoProgressReason: progress.noProgressReason,
+      nextAttemptAt: recoveryNextAttemptAt,
+    } : {};
 
     let recoveryWindowOpened = false;
     if (!recoveryWindow && recoveryWasRequested) {
@@ -741,6 +781,7 @@ export async function markSourceSearchSuccess(
               requestCount: cumulativeRequestCount,
               observedCount: cumulativeObservedCount,
               attemptCount: cumulativeAttemptCount,
+              ...progressEvidenceUpdate,
             }
           : recoveryVerified
             ? {
@@ -757,6 +798,7 @@ export async function markSourceSearchSuccess(
               requestCount: cumulativeRequestCount,
               observedCount: cumulativeObservedCount,
               attemptCount: cumulativeAttemptCount,
+              ...progressEvidenceUpdate,
               unresolvedReason: null,
               unresolvedAt: null,
               attemptGeneration: options.coverageAttemptGeneration ?? recoveryWindow.attemptGeneration,
@@ -771,6 +813,7 @@ export async function markSourceSearchSuccess(
               requestCount: cumulativeRequestCount,
               observedCount: cumulativeObservedCount,
               attemptCount: cumulativeAttemptCount,
+              ...progressEvidenceUpdate,
             },
       });
     }
@@ -793,6 +836,22 @@ export async function markSourceSearchSuccess(
           : [],
         coverageRecoveryPending: recoveryRequired,
         coverageRecoveryCutoffAt: recoveryRequired ? durableCutoff : null,
+        ...(progress ? {
+          recoveryProgressPage: progress.progressPage,
+          recoveryOverlapPage: options.recoveryOverlapPage ?? current.recoveryOverlapPage,
+          recoveryOverlapExternalIds: options.recoveryOverlapExternalIds?.slice(0, 100)
+            ?? current.recoveryOverlapExternalIds,
+          recoveryConsecutiveNoProgress: progress.consecutiveNoProgress,
+          recoveryLastNoProgressReason: progress.noProgressReason,
+          recoveryNextAttemptAt,
+        } : openingRecoveryWindow ? {
+          recoveryProgressPage: 1,
+          recoveryOverlapPage: null,
+          recoveryOverlapExternalIds: [],
+          recoveryConsecutiveNoProgress: 0,
+          recoveryLastNoProgressReason: null,
+          recoveryNextAttemptAt: now,
+        } : {}),
         knownIdsResetAt: knownIdRotation.reset ? now : current.knownIdsResetAt,
         lastExternalId: latestExternalId ?? null,
         lastPublishedAt: latestPublishedAt ?? null,
@@ -804,11 +863,9 @@ export async function markSourceSearchSuccess(
               ...(options.cutoffReached && verificationHasEvidence
                 ? { lastCompletedCutoff: options.cutoff ?? context.publishedAfter ?? null }
                 : {}),
-              lastPage: recoveryUnresolved
-                ? 1
-                : recoveryRequired
-                  ? Math.max(1, options.backfillResumePage ?? current.lastPage ?? 1)
-                  : 0,
+              lastPage: recoveryRequired || recoveryUnresolved
+                ? Math.max(1, progress?.progressPage ?? current.recoveryProgressPage ?? current.lastPage ?? 1)
+                : 0,
               backfillCursor: cursorJson(
                 "backfill",
                 now,
@@ -846,6 +903,12 @@ export async function markSourceSearchSuccess(
       requiredCutoffAt: recoveryRequired || recoveryUnresolved
         ? durableCutoff
         : recoveryWindow?.requiredCutoffAt ?? null,
+      recoveryProgressPage: progress?.progressPage ?? current.recoveryProgressPage ?? null,
+      recoveryConsecutiveNoProgress: progress?.consecutiveNoProgress
+        ?? current.recoveryConsecutiveNoProgress,
+      recoveryLastNoProgressReason: progress?.noProgressReason
+        ?? current.recoveryLastNoProgressReason,
+      recoveryNextAttemptAt,
     };
   });
 

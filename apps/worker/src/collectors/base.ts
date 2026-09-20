@@ -106,6 +106,12 @@ export type SourceSearchState = {
   oldestScannedPublishedAt?: Date;
   lastCompletedCutoff?: Date;
   lastPage?: number;
+  recoveryProgressPage?: number;
+  recoveryOverlapPage?: number;
+  recoveryOverlapExternalIds?: Set<string>;
+  recoveryConsecutiveNoProgress?: number;
+  recoveryLastNoProgressReason?: string;
+  recoveryNextAttemptAt?: Date;
   newestFirstVerifiedAt?: Date;
   lastSuccessfulScanAt?: Date;
   nextCheckAt?: Date;
@@ -166,6 +172,13 @@ export type CollectorResult = {
    * when new adverts arrive at the head.
    */
   backfillResumePage?: number;
+  /** Next never-scanned recovery page; advances monotonically after evidence-bearing work. */
+  recoveryProgressPage?: number;
+  /** Last scanned page retained only as mutable-offset overlap evidence. */
+  recoveryOverlapPage?: number;
+  recoveryOverlapExternalIds?: string[];
+  /** Explicit reason when a short recovery attempt made no durable progress. */
+  recoveryNoProgressReason?: string;
   /** Per-search-fingerprint low-frequency coverage timestamps to persist atomically with scan success. */
   coverageStateUpdate?: CollectorCoverageStateUpdate;
   /** Bounded structured diagnostics used to prove which discovery lanes ran. */

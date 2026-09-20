@@ -212,6 +212,15 @@ export default function PlannerPage() {
               Свидетельство<br /><span className="font-mono text-foreground">{data.offlineRecovery.latest.verificationMethod ?? data.offlineRecovery.latest.unresolvedReason ?? "ожидается"}</span>
               <br />run: <span className="font-mono text-foreground">{data.offlineRecovery.latest.verifiedRunId?.slice(0, 12) ?? "—"}</span>
             </div>
+            <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
+              Durable progress<br /><span className="font-mono text-foreground">page {data.offlineRecovery.latest.progressPage ?? "—"}</span>
+              <br />overlap: <span className="font-mono text-foreground">page {data.offlineRecovery.latest.overlapPage ?? "—"} · {data.offlineRecovery.latest.overlapExternalIds.length} IDs</span>
+            </div>
+            <div className="rounded-lg border border-border bg-panel-alt/45 p-3 text-xs text-muted">
+              No progress<br /><span className="font-mono text-foreground">{data.offlineRecovery.latest.consecutiveNoProgress}</span>
+              <br /><span className="font-mono text-foreground">{data.offlineRecovery.latest.lastNoProgressReason ?? "—"}</span>
+              <br />next: <span className="font-mono text-foreground">{formatDate(data.offlineRecovery.latest.nextAttemptAt)}</span>
+            </div>
             {data.offlineRecovery.latest.status === "UNRESOLVED" ? (
               <div className="col-span-full flex flex-col gap-3 rounded-lg border border-danger/30 bg-danger/10 p-3 text-xs text-muted sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -272,6 +281,8 @@ export default function PlannerPage() {
               <div>Realtime: <span className="font-mono text-foreground">{formatDate(proof.lastRealtimeSuccessAt)}</span> · tail: <span className="font-mono text-foreground">{proof.knownTailExternalId ?? "—"}</span></div>
               <div>Cutoff: <span className="font-mono text-foreground">{formatDate(proof.requiredCutoffAt)}</span> · oldest: <span className="font-mono text-foreground">{formatDate(proof.oldestObservedAt)}</span></div>
               <div>Evidence: <span className="font-mono text-foreground">{proof.verificationMethod ?? proof.unresolvedReason ?? proof.recoveryReason ?? "current-only"}</span></div>
+              <div>Progress: <span className="font-mono text-foreground">page {proof.recoveryProgressPage ?? "—"}</span> · overlap page {proof.recoveryOverlapPage ?? "—"} · no-progress {proof.consecutiveNoProgress}</div>
+              {proof.lastNoProgressReason ? <div>Defer: <span className="font-mono text-warning">{proof.lastNoProgressReason}</span> · next {formatDate(proof.nextRecoveryAttemptAt)}</div> : null}
             </div>
           ))}
         </div>

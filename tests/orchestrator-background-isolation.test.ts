@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   recovery: { findMany: vi.fn(), findFirst: vi.fn(), count: vi.fn() },
   runs: { findMany: vi.fn(), findFirst: vi.fn() },
   observations: { findMany: vi.fn(), count: vi.fn() },
+  searchStates: { count: vi.fn() },
   filters: { findMany: vi.fn() },
   audits: { findFirst: vi.fn() },
   incident: { findFirst: vi.fn() },
@@ -18,6 +19,7 @@ vi.mock("../packages/db/src/index.js", () => ({ prisma: {
   monitoringState: mocks.state, source: mocks.source,
   coverageRecoveryWindow: mocks.recovery, collectorRun: mocks.runs,
   sourceSeenListing: mocks.observations, filter: mocks.filters,
+  sourceSearchState: mocks.searchStates,
   completenessAudit: mocks.audits, challengeIncident: mocks.incident,
 } }));
 vi.mock("../apps/api/src/lib/queues.js", () => ({ enqueue: mocks.enqueue }));
@@ -78,6 +80,7 @@ describe("orchestrator background isolation", () => {
     mocks.runs.findFirst.mockResolvedValue(null);
     mocks.observations.findMany.mockResolvedValue([]);
     mocks.observations.count.mockResolvedValue(0);
+    mocks.searchStates.count.mockResolvedValue(1);
     mocks.audits.findFirst.mockResolvedValue(null);
     mocks.incident.findFirst.mockResolvedValue(null);
     mocks.enqueue.mockResolvedValue(undefined);
