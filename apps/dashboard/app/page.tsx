@@ -50,6 +50,7 @@ export default function DashboardPage() {
 
   const running = data?.state.status === "RUNNING"
   const liveMode = running && data?.mode === "LIVE"
+  const olxCadence = data?.effectiveCadence
   const activeSources = data?.sources.filter((s) => REAL_SOURCES.has(s.source) && s.enabled && ["ACTIVE", "LIMITED"].includes(s.status)).length ?? 0
   const totalRealSources = data?.sources.filter((s) => REAL_SOURCES.has(s.source)).length ?? 0
   const queueLoad = data?.queues ? Object.values(data.queues).reduce((sum, q) => sum + q.waiting + q.active, 0) : 0
@@ -163,9 +164,9 @@ export default function DashboardPage() {
           <MetricCard
             label="След. проверка"
             tone="accent"
-            value={<ScanTimer nextTickAt={data?.state.nextTickAt ?? null} />}
+            value={<ScanTimer nextTickAt={olxCadence?.nextExpectedRunAt ?? data?.state.nextTickAt ?? null} />}
             icon={<Clock />}
-            hint={liveMode ? "live-пульс" : "по расписанию"}
+            hint={olxCadence ? `OLX · ${olxCadence.mode}` : liveMode ? "live-пульс" : "по расписанию"}
           />
           <MetricCard
             label="Найдено сегодня"
@@ -289,9 +290,13 @@ export default function DashboardPage() {
         <div className="space-y-4">
           <div className="grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-4">
             <InfoLine
-              label="Cadence"
-              value={metrics?.olxHotPath ? `${metrics.olxHotPath.cadence.mode} · ${metrics.olxHotPath.cadence.intervalSeconds}±${metrics.olxHotPath.cadence.jitterSeconds} с` : "—"}
+              label="Effective cadence"
+              value={olxCadence ? `${olxCadence.mode} · ${olxCadence.intervalSeconds}±${olxCadence.jitterSeconds} с` : "—"}
             />
+            <InfoLine label="Источник cadence" value={olxCadence?.valueSource ?? "—"} />
+            <InfoLine label="Причина cadence" value={olxCadence?.reason ?? "—"} />
+            <InfoLine label="Cadence изменена" value={olxCadence ? formatDateTime(olxCadence.changedAt) : "—"} />
+            <InfoLine label="Следующий OLX run" value={olxCadence?.nextExpectedRunAt ? formatDateTime(olxCadence.nextExpectedRunAt) : "—"} />
             <InfoLine label="Operational health" value={metrics?.olxHotPath?.operationalState ?? "—"} />
             <InfoLine label="Canary readiness" value={metrics?.olxHotPath?.optimizationReadiness ?? "—"} />
             <InfoLine label="OLX запросов" value={String(metrics?.olxHotPath?.pressure.requests ?? 0)} />
@@ -302,6 +307,20 @@ export default function DashboardPage() {
             <InfoLine label="Recovery shards" value={String(metrics?.olxHotPath?.pressure.recoveryPendingShards ?? 0)} />
             <InfoLine label="Collector p95" value={qualifiedPercentile(metrics?.olxHotPath?.collectorDurationMs, "p95")} />
           </div>
+          {olxCadence?.history.length ? (
+            <div className="rounded-lg border border-line bg-surface-1/50 p-3">
+              <div className="kicker mb-2">История effective cadence</div>
+              <div className="space-y-2 text-xs">
+                {olxCadence.history.slice(0, 5).map((entry, index) => (
+                  <div key={`${entry.changedAt}-${index}`} className="grid gap-1 border-b border-line/60 pb-2 last:border-0 last:pb-0 sm:grid-cols-[150px_150px_1fr]">
+                    <span className="font-mono text-foreground">{entry.mode} · {entry.intervalSeconds}±{entry.jitterSeconds} с</span>
+                    <span className="text-muted">{formatDateTime(entry.changedAt)}</span>
+                    <span className="text-muted">{entry.valueSource} · {entry.reason}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="overflow-x-auto rounded-lg border border-line">
             <table className="w-full min-w-[680px] text-left text-xs">
               <thead className="bg-surface-1 text-muted">

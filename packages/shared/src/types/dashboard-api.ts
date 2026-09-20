@@ -126,6 +126,24 @@ export type MonitoringStatusResponse<DateValue = string> = {
   foundToday: number;
   lastRun: CollectorRunRow<DateValue> | null;
   telegramConfigured: boolean;
+  effectiveCadence: EffectiveCadenceRow<DateValue> | null;
+};
+
+export type EffectiveCadenceMode = "STANDARD" | "LIVE" | "RECOVERY" | "CANARY" | "PROTECTED";
+
+export type EffectiveCadenceHistoryRow<DateValue = string> = {
+  mode: EffectiveCadenceMode;
+  intervalSeconds: number;
+  jitterSeconds: number;
+  valueSource: string;
+  reason: string;
+  changedAt: DateValue;
+  nextExpectedRunAt: DateValue | null;
+};
+
+export type EffectiveCadenceRow<DateValue = string> = EffectiveCadenceHistoryRow<DateValue> & {
+  source: "OLX";
+  history: EffectiveCadenceHistoryRow<DateValue>[];
 };
 
 export type FilterRow = UserFilter;
@@ -194,9 +212,13 @@ export type MetricsResponse<DateValue = string> = {
     stateReason: string;
     windowHours: 24;
     cadence: {
-      mode: "BASELINE" | "CANARY" | "PROMOTED" | "ROLLED_BACK" | "DISABLED";
+      mode: EffectiveCadenceMode;
       intervalSeconds: number;
       jitterSeconds: number;
+      valueSource: string;
+      reason: string;
+      changedAt: DateValue | null;
+      nextExpectedRunAt: DateValue | null;
       experimentId: string | null;
     };
     collectorDurationMs: QualifiedMetricSummary;

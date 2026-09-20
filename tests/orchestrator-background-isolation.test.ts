@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
   filters: { findMany: vi.fn() },
   audits: { findFirst: vi.fn() },
   incident: { findFirst: vi.fn() },
-  enqueue: vi.fn(), log: vi.fn(), canary: vi.fn(),
+  enqueue: vi.fn(), log: vi.fn(), canary: vi.fn(), recordCadence: vi.fn(),
 }));
 
 vi.mock("../packages/db/src/index.js", () => ({ prisma: {
@@ -27,6 +27,10 @@ vi.mock("../apps/api/src/lib/error-log.js", () => ({
 vi.mock("../apps/api/src/modules/monitoring/olx-cadence-canary.js", () => ({
   evaluateOlxCadenceCanary: mocks.canary,
 }));
+vi.mock("../apps/api/src/modules/monitoring/effective-cadence.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../apps/api/src/modules/monitoring/effective-cadence.js")>();
+  return { ...original, recordEffectiveCadence: mocks.recordCadence };
+});
 
 import { MonitoringOrchestrator } from "../apps/api/src/modules/monitoring/orchestrator.js";
 
@@ -79,6 +83,7 @@ describe("orchestrator background isolation", () => {
     mocks.enqueue.mockResolvedValue(undefined);
     mocks.log.mockResolvedValue(undefined);
     mocks.canary.mockResolvedValue({ transition: "NONE", mode: "BASELINE", intervalSeconds: 4, jitterSeconds: 0 });
+    mocks.recordCadence.mockResolvedValue(undefined);
     runtime = new MonitoringOrchestrator() as unknown as TestOrchestrator;
     runtime.running = true;
   });

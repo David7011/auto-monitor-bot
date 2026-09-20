@@ -44,6 +44,11 @@ import {
   nextCoverageTickAfterAttempt,
   startupCoverageDeadline,
 } from "./coverage-schedule.js";
+import {
+  recordEffectiveCadence,
+  resolveOlxEffectiveCadence,
+  type EffectiveCadenceDecision,
+} from "./effective-cadence.js";
 
 const STATE_ID = "singleton";
 const BACKFILL_SOURCES = new Set(["OLX", "RST", "CARS_UA", "AUTOMOTO"]);
@@ -251,6 +256,44 @@ export class MonitoringOrchestrator {
           });
           await this.reportOlxCanary(acceleratedCanary);
         }
+        if (
+          source.source === "OLX"
+          && !sourceDue(source, now)
+          && (source.status === "RATE_LIMITED" || source.status === "CAPTCHA_DETECTED")
+        ) {
+          const incident = acceleratedIncident === undefined
+            ? await this.latestOlxIncident(source.id)
+            : acceleratedIncident;
+          const recovery = decideOlxRealtimeCadence({
+            configuredIntervalSeconds: source.intervalSeconds,
+            configuredJitterSeconds: source.jitterSeconds,
+            recoveryRampSeconds: env.OLX_REALTIME_RECOVERY_RAMP_SECONDS,
+            incident,
+            now,
+          });
+          const effective = resolveOlxEffectiveCadence({
+            persistedIntervalSeconds: source.intervalSeconds,
+            persistedJitterSeconds: source.jitterSeconds,
+            liveIntervalSeconds: env.LIVE_OLX_INTERVAL_SECONDS,
+            liveJitterSeconds: env.LIVE_OLX_JITTER_SECONDS,
+            standardIntervalSeconds: env.MONITOR_INTERVAL_SECONDS || DEFAULT_INTERVAL_SECONDS,
+            standardJitterSeconds: env.MONITOR_JITTER_SECONDS || DEFAULT_JITTER_SECONDS,
+            protectionActive: true,
+            canary: {
+              mode: state.olxCanaryMode,
+              intervalSeconds: source.intervalSeconds,
+              jitterSeconds: source.jitterSeconds,
+              reason: state.olxCanaryRollbackReason ?? "protection status overrides canary",
+            },
+            recovery,
+          });
+          await recordEffectiveCadence({
+            source: "OLX",
+            ...effective,
+            observedAt: now,
+            nextExpectedRunAt: source.nextCheckAt,
+          });
+        }
         if (!sourceDue(source, now)) {
           continue;
         }
@@ -259,16 +302,18 @@ export class MonitoringOrchestrator {
         }
         let intervalSeconds = effectiveRealtimeIntervalSeconds(source, autoRiaContextCount ?? 1);
         let jitterSeconds = source.jitterSeconds;
+        let effectiveCadence: EffectiveCadenceDecision | null = null;
         if (source.source === "OLX") {
           const incident = acceleratedIncident === undefined
             ? await this.latestOlxIncident(source.id)
             : acceleratedIncident;
+          const protectionActive = source.status === "RATE_LIMITED"
+            || source.status === "CAPTCHA_DETECTED"
+            || Boolean(incident && (incident.status !== "RESOLVED" || !incident.recoveredAt));
           const canary = acceleratedCanary ?? await evaluateOlxCadenceCanary({
             baseIntervalSeconds: intervalSeconds,
             baseJitterSeconds: jitterSeconds,
-            protectionActive: source.status === "RATE_LIMITED"
-              || source.status === "CAPTCHA_DETECTED"
-              || Boolean(incident && (incident.status !== "RESOLVED" || !incident.recoveredAt)),
+            protectionActive,
             now,
           });
           intervalSeconds = canary.intervalSeconds;
@@ -284,6 +329,17 @@ export class MonitoringOrchestrator {
           intervalSeconds = cadence.intervalSeconds;
           jitterSeconds = cadence.jitterSeconds;
           await this.reportOlxCadence(cadence);
+          effectiveCadence = resolveOlxEffectiveCadence({
+            persistedIntervalSeconds: source.intervalSeconds,
+            persistedJitterSeconds: source.jitterSeconds,
+            liveIntervalSeconds: env.LIVE_OLX_INTERVAL_SECONDS,
+            liveJitterSeconds: env.LIVE_OLX_JITTER_SECONDS,
+            standardIntervalSeconds: env.MONITOR_INTERVAL_SECONDS || DEFAULT_INTERVAL_SECONDS,
+            standardJitterSeconds: env.MONITOR_JITTER_SECONDS || DEFAULT_JITTER_SECONDS,
+            protectionActive,
+            canary,
+            recovery: cadence,
+          });
         }
         const dueTimestamp = source.nextCheckAt?.getTime() ?? now.getTime();
         await enqueue(
@@ -303,10 +359,19 @@ export class MonitoringOrchestrator {
           },
         );
         realtimeEnqueued.add(source.source);
+        const nextExpectedRunAt = new Date(now.getTime() + intervalWithJitterMs(intervalSeconds, jitterSeconds));
         await prisma.source.update({
           where: { id: source.id },
-          data: { nextCheckAt: new Date(now.getTime() + intervalWithJitterMs(intervalSeconds, jitterSeconds)) },
+          data: { nextCheckAt: nextExpectedRunAt },
         });
+        if (source.source === "OLX" && effectiveCadence) {
+          await recordEffectiveCadence({
+            source: "OLX",
+            ...effectiveCadence,
+            observedAt: now,
+            nextExpectedRunAt,
+          });
+        }
       }
 
       // Historical evidence queries and recovery planning can be slow. Keep

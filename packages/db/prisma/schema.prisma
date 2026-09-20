@@ -43,6 +43,14 @@ enum OlxCadenceCanaryMode {
   DISABLED
 }
 
+enum EffectiveCadenceMode {
+  STANDARD
+  LIVE
+  RECOVERY
+  CANARY
+  PROTECTED
+}
+
 enum SourceStatus {
   ACTIVE
   PAUSED
@@ -283,6 +291,44 @@ model ChallengeIncident {
   @@index([sourceId, status])
   @@index([detectedAt])
   @@map("challenge_incidents")
+}
+
+model EffectiveCadence {
+  id                String               @id @default(cuid())
+  source            ListingSource        @unique
+  mode              EffectiveCadenceMode
+  intervalSeconds   Int
+  jitterSeconds     Int
+  valueSource       String
+  reason            String
+  changedAt         DateTime
+  nextExpectedRunAt DateTime?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  history EffectiveCadenceHistory[]
+
+  @@map("effective_cadences")
+}
+
+model EffectiveCadenceHistory {
+  id                 String               @id @default(cuid())
+  effectiveCadenceId String
+  source             ListingSource
+  mode               EffectiveCadenceMode
+  intervalSeconds    Int
+  jitterSeconds      Int
+  valueSource        String
+  reason             String
+  changedAt          DateTime
+  nextExpectedRunAt  DateTime?
+  createdAt          DateTime             @default(now())
+
+  effectiveCadence EffectiveCadence @relation(fields: [effectiveCadenceId], references: [id], onDelete: Cascade)
+
+  @@index([source, changedAt])
+  @@index([effectiveCadenceId, changedAt])
+  @@map("effective_cadence_history")
 }
 
 model Listing {

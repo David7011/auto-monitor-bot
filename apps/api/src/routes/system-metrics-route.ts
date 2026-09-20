@@ -42,6 +42,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
       monitoringState,
       olxProtectionIncidents,
       olxPressureRows,
+      effectiveCadence,
     ] = await Promise.all([
       prisma.$queryRaw<CollectorDurationAggregateRow[]>(Prisma.sql`
         WITH durations AS (
@@ -137,6 +138,8 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
           lastDurationMs: true,
           lastError: true,
           pausedUntil: true,
+          intervalSeconds: true,
+          jitterSeconds: true,
         },
       }),
       prisma.sourceSeenListing.groupBy({
@@ -211,6 +214,7 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         _count: { _all: true },
         _sum: { requestCount: true },
       }),
+      prisma.effectiveCadence.findUnique({ where: { source: "OLX" } }),
     ]);
 
     const collectorDurations = buildCollectorDurationBreakdown(collectorDurationRows);
@@ -327,6 +331,12 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
     const olxCaptcha = olxProtectionIncidents.filter((incident) => incident.detector.toUpperCase().includes("CAPTCHA")).length;
     const olxCanaryMode = monitoringState?.olxCanaryMode ?? "BASELINE";
     const acceleratedCadence = olxCanaryMode === "CANARY" || olxCanaryMode === "PROMOTED";
+    const legacyEffectiveMode = acceleratedCadence
+      ? "CANARY" as const
+      : olxSource?.intervalSeconds === env.LIVE_OLX_INTERVAL_SECONDS
+        && olxSource.jitterSeconds === env.LIVE_OLX_JITTER_SECONDS
+        ? "LIVE" as const
+        : "STANDARD" as const;
 
     return {
       generatedAt: generatedAt.toISOString(),
@@ -349,13 +359,19 @@ export async function systemMetricsRoute(app: FastifyInstance): Promise<void> {
         stateReason: olxStateReason,
         windowHours: 24 as const,
         cadence: {
-          mode: olxCanaryMode,
-          intervalSeconds: acceleratedCadence
-            ? env.OLX_CADENCE_CANARY_INTERVAL_SECONDS
-            : env.LIVE_OLX_INTERVAL_SECONDS,
-          jitterSeconds: acceleratedCadence
-            ? env.OLX_CADENCE_CANARY_JITTER_SECONDS
-            : env.LIVE_OLX_JITTER_SECONDS,
+          mode: effectiveCadence?.mode ?? legacyEffectiveMode,
+          intervalSeconds: effectiveCadence?.intervalSeconds
+            ?? (acceleratedCadence
+              ? env.OLX_CADENCE_CANARY_INTERVAL_SECONDS
+              : olxSource?.intervalSeconds ?? env.LIVE_OLX_INTERVAL_SECONDS),
+          jitterSeconds: effectiveCadence?.jitterSeconds
+            ?? (acceleratedCadence
+              ? env.OLX_CADENCE_CANARY_JITTER_SECONDS
+              : olxSource?.jitterSeconds ?? env.LIVE_OLX_JITTER_SECONDS),
+          valueSource: effectiveCadence?.valueSource ?? "legacy.metrics-fallback",
+          reason: effectiveCadence?.reason ?? "effective cadence has not been recorded yet",
+          changedAt: effectiveCadence?.changedAt ?? null,
+          nextExpectedRunAt: effectiveCadence?.nextExpectedRunAt ?? null,
           experimentId: monitoringState?.olxCanaryExperimentId ?? null,
         },
         collectorDurationMs: qualifiedOlxCollector,

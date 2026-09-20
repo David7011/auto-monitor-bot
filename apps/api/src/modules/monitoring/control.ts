@@ -3,6 +3,7 @@ import { SOURCE_CAPABILITIES, type MonitoringStatusResponse } from "@amb/shared"
 import { getQueueCounts } from "../../lib/queues.js";
 import { env } from "../../env.js";
 import { orchestrator } from "./orchestrator.js";
+import { readEffectiveCadence } from "./effective-cadence.js";
 
 const LIVE_MONITOR_INTERVAL_SECONDS = 10;
 const LIVE_MONITOR_JITTER_SECONDS = 2;
@@ -92,7 +93,7 @@ export async function stopMonitoring() {
 export async function getMonitoringStatus(): Promise<MonitoringStatusResponse<Date>> {
   const state = await orchestrator.ensureState();
   await orchestrator.ensureSources();
-  const [sources, queueCounts, todayCount, lastRun, totalFilters, activeFilters, activeRealFilters] = await Promise.all([
+  const [sources, queueCounts, todayCount, lastRun, totalFilters, activeFilters, activeRealFilters, effectiveCadence] = await Promise.all([
     prisma.source.findMany({ orderBy: { name: "asc" } }),
     getQueueCounts(),
     prisma.listing.count({
@@ -107,6 +108,7 @@ export async function getMonitoringStatus(): Promise<MonitoringStatusResponse<Da
         sources: { hasSome: ["AUTO_RIA", "OLX", "RST", "CARS_UA", "AUTOMOTO"] },
       },
     }),
+    readEffectiveCadence("OLX"),
   ]);
 
   return {
@@ -125,6 +127,7 @@ export async function getMonitoringStatus(): Promise<MonitoringStatusResponse<Da
     foundToday: todayCount,
     lastRun,
     telegramConfigured: Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID),
+    effectiveCadence,
   };
 }
 
