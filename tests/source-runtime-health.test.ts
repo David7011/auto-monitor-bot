@@ -45,4 +45,25 @@ describe("source runtime health", () => {
     expect(health.status).toBe("WARN");
     expect(health.message).toContain("2026-08-28T12:00:00.000Z");
   });
+
+  it("uses the persisted effective STANDARD deadline instead of the LIVE default", () => {
+    const lastCheckedAt = new Date("2026-08-27T11:58:00.000Z");
+    const cadence = {
+      intervalSeconds: 120,
+      jitterSeconds: 20,
+      nextExpectedRunAt: new Date("2026-08-27T12:00:20.000Z"),
+    };
+    const beforeDeadline = sourceHealthEntry({
+      source: "OLX", status: "ACTIVE", intervalSeconds: 20,
+      lastCheckedAt, lastSuccessfulAt: lastCheckedAt, pausedUntil: null,
+    }, checkedAt, true, cadence);
+    expect(beforeDeadline.status).toBe("OK");
+    expect(beforeDeadline.staleAfterSeconds).toBe(165);
+
+    const afterDeadline = sourceHealthEntry({
+      source: "OLX", status: "ACTIVE", intervalSeconds: 20,
+      lastCheckedAt, lastSuccessfulAt: lastCheckedAt, pausedUntil: null,
+    }, new Date("2026-08-27T12:00:46.000Z"), true, cadence);
+    expect(afterDeadline.status).toBe("FAIL");
+  });
 });

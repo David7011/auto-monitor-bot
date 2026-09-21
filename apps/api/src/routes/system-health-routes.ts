@@ -136,7 +136,7 @@ export async function systemHealthRoutes(app: FastifyInstance): Promise<void> {
     }> = [];
     if (database.status !== "FAIL") {
       try {
-        const [state, sourceRows, activeFilters, successfulScan, finishedScan] = await Promise.all([
+        const [state, sourceRows, activeFilters, successfulScan, finishedScan, olxCadence] = await Promise.all([
           prisma.monitoringState.findUnique({ where: { id: "singleton" } }),
           prisma.source.findMany({ where: { enabled: true }, orderBy: { source: "asc" } }),
           prisma.filter.findMany({ where: { enabled: true }, select: { sources: true } }),
@@ -150,6 +150,7 @@ export async function systemHealthRoutes(app: FastifyInstance): Promise<void> {
             orderBy: { finishedAt: "desc" },
             select: { source: true, lane: true, status: true, finishedAt: true },
           }),
+          prisma.effectiveCadence.findUnique({ where: { source: "OLX" } }),
         ]);
         monitoringState = state;
         lastSuccessfulScan = successfulScan;
@@ -157,7 +158,12 @@ export async function systemHealthRoutes(app: FastifyInstance): Promise<void> {
         const targetSources = configuredTargetSources(activeFilters, sourceRows.map((row) => row.source));
         sourceHealth = sourceRows
           .filter((row) => targetSources.has(row.source))
-          .map((row) => sourceHealthEntry(row, checkedAt, state?.status === "RUNNING"));
+          .map((row) => sourceHealthEntry(
+            row,
+            checkedAt,
+            state?.status === "RUNNING",
+            row.source === "OLX" ? olxCadence : null,
+          ));
         activeSources = sourceHealth.length;
       } catch {
         database.status = "WARN";
@@ -381,9 +387,23 @@ export function sourceHealthEntry(
   },
   checkedAt: Date,
   monitoringRunning = true,
+  effectiveCadence?: {
+    intervalSeconds: number;
+    jitterSeconds: number;
+    nextExpectedRunAt: Date | null;
+  } | null,
 ) {
-  const expectedInterval = liveIntervalSeconds(row.source, row.intervalSeconds);
-  const staleAfterSeconds = Math.max(60, expectedInterval * 5);
+  const expectedInterval = effectiveCadence?.intervalSeconds
+    ?? liveIntervalSeconds(row.source, row.intervalSeconds);
+  const schedulerToleranceSeconds = 5;
+  const persistedDeadline = effectiveCadence?.nextExpectedRunAt
+    ? new Date(effectiveCadence.nextExpectedRunAt.getTime()
+      + Math.max(0, effectiveCadence.jitterSeconds) * 1_000
+      + schedulerToleranceSeconds * 1_000)
+    : null;
+  const staleAfterSeconds = persistedDeadline && row.lastCheckedAt
+    ? Math.max(1, Math.ceil((persistedDeadline.getTime() - row.lastCheckedAt.getTime()) / 1_000))
+    : Math.max(60, expectedInterval * 5);
   const lastCheckedAgeSeconds = row.lastCheckedAt
     ? Math.max(0, Math.round((checkedAt.getTime() - row.lastCheckedAt.getTime()) / 1000))
     : Number.POSITIVE_INFINITY;
@@ -391,7 +411,9 @@ export function sourceHealthEntry(
     || row.status === "RATE_LIMITED"
     || row.status === "PAUSED"
     || Boolean(row.pausedUntil && row.pausedUntil > checkedAt);
-  const stale = lastCheckedAgeSeconds > staleAfterSeconds;
+  const stale = persistedDeadline
+    ? checkedAt > persistedDeadline
+    : lastCheckedAgeSeconds > staleAfterSeconds;
   const status: HealthStatus = !monitoringRunning
     ? "IDLE"
     : stale && !externallyPaused
