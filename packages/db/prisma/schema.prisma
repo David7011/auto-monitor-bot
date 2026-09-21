@@ -145,6 +145,12 @@ enum TelegramNotificationStatus {
   SENT
   UPDATED
   FAILED
+  SENDING
+  TRANSIENT
+  AMBIGUOUS
+  DELIVERED
+  PERMANENT
+  QUARANTINED
 }
 
 enum TelegramFlashBundleStatus {
@@ -593,6 +599,7 @@ model TelegramNotification {
   attemptCount Int                      @default(0)
   processingStartedAt DateTime?
   lastAttemptAt DateTime?
+  nextAttemptAt DateTime?
   leaseExpiresAt DateTime?
   lastErrorCode String?
   lastErrorMessage String?
@@ -612,6 +619,7 @@ model TelegramNotification {
   @@unique([listingId])
   @@index([messageId])
   @@index([status, leaseExpiresAt])
+  @@index([status, nextAttemptAt, createdAt])
   @@index([deleteAfter])
   @@index([retainUntil])
   @@index([cleanupAttemptedAt])

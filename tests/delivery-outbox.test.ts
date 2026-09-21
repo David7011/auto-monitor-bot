@@ -47,12 +47,13 @@ describe("durable delivery outbox", () => {
     expect(mocks.queryRaw.mock.calls[0]?.slice(1)).toContain("not-configured");
   });
 
-  it("selects only bounded retryable LIVE intents in deterministic age order", async () => {
-    await expect(selectPendingCardDeliveryIntents(17)).resolves.toEqual([{ listingId: "listing-1" }]);
+  it("selects due retryable LIVE intents without a lifetime attempt ceiling", async () => {
+    const now = new Date("2026-09-21T12:00:00.000Z");
+    await expect(selectPendingCardDeliveryIntents(17, now)).resolves.toEqual([{ listingId: "listing-1" }]);
     expect(mocks.findMany).toHaveBeenCalledWith({
       where: {
-        status: { in: ["PENDING", "RETRY_PENDING", "FAILED"] },
-        attemptCount: { lt: 10 },
+        status: { in: ["PENDING", "TRANSIENT", "AMBIGUOUS", "RETRY_PENDING", "FAILED"] },
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
         listing: { notificationMode: "LIVE", status: { notIn: ["IGNORED", "DUPLICATE"] } },
       },
       select: { listingId: true },

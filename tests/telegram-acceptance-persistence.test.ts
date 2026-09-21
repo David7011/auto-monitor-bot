@@ -75,7 +75,7 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
   it("retries the journal after a confirmed card without sending it again", async () => {
     mocks.transaction.mockRejectedValueOnce(new Error("journal connection failed"));
     await expect(sendListingLink("listing-1", snapshot)).rejects.toThrow("journal connection failed");
-    expect(mocks.receipt.status).toBe("SENT");
+    expect(mocks.receipt.status).toBe("DELIVERED");
     expect(mocks.receipt.messageId).toBe("123");
     await sendListingLink("listing-1", snapshot);
     expect(mocks.send).toHaveBeenCalledOnce();
@@ -118,7 +118,7 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
 
     expect(mocks.notificationUpdateMany).toHaveBeenCalled();
     expect(mocks.send).toHaveBeenCalledOnce();
-    expect(mocks.receipt.status).toBe("SENT");
+    expect(mocks.receipt.status).toBe("DELIVERED");
   });
 
   it.each(["card", "flash"])("blocks a stale %s sender after ownership changes during gate wait", async (kind) => {

@@ -31,11 +31,14 @@ export async function reconcileOrphanDeliveryIntents(chatId: string, limit: numb
 }
 
 /** The same age-independent selector is used at worker startup and acceptance. */
-export async function selectPendingCardDeliveryIntents(limit: number): Promise<Array<{ listingId: string }>> {
+export async function selectPendingCardDeliveryIntents(
+  limit: number,
+  now = new Date(),
+): Promise<Array<{ listingId: string }>> {
   return prisma.telegramNotification.findMany({
     where: {
-      status: { in: ["PENDING", "RETRY_PENDING", "FAILED"] },
-      attemptCount: { lt: 10 },
+      status: { in: ["PENDING", "TRANSIENT", "AMBIGUOUS", "RETRY_PENDING", "FAILED"] },
+      OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
       listing: { notificationMode: "LIVE", status: { notIn: ["IGNORED", "DUPLICATE"] } },
     },
     select: { listingId: true },

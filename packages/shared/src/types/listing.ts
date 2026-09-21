@@ -211,7 +211,9 @@ export type MarketPriceEstimateDto = {
   updatedAt: string;
 };
 
-export type TelegramNotificationStatus = "PENDING" | "FLASH_PENDING" | "PROCESSING" | "RETRY_PENDING" | "SENT" | "UPDATED" | "FAILED";
+export type TelegramNotificationStatus =
+  | "PENDING" | "FLASH_PENDING" | "PROCESSING" | "RETRY_PENDING" | "SENT" | "UPDATED" | "FAILED"
+  | "SENDING" | "TRANSIENT" | "AMBIGUOUS" | "DELIVERED" | "PERMANENT" | "QUARANTINED";
 
 export type TelegramNotificationDto = {
   id: string;
@@ -223,6 +225,7 @@ export type TelegramNotificationDto = {
   attemptCount: number;
   processingStartedAt: string | null;
   lastAttemptAt: string | null;
+  nextAttemptAt: string | null;
   leaseExpiresAt: string | null;
   lastErrorCode: string | null;
   lastErrorMessage: string | null;

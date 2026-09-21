@@ -396,11 +396,12 @@ async function recoverInterruptedPipeline(closeStaleRuns = true): Promise<void> 
   await reconcileOrphanDeliveryIntents(env.TELEGRAM_CHAT_ID, env.STARTUP_RECOVERY_LIMIT);
   await prisma.telegramNotification.updateMany({
     where: {
-      status: "PROCESSING",
+      status: { in: ["SENDING", "PROCESSING"] },
       OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: now } }],
     },
     data: {
-      status: "RETRY_PENDING",
+      status: "TRANSIENT",
+      nextAttemptAt: now,
       leaseExpiresAt: null,
       lastErrorCode: "WORKER_RECOVERY",
       lastErrorMessage: "Отправка восстановлена после перезапуска worker",

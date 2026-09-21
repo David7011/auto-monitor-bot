@@ -13,7 +13,6 @@ $StatePath = Join-Path $RuntimeRoot "watchdog-state.json"
 $SupervisorScript = Join-Path $ProjectRoot "scripts\supervisor.ps1"
 $SupervisorTaskName = "Auto Monitor Bot"
 $SupervisorLockPath = Join-Path $RuntimeRoot "supervisor.lock"
-$ValidationLockPath = Join-Path $RuntimeRoot "validation.lock"
 $StartLockPath = Join-Path $RuntimeRoot "start.lock"
 $SupervisorHeartbeatPath = Join-Path $RuntimeRoot "supervisor-heartbeat.json"
 $ProcessManagementScript = Join-Path $PSScriptRoot "process-management.ps1"
@@ -324,8 +323,8 @@ try {
     exit 0
   }
 
-  if ((Test-LockHeld $ValidationLockPath) -or (Test-LockHeld $StartLockPath)) {
-    Write-WatchdogLog "health check deferred while validation or startup is in progress"
+  if (Test-LockHeld $StartLockPath) {
+    Write-WatchdogLog "health check deferred while startup/deployment is in progress"
     exit 0
   }
 

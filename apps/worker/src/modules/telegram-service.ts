@@ -35,6 +35,42 @@ const TELEGRAM_GATE_PRIORITY = {
 } as const;
 
 export const TELEGRAM_FLASH_SEND_LEASE_MS = 60_000;
+const TELEGRAM_DELIVERY_BACKOFF_BASE_MS = 5_000;
+const TELEGRAM_DELIVERY_BACKOFF_CAP_MS = 30 * 60 * 1_000;
+
+export type TelegramDeliveryFailureState = "TRANSIENT" | "AMBIGUOUS" | "PERMANENT";
+
+export function telegramDeliveryRetryDelayMs(
+  attemptCount: number,
+  retryAfterSeconds?: number,
+  random = Math.random,
+): number {
+  const exponent = Math.min(10, Math.max(0, Math.trunc(attemptCount) - 1));
+  const exponential = Math.min(
+    TELEGRAM_DELIVERY_BACKOFF_CAP_MS,
+    TELEGRAM_DELIVERY_BACKOFF_BASE_MS * 2 ** exponent,
+  );
+  const jittered = Math.min(
+    TELEGRAM_DELIVERY_BACKOFF_CAP_MS,
+    Math.round(exponential * (0.8 + Math.max(0, Math.min(1, random())) * 0.4)),
+  );
+  return Math.max(jittered, Math.max(0, retryAfterSeconds ?? 0) * 1_000);
+}
+
+export function classifyTelegramDeliveryFailure(input: {
+  message: string;
+  requestStarted: boolean;
+  acceptancePersisted: boolean;
+  retryAfterSeconds?: number;
+}): TelegramDeliveryFailureState {
+  if (isPermanentTelegramChatError(input.message)) return "PERMANENT";
+  if (input.retryAfterSeconds) return "TRANSIENT";
+  // Once the HTTP request began, absence of a durably stored Bot API receipt
+  // cannot distinguish a rejected request from an accepted response lost on
+  // the network or during local persistence. Preserve that uncertainty.
+  if (input.requestStarted && !input.acceptancePersisted) return "AMBIGUOUS";
+  return "TRANSIENT";
+}
 
 function getBot(): Bot | null {
   if (!env.TELEGRAM_BOT_TOKEN) return null;
@@ -163,11 +199,13 @@ export async function sendListingLink(
   const chatId = env.TELEGRAM_CHAT_ID;
 
   if (!telegramBot || !chatId) {
+    const nextAttemptAt = new Date(Date.now() + telegramDeliveryRetryDelayMs(reservation.attemptCount));
     await prisma.telegramNotification.update({
       where: { id: reservation.notificationId },
       data: {
         chatId: chatId || "not-configured",
-        status: "FAILED",
+        status: "TRANSIENT",
+        nextAttemptAt,
         lastText: text,
         leaseExpiresAt: null,
         lastErrorCode: "TELEGRAM_NOT_CONFIGURED",
@@ -178,13 +216,15 @@ export async function sendListingLink(
     return;
   }
 
+  let requestStarted = false;
+  let acceptancePersisted = false;
   try {
     await withRenewableTelegramLease(async () => {
       const now = new Date();
       const renewed = await prisma.telegramNotification.updateMany({
         where: {
           id: reservation.notificationId, attemptCount: reservation.attemptCount,
-          status: "PROCESSING", messageId: null, leaseExpiresAt: { gt: now },
+          status: "SENDING", messageId: null, leaseExpiresAt: { gt: now },
         },
         data: { leaseExpiresAt: new Date(now.getTime() + TELEGRAM_SEND_LEASE_MS) },
       });
@@ -199,6 +239,7 @@ export async function sendListingLink(
         data: { telegramRequestedAt: new Date() },
       });
       await assertOwned();
+      requestStarted = true;
       const sent = await telegramBot.api.sendMessage(chatId, text, {
         link_preview_options: { is_disabled: true },
         reply_markup: telegramListingKeyboard(
@@ -220,13 +261,14 @@ export async function sendListingLink(
         data: {
           chatId,
           messageId: String(sent.message_id),
-          status: "SENT",
+          status: "DELIVERED",
           lastText: text,
           leaseExpiresAt: null,
           lastErrorCode: null,
           lastErrorMessage: null,
           sentAt,
           acceptedAt: firstAcceptedAt,
+          nextAttemptAt: null,
           deleteAfter: new Date(sentAt.getTime() + env.LISTING_RETENTION_HOURS * 60 * 60 * 1000),
           favoritedAt: null,
           retainUntil: null,
@@ -234,6 +276,7 @@ export async function sendListingLink(
           cleanupAttemptedAt: null,
         },
       });
+      acceptancePersisted = true;
 
       await syncAcceptedListing(listingId, firstAcceptedAt);
     });
@@ -242,18 +285,32 @@ export async function sendListingLink(
     const message = err instanceof Error ? err.message : String(err);
     const retryAfterSeconds = telegramRetryAfterSeconds(err);
     const aborted = options.signal?.aborted === true;
+    const failureState = classifyTelegramDeliveryFailure({
+      message,
+      requestStarted,
+      acceptancePersisted,
+      retryAfterSeconds,
+    });
+    const nextAttemptAt = failureState === "PERMANENT"
+      ? null
+      : new Date(Date.now() + telegramDeliveryRetryDelayMs(reservation.attemptCount, retryAfterSeconds));
     await prisma.telegramNotification.updateMany({
       // A journal transaction can fail after the acceptance receipt committed.
       // Never erase SENT / messageId or let a losing sender reopen that receipt.
-      where: { id: reservation.notificationId, attemptCount: reservation.attemptCount, status: "PROCESSING", messageId: null },
+      where: { id: reservation.notificationId, attemptCount: reservation.attemptCount, status: "SENDING", messageId: null },
       data: {
-        status: "RETRY_PENDING",
+        status: failureState,
+        nextAttemptAt,
         leaseExpiresAt: null,
         lastErrorCode: aborted
           ? "TELEGRAM_INLINE_DEADLINE"
           : retryAfterSeconds
             ? "TELEGRAM_RATE_LIMITED"
-            : "TELEGRAM_SEND_FAILED",
+            : failureState === "AMBIGUOUS"
+              ? "TELEGRAM_ACCEPTANCE_AMBIGUOUS"
+              : failureState === "PERMANENT"
+                ? "TELEGRAM_PERMANENT"
+                : "TELEGRAM_SEND_FAILED",
         lastErrorMessage: message,
       },
     });
@@ -708,7 +765,7 @@ async function reserveTelegramNotification(
   if (existing?.messageId) {
     return { kind: "already-sent", acceptedAt: existing.acceptedAt ?? existing.sentAt };
   }
-  if (existing?.status === "PROCESSING" && existing.leaseExpiresAt && existing.leaseExpiresAt > now) {
+  if ((existing?.status === "SENDING" || existing?.status === "PROCESSING") && existing.leaseExpiresAt && existing.leaseExpiresAt > now) {
     return { kind: "locked" };
   }
 
@@ -719,21 +776,22 @@ async function reserveTelegramNotification(
           id: existing.id,
           attemptCount: existing.attemptCount,
           messageId: null,
-          status: { notIn: ["SENT", "UPDATED"] },
+          status: { notIn: ["SENT", "UPDATED", "DELIVERED", "PERMANENT", "QUARANTINED"] },
           OR: [
-            { status: { not: "PROCESSING" } },
+            { status: { notIn: ["SENDING", "PROCESSING"] } },
             { leaseExpiresAt: null },
             { leaseExpiresAt: { lte: now } },
           ],
         },
         data: {
           chatId,
-          status: "PROCESSING",
+          status: "SENDING",
           lastText: text,
           attemptCount: { increment: 1 },
           processingStartedAt: now,
           lastAttemptAt: now,
           leaseExpiresAt,
+          nextAttemptAt: null,
           lastErrorCode: null,
           lastErrorMessage: null,
         },
@@ -746,7 +804,7 @@ async function reserveTelegramNotification(
       data: {
         listingId,
         chatId,
-        status: "PROCESSING",
+        status: "SENDING",
         lastText: text,
         attemptCount: 1,
         processingStartedAt: now,

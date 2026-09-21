@@ -19,7 +19,6 @@ $LockPath = Join-Path $RuntimeRoot "supervisor.lock"
 $StartScript = Join-Path $PSScriptRoot "start.ps1"
 $FastRecoveryScript = Join-Path $PSScriptRoot "recover.ps1"
 $ReadinessScript = Join-Path $PSScriptRoot "wait-core-readiness.ps1"
-$ValidationLockPath = Join-Path $RuntimeRoot "validation.lock"
 $StartLockPath = Join-Path $RuntimeRoot "start.lock"
 $HeartbeatPath = Join-Path $RuntimeRoot "supervisor-heartbeat.json"
 $WorkerHeartbeatDir = Join-Path $RuntimeRoot "worker-heartbeats"
@@ -206,6 +205,17 @@ function Test-LocalTcpPort([int]$Port, [int]$TimeoutMilliseconds = 500) {
   }
 }
 
+function Test-ApiLiveness {
+  try {
+    $null = Invoke-WebRequest -Uri "http://127.0.0.1:4000/health" -UseBasicParsing -TimeoutSec 2
+    return $true
+  } catch {
+    # An HTTP error response still proves that the API event loop accepted and
+    # answered the request; connection/timeout failures do not.
+    return $null -ne $_.Exception.Response
+  }
+}
+
 $lock = $null
 try {
   $lock = [IO.File]::Open($LockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
@@ -242,22 +252,31 @@ try {
       $idleLogged = $false
     }
     Write-SupervisorHeartbeat "monitoring"
-    if ((Test-LockHeld $ValidationLockPath) -or (Test-LockHeld $StartLockPath)) {
+    # Validation is read-only with respect to the accepted runtime and must
+    # never suppress liveness repair. Only the short startup/deploy lock owns
+    # process replacement.
+    if (Test-LockHeld $StartLockPath) {
       $failures = 0
       Start-Sleep -Seconds ([Math]::Max(1, $CheckIntervalSeconds))
       continue
     }
     $missingServices = @(Get-MissingServiceNames)
     $staleWorkerServices = if ($missingServices.Count -eq 0) { @(Get-StaleWorkerServiceNames) } else { @() }
+    $apiLivenessFailed = $false
+    if ($missingServices.Count -eq 0 -and $staleWorkerServices.Count -eq 0) {
+      $apiLivenessFailed = !(Test-ApiLiveness)
+    }
+    $staleApiServices = if ($apiLivenessFailed) { @("api") } else { @() }
+    $targetedRestartServices = @($staleWorkerServices + $staleApiServices | Select-Object -Unique)
     if ($missingServices.Count -gt 0) {
       # A dead process is definitive and should not wait for two HTTP probes.
       $failures = [Math]::Max([Math]::Max(1, $ConsecutiveFailuresBeforeRestart), $failures + 1)
       Write-SupervisorLog "missing process detected: $($missingServices -join ', ')"
-    } elseif ($staleWorkerServices.Count -gt 0) {
+    } elseif ($targetedRestartServices.Count -gt 0) {
       # A stale role heartbeat identifies the exact blocked event loop. Restart
       # that worker only; never sacrifice realtime because background is busy.
       $failures = [Math]::Max([Math]::Max(1, $ConsecutiveFailuresBeforeRestart), $failures + 1)
-      Write-SupervisorLog "stale worker heartbeat detected: $($staleWorkerServices -join ', ')"
+      Write-SupervisorLog "stale service liveness detected: $($targetedRestartServices -join ', ')"
     } else {
       & $ReadinessScript -TimeoutSeconds 3 -StableChecks 1 -SingleAttempt -Quiet
       if ($LASTEXITCODE -eq 0) {
@@ -269,12 +288,12 @@ try {
         Write-SupervisorLog "readiness failure $failures/$ConsecutiveReadinessFailuresBeforeRecovery"
       }
     }
-    if ($missingServices.Count -eq 0 -and $staleWorkerServices.Count -eq 0 -and $LASTEXITCODE -eq 0) {
+    if ($missingServices.Count -eq 0 -and $targetedRestartServices.Count -eq 0 -and $LASTEXITCODE -eq 0) {
       $failures = 0
       $recoveryAttempt = 0
       $nextRecoveryAt = [datetime]::MinValue
     } else {
-      $requiredFailures = if ($missingServices.Count -gt 0 -or $staleWorkerServices.Count -gt 0) {
+      $requiredFailures = if ($missingServices.Count -gt 0 -or $targetedRestartServices.Count -gt 0) {
         [Math]::Max(1, $ConsecutiveFailuresBeforeRestart)
       } else {
         [Math]::Max(2, $ConsecutiveReadinessFailuresBeforeRecovery)
@@ -285,7 +304,7 @@ try {
           Write-SupervisorLog "recovery attempt $recoveryAttempt started"
           $powershell = Join-Path $PSHOME "powershell.exe"
           $infrastructureReady = (Test-LocalTcpPort 55432) -and (Test-LocalTcpPort 6380)
-          if ($missingServices.Count -eq 0 -and $staleWorkerServices.Count -eq 0 -and $infrastructureReady) {
+          if ($missingServices.Count -eq 0 -and $targetedRestartServices.Count -eq 0 -and $infrastructureReady) {
             # All owned processes and both worker event loops are alive. A
             # transient/degraded /ready response is diagnostic, not proof that
             # restarting the complete stack will improve anything.
@@ -307,9 +326,9 @@ try {
               "-File", $FastRecoveryScript,
               "-TimeoutSeconds", "35"
             )
-            if ($staleWorkerServices.Count -gt 0) {
+            if ($targetedRestartServices.Count -gt 0) {
               $fastRecoveryArguments += "-RestartServices"
-              $fastRecoveryArguments += $staleWorkerServices
+              $fastRecoveryArguments += $targetedRestartServices
             }
             $fastRecovery = Start-Process -FilePath $powershell -WindowStyle Hidden -PassThru `
               -RedirectStandardOutput (Join-Path $LogDir "supervisor-fast-recovery.out.log") `

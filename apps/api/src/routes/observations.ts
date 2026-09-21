@@ -57,7 +57,7 @@ export async function observationsRoutes(app: FastifyInstance): Promise<void> {
       prisma.listing.count({
         where: {
           firstSeenAt: { gte: cutoff },
-          telegramNotifications: { none: { status: { in: ["SENT", "UPDATED"] } } },
+          telegramNotifications: { none: { status: { in: ["SENT", "UPDATED", "DELIVERED"] } } },
         },
       }),
       prisma.sourceSeenListing.count({
