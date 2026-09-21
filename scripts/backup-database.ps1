@@ -68,16 +68,33 @@ try {
 }
 
 try {
+  $mirrorRoot = Get-DotEnvValue "BACKUP_MIRROR_PATH"
   $latest = Get-ChildItem -LiteralPath $BackupRoot -Filter "database-*.ambbak" -File -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if (!$Force -and $latest -and $latest.LastWriteTime -gt (Get-Date).AddHours(-$MinimumAgeHours)) {
+    if ($mirrorRoot) {
+      $local = Get-AmbBackupSet $BackupRoot (Get-Date) ([int]::MaxValue)
+      $mirrorFullPath = [System.IO.Path]::GetFullPath($mirrorRoot)
+      if (!(Test-AmbBackupIndependent $BackupRoot $mirrorFullPath)) {
+        throw "BACKUP_MIRROR_PATH must be on a physically independent disk or remote UNC destination"
+      }
+      New-Item -ItemType Directory -Force -Path $mirrorFullPath | Out-Null
+      $mirrorAlreadyCurrent = $false
+      try {
+        $mirror = Get-AmbBackupSet $mirrorFullPath (Get-Date) ([int]::MaxValue)
+        $mirrorAlreadyCurrent = $mirror.sha256 -eq $local.sha256
+      } catch {}
+      if (!$mirrorAlreadyCurrent) {
+        Publish-AmbBackupMirror $mirrorFullPath @($local.path, "$($local.path).sha256", "$($local.path).json") $local.sha256
+        Write-Host "Existing encrypted backup was verified and delivered to the recovered independent mirror."
+      }
+    }
     Write-Host "Recent encrypted backup already exists: $($latest.FullName)"
     exit 0
   }
 
   $databaseUrl = Get-DotEnvValue "DATABASE_URL"
   $password = Get-DotEnvValue "BACKUP_ENCRYPTION_PASSWORD"
-  $mirrorRoot = Get-DotEnvValue "BACKUP_MIRROR_PATH"
   if (!$databaseUrl) { throw "DATABASE_URL is missing" }
   if ($password.Length -lt 32) { throw "BACKUP_ENCRYPTION_PASSWORD must contain at least 32 characters" }
 
