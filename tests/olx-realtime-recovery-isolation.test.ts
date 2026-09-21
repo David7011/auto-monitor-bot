@@ -104,6 +104,98 @@ describe("OLX realtime isolation from historical recovery", () => {
     expect(last.recoveryOverlapPage).toBe(1);
   });
 
+  it("does not advance a multi-feed page until every feed candidate fits the durable ingest budget", async () => {
+    vi.spyOn(olxLaneArbiter, "waitForBackfillWindow").mockResolvedValue(true);
+    vi.spyOn(feed, "fetchOlxFeed").mockImplementation(async (_api, url, primary, _channel, observationTarget) => {
+      const region = observationTarget.match(/region:([^;]+)/u)?.[1] ?? "all";
+      return {
+        primary, url, observationTarget, requestCount: 1, channel: "OLX_PUBLIC_HTML" as const,
+        ads: Array.from({ length: 30 }, (_, index) => ({
+          id: `${region}-${index}`,
+          url: `https://www.olx.ua/d/test-ID${region}-${index}.html`,
+          createdTime: "2026-09-20T10:00:00Z",
+        })),
+      };
+    });
+    const multiFeedContext = {
+      ...context,
+      fingerprint: "recovery-multi-feed",
+      regions: ["dnipropetrovska", "kyivska"],
+    };
+    const known = new Set<string>();
+    const collect = () => new OlxCollector().collect(multiFeedContext, {
+      id: "state", fingerprint: multiFeedContext.fingerprint,
+      coverageRecoveryPending: true,
+      coverageRecoveryCutoffAt: new Date("2026-09-01T00:00:00Z"),
+      recoveryProgressPage: 1,
+      knownExternalIds: known,
+      coverageAnchorExternalIds: new Set(),
+    }, {
+      lane: "BACKFILL" as const, recovery: true, maxPages: 1, maxCandidates: 50,
+      deadlineAt: new Date(Date.now() + 90_000),
+    });
+
+    const first = await collect();
+    expect(first.listings).toHaveLength(50);
+    expect(first.recoveryProgressPage).toBe(1);
+    expect(first.recoveryNoProgressReason).toBe("CANDIDATE_BUDGET_EXHAUSTED");
+    for (const item of first.listings) known.add(item.externalId);
+
+    const second = await collect();
+    for (const item of second.listings) known.add(item.externalId);
+    expect(second.listings).toHaveLength(10);
+    expect(known).toHaveLength(60);
+    expect(second.recoveryProgressPage).toBe(2);
+    expect(second.recoveryOverlapPage).toBe(1);
+    expect(second.recoveryOverlapExternalIds).toHaveLength(3);
+  });
+
+  it("keeps continuity UNRESOLVED when mutable offsets would omit upstream ID 101", async () => {
+    let upstreamIds = Array.from({ length: 151 }, (_, index) => String(index + 1));
+    const processed = new Set<string>();
+    vi.spyOn(olxLaneArbiter, "waitForBackfillWindow").mockResolvedValue(true);
+    vi.spyOn(feed, "fetchOlxFeed").mockImplementation(async (_api, url, primary, _channel, observationTarget) => {
+      const page = Number(new URL(url).searchParams.get("page") ?? "1");
+      const offset = (page - 1) * 50;
+      return {
+        primary, url, observationTarget, requestCount: 1, channel: "OLX_PUBLIC_HTML" as const,
+        ads: upstreamIds.slice(offset, offset + 50).map((id) => ({
+          id,
+          url: `https://www.olx.ua/d/test-ID${id}.html`,
+          createdTime: "2026-09-20T10:00:00Z",
+        })),
+      };
+    });
+    const run = (progress: number, overlapPage?: number, overlap?: string[]) => new OlxCollector().collect(context, {
+      id: "state", fingerprint: context.fingerprint,
+      coverageRecoveryPending: true,
+      coverageRecoveryCutoffAt: new Date("2026-09-01T00:00:00Z"),
+      recoveryProgressPage: progress,
+      recoveryOverlapPage: overlapPage,
+      recoveryOverlapExternalIds: new Set(overlap ?? []),
+      knownExternalIds: new Set(processed),
+      coverageAnchorExternalIds: new Set(["151"]),
+    }, {
+      lane: "BACKFILL" as const, recovery: true, maxPages: 1, maxCandidates: 1_000,
+      deadlineAt: new Date(Date.now() + 90_000),
+    });
+
+    const first = await run(1);
+    first.listings.forEach((item) => processed.add(item.externalId));
+    const second = await run(first.recoveryProgressPage!, first.recoveryOverlapPage, first.recoveryOverlapExternalIds);
+    second.listings.forEach((item) => processed.add(item.externalId));
+
+    // Deleting a head item shifts ID 101 into the already-scanned page 2.
+    // A naive page-3 continuation would miss it and could encounter anchor
+    // 151. Revalidating page 2 must reject that false proof.
+    upstreamIds = upstreamIds.filter((id) => id !== "1");
+    const third = await run(second.recoveryProgressPage!, second.recoveryOverlapPage, second.recoveryOverlapExternalIds);
+    expect(processed.has("101")).toBe(false);
+    expect(upstreamIds).toContain("101");
+    expect(third.coverageVerified).toBe(false);
+    expect(third.coverageUnresolvedReason).toBe("UNSTABLE_PAGINATION");
+  });
+
   it.each([
     ["insertion", (ids: string[]) => ["new-head", ...ids]],
     ["deletion", (ids: string[]) => ids.filter((id) => id !== "1")],

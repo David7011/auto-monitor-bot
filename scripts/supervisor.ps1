@@ -20,6 +20,7 @@ $StartScript = Join-Path $PSScriptRoot "start.ps1"
 $FastRecoveryScript = Join-Path $PSScriptRoot "recover.ps1"
 $ReadinessScript = Join-Path $PSScriptRoot "wait-core-readiness.ps1"
 $StartLockPath = Join-Path $RuntimeRoot "start.lock"
+$MaintenanceLeasePath = Join-Path $RuntimeRoot "deployment-maintenance.json"
 $HeartbeatPath = Join-Path $RuntimeRoot "supervisor-heartbeat.json"
 $WorkerHeartbeatDir = Join-Path $RuntimeRoot "worker-heartbeats"
 $ProcessManagementScript = Join-Path $PSScriptRoot "process-management.ps1"
@@ -205,14 +206,39 @@ function Test-LocalTcpPort([int]$Port, [int]$TimeoutMilliseconds = 500) {
   }
 }
 
-function Test-ApiLiveness {
+function Get-ApiHealthSnapshot {
   try {
-    $null = Invoke-WebRequest -Uri "http://127.0.0.1:4000/health" -UseBasicParsing -TimeoutSec 2
-    return $true
+    return Invoke-RestMethod -Uri "http://127.0.0.1:4000/health" -TimeoutSec 2
   } catch {
-    # An HTTP error response still proves that the API event loop accepted and
-    # answered the request; connection/timeout failures do not.
-    return $null -ne $_.Exception.Response
+    return $null
+  }
+}
+
+function Test-SchedulerProgress($Health, [int]$StaleSeconds = 30) {
+  if (!$Health -or !$Health.monitoring -or $Health.monitoring.status -ne "RUNNING") { return $true }
+  try {
+    $lastTick = Convert-HeartbeatToUtc $Health.monitoring.lastTickAt
+    return $lastTick -ge [datetime]::UtcNow.AddSeconds(-[Math]::Max(15, $StaleSeconds))
+  } catch {
+    return $false
+  }
+}
+
+function Test-SchedulerDependenciesReady($Health) {
+  return $Health -and
+    $Health.database -and $Health.database.status -eq "OK" -and
+    $Health.redis -and $Health.redis.status -ne "FAIL"
+}
+
+function Test-DeploymentMaintenanceActive {
+  if (!(Test-Path -LiteralPath $MaintenanceLeasePath -PathType Leaf)) { return $false }
+  try {
+    $lease = Get-Content -LiteralPath $MaintenanceLeasePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (!$lease.expiresAt) { return $false }
+    return ([datetimeoffset]::Parse([string]$lease.expiresAt).UtcDateTime) -gt [datetime]::UtcNow
+  } catch {
+    # Invalid/expired maintenance metadata may not suppress repair forever.
+    return $false
   }
 }
 
@@ -255,7 +281,7 @@ try {
     # Validation is read-only with respect to the accepted runtime and must
     # never suppress liveness repair. Only the short startup/deploy lock owns
     # process replacement.
-    if (Test-LockHeld $StartLockPath) {
+    if ((Test-LockHeld $StartLockPath) -or (Test-DeploymentMaintenanceActive)) {
       $failures = 0
       Start-Sleep -Seconds ([Math]::Max(1, $CheckIntervalSeconds))
       continue
@@ -263,10 +289,18 @@ try {
     $missingServices = @(Get-MissingServiceNames)
     $staleWorkerServices = if ($missingServices.Count -eq 0) { @(Get-StaleWorkerServiceNames) } else { @() }
     $apiLivenessFailed = $false
+    $schedulerProgressFailed = $false
     if ($missingServices.Count -eq 0 -and $staleWorkerServices.Count -eq 0) {
-      $apiLivenessFailed = !(Test-ApiLiveness)
+      $apiHealthSnapshot = Get-ApiHealthSnapshot
+      $apiLivenessFailed = $null -eq $apiHealthSnapshot
+      # A stalled scheduler is actionable only while its dependencies are
+      # ready. During a PostgreSQL/Redis outage the readiness circuit below
+      # owns bounded recovery/backoff and must not create an API restart loop.
+      if (!$apiLivenessFailed -and (Test-SchedulerDependenciesReady $apiHealthSnapshot)) {
+        $schedulerProgressFailed = !(Test-SchedulerProgress $apiHealthSnapshot)
+      }
     }
-    $staleApiServices = if ($apiLivenessFailed) { @("api") } else { @() }
+    $staleApiServices = if ($apiLivenessFailed -or $schedulerProgressFailed) { @("api") } else { @() }
     $targetedRestartServices = @($staleWorkerServices + $staleApiServices | Select-Object -Unique)
     if ($missingServices.Count -gt 0) {
       # A dead process is definitive and should not wait for two HTTP probes.

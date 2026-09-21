@@ -14,6 +14,7 @@ $SupervisorScript = Join-Path $ProjectRoot "scripts\supervisor.ps1"
 $SupervisorTaskName = "Auto Monitor Bot"
 $SupervisorLockPath = Join-Path $RuntimeRoot "supervisor.lock"
 $StartLockPath = Join-Path $RuntimeRoot "start.lock"
+$MaintenanceLeasePath = Join-Path $RuntimeRoot "deployment-maintenance.json"
 $SupervisorHeartbeatPath = Join-Path $RuntimeRoot "supervisor-heartbeat.json"
 $ProcessManagementScript = Join-Path $PSScriptRoot "process-management.ps1"
 $RuntimeIntentScript = Join-Path $PSScriptRoot "runtime-intent.ps1"
@@ -48,6 +49,19 @@ function Test-LockHeld([string]$Path) {
     return $true
   } finally {
     if ($probe) { $probe.Dispose() }
+  }
+}
+
+function Test-DeploymentMaintenanceActive {
+  if (!(Test-Path -LiteralPath $MaintenanceLeasePath -PathType Leaf)) { return $false }
+  try {
+    $lease = Get-Content -LiteralPath $MaintenanceLeasePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (!$lease.expiresAt) { return $false }
+    return ([datetimeoffset]::Parse([string]$lease.expiresAt).UtcDateTime) -gt [datetime]::UtcNow
+  } catch {
+    # A malformed lease must fail open for repair. It is diagnostic state, not
+    # permission to suppress self-heal indefinitely.
+    return $false
   }
 }
 
@@ -323,7 +337,7 @@ try {
     exit 0
   }
 
-  if (Test-LockHeld $StartLockPath) {
+  if ((Test-LockHeld $StartLockPath) -or (Test-DeploymentMaintenanceActive)) {
     Write-WatchdogLog "health check deferred while startup/deployment is in progress"
     exit 0
   }
