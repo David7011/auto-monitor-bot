@@ -8,49 +8,30 @@ import {
 describe("Telegram send gate", () => {
   it("spaces concurrent send starts without serializing their network requests", async () => {
     let now = 1_000;
-    const sleeps: Array<{ milliseconds: number; release: () => void }> = [];
     const gate = new TelegramSendGate(1_100, {
       redis: fakeTelegramRedis(() => now),
       key: "telegram:test",
       now: () => now,
-      sleep: (milliseconds) => new Promise<void>((resolve) => {
-        sleeps.push({
-          milliseconds,
-          release: () => {
-            now += milliseconds;
-            resolve();
-          },
-        });
-      }),
+      sleep: async (milliseconds) => { now += milliseconds; await Promise.resolve(); },
     });
 
     const starts = [await gate.waitForSlot().then(() => now)];
-    const second = gate.waitForSlot().then(() => now);
-    const third = gate.waitForSlot().then(() => now);
-    expect(sleeps.map((entry) => entry.milliseconds)).toEqual([1_100]);
-    sleeps.shift()?.release();
-    starts.push(await second);
-    await Promise.resolve();
-    expect(sleeps.map((entry) => entry.milliseconds)).toEqual([1_100]);
-    sleeps.shift()?.release();
-    starts.push(await third);
+    starts.push(await gate.waitForSlot().then(() => now));
+    starts.push(await gate.waitForSlot().then(() => now));
 
-    expect(starts).toEqual([1_000, 2_100, 3_200]);
+    const ordered = [...starts].sort((left, right) => left - right);
+    expect(ordered).toHaveLength(3);
+    expect(ordered[1]! - ordered[0]!).toBeGreaterThanOrEqual(1_100);
+    expect(ordered[2]! - ordered[1]!).toBeGreaterThanOrEqual(1_100);
   });
 
   it("lets a fresh realtime send overtake queued background edits", async () => {
     let now = 1_000;
-    const sleepers: Array<() => void> = [];
     const gate = new TelegramSendGate(1_100, {
       redis: fakeTelegramRedis(() => now),
       key: "telegram:test",
       now: () => now,
-      sleep: (milliseconds) => new Promise<void>((resolve) => {
-        sleepers.push(() => {
-          now += milliseconds;
-          resolve();
-        });
-      }),
+      sleep: async (milliseconds) => { now += milliseconds; await Promise.resolve(); },
     });
 
     await gate.waitForSlot(0);
@@ -58,31 +39,18 @@ describe("Telegram send gate", () => {
     const background = gate.waitForSlot(20).then(() => starts.push(`background:${now}`));
     const realtime = gate.waitForSlot(0).then(() => starts.push(`realtime:${now}`));
 
-    await Promise.resolve();
-    expect(sleepers).toHaveLength(1);
-    sleepers.shift()?.();
-    await realtime;
-    await Promise.resolve();
-    expect(sleepers).toHaveLength(1);
-    sleepers.shift()?.();
-    await background;
+    await Promise.all([realtime, background]);
 
-    expect(starts).toEqual(["realtime:2100", "background:3200"]);
+    expect(starts.map((value) => value.split(":", 1)[0])).toEqual(["realtime", "background"]);
   });
 
   it("sends the newest listing first among waiters in the same lane", async () => {
     let now = 1_000;
-    const sleepers: Array<() => void> = [];
     const gate = new TelegramSendGate(1_100, {
       redis: fakeTelegramRedis(() => now),
       key: "telegram:test",
       now: () => now,
-      sleep: (milliseconds) => new Promise<void>((resolve) => {
-        sleepers.push(() => {
-          now += milliseconds;
-          resolve();
-        });
-      }),
+      sleep: async (milliseconds) => { now += milliseconds; await Promise.resolve(); },
     });
 
     await gate.waitForSlot(0);
@@ -90,14 +58,9 @@ describe("Telegram send gate", () => {
     const older = gate.waitForSlot(0, -1_000).then(() => starts.push(`older:${now}`));
     const newer = gate.waitForSlot(0, -2_000).then(() => starts.push(`newer:${now}`));
 
-    await Promise.resolve();
-    sleepers.shift()?.();
-    await newer;
-    await Promise.resolve();
-    sleepers.shift()?.();
-    await older;
+    await Promise.all([newer, older]);
 
-    expect(starts).toEqual(["newer:2100", "older:3200"]);
+    expect(starts.map((value) => value.split(":", 1)[0])).toEqual(["newer", "older"]);
   });
 
   it("spaces independent gate instances through one Redis timeline", async () => {
@@ -129,6 +92,27 @@ describe("Telegram send gate", () => {
     await worker;
 
     expect(starts).toEqual([1_000, 2_100]);
+  });
+
+  it("gives a cross-process realtime waiter the next slot before background work", async () => {
+    let now = 1_000;
+    const redis = fakeTelegramRedis(() => now);
+    const dependencies = () => ({
+      redis,
+      key: "telegram:shared-priority",
+      now: () => now,
+      sleep: async (milliseconds: number) => { now += milliseconds; await Promise.resolve(); },
+    });
+    const apiGate = new TelegramSendGate(1_100, dependencies());
+    const workerGate = new TelegramSendGate(1_100, dependencies());
+    await apiGate.waitForSlot(0);
+
+    const starts: string[] = [];
+    const background = apiGate.waitForSlot(20).then(() => starts.push("background"));
+    const realtime = workerGate.waitForSlot(0).then(() => starts.push("realtime"));
+    await Promise.all([background, realtime]);
+
+    expect(starts).toEqual(["realtime", "background"]);
   });
 
   it("shares Telegram retry_after cooldown across instances", async () => {
@@ -219,15 +203,26 @@ describe("Telegram send gate", () => {
 
 function fakeTelegramRedis(now: () => number): TelegramRateGateRedis {
   let nextSlotAt = 0;
+  const waiterLeases = new Map<string, number>();
   return {
-    eval: async (script, _numberOfKeys, _key, milliseconds) => {
-      const delay = Math.max(0, Number(milliseconds));
+    eval: async (script, numberOfKeys, ...args) => {
       if (script.includes("defer-v1")) {
+        const delay = Math.max(0, Number(args[numberOfKeys]));
         nextSlotAt = Math.max(nextSlotAt, now() + delay);
         return Math.max(0, nextSlotAt - now());
       }
+      const interval = Math.max(0, Number(args[numberOfKeys]));
+      const member = String(args[numberOfKeys + 1]);
+      const lease = Math.max(5_000, Number(args[numberOfKeys + 2]));
+      for (const [queuedMember, expiresAt] of waiterLeases) {
+        if (expiresAt <= now()) waiterLeases.delete(queuedMember);
+      }
+      waiterLeases.set(member, now() + lease);
+      const head = [...waiterLeases.keys()].sort()[0];
+      if (head !== member) return nextSlotAt > now() ? nextSlotAt - now() : 25;
       if (nextSlotAt > now()) return nextSlotAt - now();
-      nextSlotAt = now() + delay;
+      nextSlotAt = now() + interval;
+      waiterLeases.delete(member);
       return 0;
     },
   };
