@@ -5,6 +5,13 @@ $script:AmbReleaseArtifactRoots = @(
   "apps\worker\dist",
   "apps\dashboard\.next"
 )
+$script:AmbReleaseCandidateRoots = [ordered]@{
+  "packages\shared\dist" = "packages\shared\.dist-validation"
+  "packages\db\dist" = "packages\db\.dist-validation"
+  "apps\api\dist" = "apps\api\.dist-validation"
+  "apps\worker\dist" = "apps\worker\.dist-validation"
+  "apps\dashboard\.next" = "apps\dashboard\.next-validation"
+}
 
 function Get-AmbRelativePath([string]$Root, [string]$Path) {
   $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
@@ -50,6 +57,104 @@ function Get-AmbTrackedCommit([string]$ProjectPath) {
   $dirty = @(& $git.Source -c $safeDirectory -C $ProjectPath status --porcelain --untracked-files=no 2>$null)
   if ($dirty.Count -gt 0) { throw "Refusing to accept a release from a tracked dirty checkout" }
   return $commit.ToLowerInvariant()
+}
+
+function Get-AmbReleaseCandidateArtifacts([string]$ProjectPath) {
+  $root = [IO.Path]::GetFullPath($ProjectPath).TrimEnd('\')
+  $artifacts = foreach ($activeRoot in $script:AmbReleaseCandidateRoots.Keys) {
+    $candidateRoot = [string]$script:AmbReleaseCandidateRoots[$activeRoot]
+    $sourceRoot = Join-Path $root $candidateRoot
+    if (!(Test-Path -LiteralPath $sourceRoot -PathType Container)) {
+      throw "Release candidate root is missing: $sourceRoot"
+    }
+    foreach ($file in Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force) {
+      $sourceRelative = Get-AmbRelativePath $sourceRoot $file.FullName
+      if ($activeRoot -eq "apps\dashboard\.next" -and
+          ($sourceRelative -like "cache\*" -or $sourceRelative -eq "trace")) { continue }
+      [ordered]@{
+        path = Join-Path $activeRoot $sourceRelative
+        sourcePath = Get-AmbRelativePath $root $file.FullName
+        size = $file.Length
+        sha256 = Get-AmbFileSha256 $file.FullName
+      }
+    }
+  }
+  return @($artifacts | Sort-Object path -Unique)
+}
+
+function New-AmbReleaseCandidateManifest([string]$ProjectPath, [string]$RuntimeVersion) {
+  $root = [IO.Path]::GetFullPath($ProjectPath).TrimEnd('\')
+  $commit = Get-AmbTrackedCommit $root
+  $candidate = [ordered]@{
+    format = "amb-release-candidate-v1"
+    commit = $commit
+    builtAt = [datetime]::UtcNow.ToString("o")
+    runtimeVersion = $RuntimeVersion
+    artifacts = @(Get-AmbReleaseCandidateArtifacts $root)
+  }
+  $path = Join-Path $root ".runtime\release-candidate.json"
+  $temp = "$path.$([guid]::NewGuid().ToString('N')).tmp"
+  [IO.File]::WriteAllText($temp, ($candidate | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+  Move-Item -LiteralPath $temp -Destination $path -Force
+  return [pscustomobject]$candidate
+}
+
+function New-AmbAcceptedReleaseFromCandidate([string]$ProjectPath, [string]$RuntimeVersion) {
+  $root = [IO.Path]::GetFullPath($ProjectPath).TrimEnd('\')
+  $commit = Get-AmbTrackedCommit $root
+  $candidatePath = Join-Path $root ".runtime\release-candidate.json"
+  if (!(Test-Path -LiteralPath $candidatePath -PathType Leaf)) { throw "Release candidate manifest is missing" }
+  $candidate = Get-Content -LiteralPath $candidatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($candidate.format -ne "amb-release-candidate-v1" -or
+      $candidate.commit -ne $commit -or $candidate.runtimeVersion -ne $RuntimeVersion) {
+    throw "Release candidate provenance does not match the current clean commit/runtime"
+  }
+
+  $currentArtifacts = @(Get-AmbReleaseCandidateArtifacts $root)
+  $expected = @($candidate.artifacts)
+  if ($currentArtifacts.Count -ne $expected.Count) { throw "Release candidate artifact set changed after build" }
+  for ($index = 0; $index -lt $expected.Count; $index++) {
+    foreach ($field in @("path", "sourcePath", "sha256", "size")) {
+      if ([string]$currentArtifacts[$index][$field] -ne [string]$expected[$index].$field) {
+        throw "Release candidate artifact changed after build: $($expected[$index].path)"
+      }
+    }
+  }
+
+  $createdAt = [datetime]::UtcNow
+  $releaseId = "{0}-{1}" -f $commit.Substring(0, 12), $createdAt.ToString("yyyyMMddHHmmss")
+  $releasesRoot = Join-Path $root ".runtime\releases"
+  $staging = Join-Path $releasesRoot (".staging-" + [guid]::NewGuid().ToString("N"))
+  $releasePath = Join-Path $releasesRoot $releaseId
+  New-Item -ItemType Directory -Force -Path $staging | Out-Null
+  try {
+    $artifacts = foreach ($artifact in $expected) {
+      $source = Join-Path $root ([string]$artifact.sourcePath)
+      $snapshot = Join-Path (Join-Path $staging "artifacts") ([string]$artifact.path)
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $snapshot) | Out-Null
+      Copy-Item -LiteralPath $source -Destination $snapshot
+      [ordered]@{ path = [string]$artifact.path; size = [long]$artifact.size; sha256 = [string]$artifact.sha256 }
+    }
+    $schemaPath = Join-Path $root "packages\db\prisma\schema.prisma"
+    $manifest = [ordered]@{
+      format = "amb-accepted-release-v1"
+      releaseId = $releaseId
+      commit = $commit
+      createdAt = $createdAt.ToString("o")
+      candidateBuiltAt = [string]$candidate.builtAt
+      runtimeVersion = $RuntimeVersion
+      schemaSha256 = Get-AmbFileSha256 $schemaPath
+      migrationIds = @(Get-ChildItem -LiteralPath (Join-Path $root "packages\db\prisma\migrations") -Directory | Sort-Object Name | ForEach-Object Name)
+      artifactRoots = $script:AmbReleaseArtifactRoots
+      artifacts = @($artifacts)
+    }
+    [IO.File]::WriteAllText((Join-Path $staging "release-manifest.json"), ($manifest | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $staging -Destination $releasePath
+    return [pscustomobject]$manifest
+  } catch {
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    throw
+  }
 }
 
 function New-AmbAcceptedRelease([string]$ProjectPath, [string]$RuntimeVersion) {

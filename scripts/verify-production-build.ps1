@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [switch]$SkipLock
+  [switch]$SkipLock,
+  [switch]$PreserveOutputs
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +16,7 @@ $DashboardNextEnvBytes = if ($DashboardNextEnvExisted) {
 } else {
   $null
 }
+. (Join-Path $PSScriptRoot "accepted-release.ps1")
 
 function Invoke-Pnpm {
   param([Parameter(Mandatory = $true)][string[]]$Arguments)
@@ -87,9 +89,17 @@ try {
     }
   }
 
+  if ($PreserveOutputs) {
+    $runtimeVersion = (& node --version).Trim()
+    $candidate = New-AmbReleaseCandidateManifest $ProjectRoot $runtimeVersion
+    Write-Host "Release candidate built from commit $($candidate.commit)" -ForegroundColor Green
+  }
+
   Write-Host "Isolated production build passed; live artifacts were not modified." -ForegroundColor Green
 } finally {
-  foreach ($directory in $validationDirs) { Remove-ValidationOutput -Path $directory }
+  if (!$PreserveOutputs) {
+    foreach ($directory in $validationDirs) { Remove-ValidationOutput -Path $directory }
+  }
   if ($DashboardNextEnvExisted) {
     [IO.File]::WriteAllBytes($DashboardNextEnvPath, $DashboardNextEnvBytes)
   } elseif (Test-Path -LiteralPath $DashboardNextEnvPath) {

@@ -45,4 +45,17 @@ describe("accepted production release policy", () => {
     expect(health).toContain('codeRevision: process.env.AMB_CODE_REVISION ?? "unknown"');
     expect(health).toContain('releaseId: process.env.AMB_RELEASE_ID ?? null');
   });
+
+  it("accepts only checksum-pinned candidate artifacts built from the same clean commit", () => {
+    const release = script("accepted-release.ps1");
+    const build = script("verify-production-build.ps1");
+    const accept = script("accept-release.ps1");
+
+    expect(build).toContain("New-AmbReleaseCandidateManifest $ProjectRoot $runtimeVersion");
+    expect(release).toContain("New-AmbAcceptedReleaseFromCandidate");
+    expect(release).toContain("Release candidate provenance does not match the current clean commit/runtime");
+    expect(release).toContain("Release candidate artifact changed after build");
+    expect(accept).toContain("New-AmbAcceptedReleaseFromCandidate");
+    expect(accept).toContain("Restore-AmbAcceptedRelease $ProjectRoot $manifest.releaseId");
+  });
 });
