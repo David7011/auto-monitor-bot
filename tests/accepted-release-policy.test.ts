@@ -55,6 +55,7 @@ describe("accepted production release policy", () => {
     expect(release).toContain("New-AmbAcceptedReleaseFromCandidate");
     expect(release).toContain("Release candidate provenance does not match the current clean commit/runtime");
     expect(release).toContain("Release candidate artifact changed after build");
+    expect(release).toContain("Release candidate has no artifacts for required root");
     expect(accept).toContain("New-AmbAcceptedReleaseFromCandidate");
     expect(accept).toContain("Restore-AmbAcceptedRelease $ProjectRoot $manifest.releaseId");
   });

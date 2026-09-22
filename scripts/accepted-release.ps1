@@ -71,7 +71,7 @@ function Get-AmbReleaseCandidateArtifacts([string]$ProjectPath) {
       $sourceRelative = Get-AmbRelativePath $sourceRoot $file.FullName
       if ($activeRoot -eq "apps\dashboard\.next" -and
           ($sourceRelative -like "cache\*" -or $sourceRelative -eq "trace")) { continue }
-      [ordered]@{
+      [pscustomobject][ordered]@{
         path = Join-Path $activeRoot $sourceRelative
         sourcePath = Get-AmbRelativePath $root $file.FullName
         size = $file.Length
@@ -79,7 +79,13 @@ function Get-AmbReleaseCandidateArtifacts([string]$ProjectPath) {
       }
     }
   }
-  return @($artifacts | Sort-Object path -Unique)
+  $sorted = @($artifacts | Sort-Object path -Unique)
+  foreach ($activeRoot in $script:AmbReleaseCandidateRoots.Keys) {
+    if (!($sorted | Where-Object { $_.path -like "$activeRoot\*" } | Select-Object -First 1)) {
+      throw "Release candidate has no artifacts for required root: $activeRoot"
+    }
+  }
+  return $sorted
 }
 
 function New-AmbReleaseCandidateManifest([string]$ProjectPath, [string]$RuntimeVersion) {
@@ -115,7 +121,7 @@ function New-AmbAcceptedReleaseFromCandidate([string]$ProjectPath, [string]$Runt
   if ($currentArtifacts.Count -ne $expected.Count) { throw "Release candidate artifact set changed after build" }
   for ($index = 0; $index -lt $expected.Count; $index++) {
     foreach ($field in @("path", "sourcePath", "sha256", "size")) {
-      if ([string]$currentArtifacts[$index][$field] -ne [string]$expected[$index].$field) {
+      if ([string]$currentArtifacts[$index].$field -ne [string]$expected[$index].$field) {
         throw "Release candidate artifact changed after build: $($expected[$index].path)"
       }
     }
