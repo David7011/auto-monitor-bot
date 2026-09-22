@@ -23,9 +23,11 @@ $StartLockPath = Join-Path $RuntimeRoot "start.lock"
 $ProcessManagementScript = Join-Path $PSScriptRoot "process-management.ps1"
 $EnsureNodeRuntimeScript = Join-Path $PSScriptRoot "ensure-node-runtime.ps1"
 $ReadinessScript = Join-Path $PSScriptRoot "wait-core-readiness.ps1"
+$AcceptedReleaseScript = Join-Path $PSScriptRoot "accepted-release.ps1"
 
 New-Item -ItemType Directory -Force -Path $RuntimeRoot, $LogDir, $PidDir | Out-Null
 . $ProcessManagementScript
+. $AcceptedReleaseScript
 
 $lock = $null
 try {
@@ -153,6 +155,13 @@ try {
     throw "Pinned Node.js runtime is unavailable"
   }
   $env:NODE_ENV = "production"
+  if ((Test-Path -LiteralPath (Join-Path $ProjectRoot ".runtime\accepted-release-required")) -or
+      (Test-Path -LiteralPath (Join-Path $ProjectRoot ".runtime\accepted-release.json"))) {
+    $runtimeVersion = (& $script:NodeExe --version).Trim()
+    $release = Assert-AmbAcceptedRelease $ProjectRoot $runtimeVersion
+    $env:AMB_CODE_REVISION = [string]$release.commit
+    $env:AMB_RELEASE_ID = [string]$release.releaseId
+  }
 
   foreach ($name in @($RestartServices | Select-Object -Unique)) {
     $recorded = Get-RecordedOwnedProcess $name

@@ -4,7 +4,9 @@ $ProjectRootMsys = "/cygdrive/" + (Split-Path -Qualifier $ProjectRoot).TrimEnd("
 $PostgresPort = if ($env:POSTGRES_PORT) { [int]$env:POSTGRES_PORT } else { 55432 }
 $Failed = $false
 $RuntimeIntentScript = Join-Path $PSScriptRoot "runtime-intent.ps1"
+$AcceptedReleaseScript = Join-Path $PSScriptRoot "accepted-release.ps1"
 . $RuntimeIntentScript
+. $AcceptedReleaseScript
 
 function Get-DotEnvValue([string]$Name) {
   $envPath = Join-Path $ProjectRoot ".env"
@@ -40,6 +42,20 @@ $ApiHeaders = if ($LocalApiToken) { @{ Authorization = "Bearer $LocalApiToken" }
 Write-Host "Project: $ProjectRoot"
 Write-Host "Drive:   $(Split-Path -Qualifier $ProjectRoot)"
 Write-Host "Mode:    $(if (Test-AmbRunIntent) { 'AUTOSTART SESSION ACTIVE' } else { 'STOPPED UNTIL NEXT BOOT OR MANUAL START' })"
+$AcceptedRelease = $null
+$releaseEnforcement = Test-Path -LiteralPath (Join-Path $ProjectRoot ".runtime\accepted-release-required")
+$acceptedManifestExists = Test-Path -LiteralPath (Join-Path $ProjectRoot ".runtime\accepted-release.json")
+if ($releaseEnforcement -or $acceptedManifestExists) {
+  try {
+    $AcceptedRelease = Get-AmbAcceptedRelease $ProjectRoot
+    Write-Host "Release: $($AcceptedRelease.releaseId) ($($AcceptedRelease.commit))"
+  } catch {
+    Write-Host "Release: INVALID - $($_.Exception.Message)"
+    $Failed = $true
+  }
+} else {
+  Write-Host "Release: LEGACY (accepted-release enforcement not adopted yet)"
+}
 Write-Host ""
 
 if (!(Test-AmbRunIntent)) {
@@ -175,6 +191,16 @@ Write-Host "API health:"
 try {
   $health = Invoke-RestMethod "http://localhost:4000/health" -Headers $ApiHeaders -TimeoutSec 5
   $health | ConvertTo-Json -Depth 4
+  if ($AcceptedRelease) {
+    $apiCommit = [string]$health.api.codeRevision
+    $apiReleaseId = [string]$health.api.releaseId
+    if ($apiCommit -ne [string]$AcceptedRelease.commit -or $apiReleaseId -ne [string]$AcceptedRelease.releaseId) {
+      Write-Host "Accepted release mismatch: manifest=$($AcceptedRelease.releaseId)/$($AcceptedRelease.commit), api=$apiReleaseId/$apiCommit"
+      $Failed = $true
+    } else {
+      Write-Host "Accepted release identity: MATCH"
+    }
+  }
   if ($health.sourceHealth) {
     Write-Host ""
     Write-Host "Target source freshness:"

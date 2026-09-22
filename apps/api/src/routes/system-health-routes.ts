@@ -241,6 +241,8 @@ export async function systemHealthRoutes(app: FastifyInstance): Promise<void> {
         status: "OK" as const,
         startedAt: apiStartedAt.toISOString(),
         uptimeSeconds: Math.round(process.uptime()),
+        codeRevision: process.env.AMB_CODE_REVISION ?? "unknown",
+        releaseId: process.env.AMB_RELEASE_ID ?? null,
       },
       database,
       redis,

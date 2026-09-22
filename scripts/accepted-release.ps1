@@ -95,6 +95,11 @@ function New-AmbAcceptedRelease([string]$ProjectPath, [string]$RuntimeVersion) {
     $activeTemp = "$activePath.$([guid]::NewGuid().ToString('N')).tmp"
     [IO.File]::WriteAllText($activeTemp, $manifestJson, [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $activeTemp -Destination $activePath -Force
+    [IO.File]::WriteAllText(
+      (Join-Path $root ".runtime\accepted-release-required"),
+      "accepted release enforcement enabled`n",
+      [Text.UTF8Encoding]::new($false)
+    )
     return [pscustomobject]$manifest
   } catch {
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
@@ -159,5 +164,10 @@ function Restore-AmbAcceptedRelease([string]$ProjectPath, [string]$ReleaseId) {
     Copy-Item -LiteralPath $source -Destination $target
   }
   Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $root ".runtime\accepted-release.json") -Force
+  [IO.File]::WriteAllText(
+    (Join-Path $root ".runtime\accepted-release-required"),
+    "accepted release enforcement enabled`n",
+    [Text.UTF8Encoding]::new($false)
+  )
   return Assert-AmbAcceptedRelease $root ([string]$manifest.runtimeVersion)
 }

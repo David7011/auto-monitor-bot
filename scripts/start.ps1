@@ -18,6 +18,7 @@ $NodeRuntimeDir = Join-Path $ProjectRoot ".runtime\node"
 $EnsureNodeRuntimeScript = Join-Path $PSScriptRoot "ensure-node-runtime.ps1"
 $ProcessManagementScript = Join-Path $PSScriptRoot "process-management.ps1"
 $RuntimeIntentScript = Join-Path $PSScriptRoot "runtime-intent.ps1"
+$AcceptedReleaseScript = Join-Path $PSScriptRoot "accepted-release.ps1"
 $StartLockPath = Join-Path $ProjectRoot ".runtime\start.lock"
 $StartupMetricsPath = Join-Path $ProjectRoot ".runtime\startup-metrics.json"
 $StartupStartedAt = [DateTime]::UtcNow
@@ -45,6 +46,7 @@ function Write-StartupMetrics([string]$Status) {
 New-Item -ItemType Directory -Force -Path $LogDir, $PidDir, $RedisDir, $NodeRuntimeDir | Out-Null
 . $ProcessManagementScript
 . $RuntimeIntentScript
+. $AcceptedReleaseScript
 Set-AmbRunIntent
 
 try {
@@ -495,7 +497,17 @@ function Set-AmbCodeRevision {
 
 & $script:NodeExe (Join-Path $PSScriptRoot "ensure-local-secrets.mjs") | Out-Null
 Import-ProjectDotEnv
-Set-AmbCodeRevision
+$acceptedRelease = $null
+$releaseEnforcement = Test-Path -LiteralPath (Join-Path $ProjectRoot ".runtime\accepted-release-required")
+$acceptedManifestExists = Test-Path -LiteralPath (Join-Path $ProjectRoot ".runtime\accepted-release.json")
+if (!$Dev -and ($releaseEnforcement -or $acceptedManifestExists)) {
+  $runtimeVersion = (& $script:NodeExe --version).Trim()
+  $acceptedRelease = Assert-AmbAcceptedRelease $ProjectRoot $runtimeVersion
+  [Environment]::SetEnvironmentVariable("AMB_CODE_REVISION", [string]$acceptedRelease.commit, "Process")
+  [Environment]::SetEnvironmentVariable("AMB_RELEASE_ID", [string]$acceptedRelease.releaseId, "Process")
+} else {
+  Set-AmbCodeRevision
+}
 $configuredRedisUrl = Get-DotEnvValue "REDIS_URL"
 if ($configuredRedisUrl) {
   try {
@@ -513,8 +525,10 @@ if (!$SkipRedis) { Start-Redis }
 Wait-Port $PostgresPort 20 "PostgreSQL"
 Wait-Port $RedisPort 20 "Redis"
 Add-StartupCheckpoint "infrastructure"
-Ensure-PrismaClientGenerated
-Invoke-Pnpm @("db:migrate:deploy")
+if ($Dev -or !$acceptedRelease) {
+  Ensure-PrismaClientGenerated
+  Invoke-Pnpm @("db:migrate:deploy")
+}
 Add-StartupCheckpoint "database"
 
 if ($Dev) {
@@ -525,8 +539,15 @@ if ($Dev) {
   Start-App "worker-background" (Get-PnpmCommand @("--filter", "@amb/worker", "dev:background")) (Join-Path $LogDir "worker-background.out.log") (Join-Path $LogDir "worker-background.err.log")
   Start-App "Dashboard" (Get-PnpmCommand @("dev")) (Join-Path $LogDir "dashboard.out.log") (Join-Path $LogDir "dashboard.err.log")
 } else {
-  Ensure-ProductionBuilds
-  Add-StartupCheckpoint "productionBuild"
+  if (!$acceptedRelease) {
+    # One-time compatibility path before the first explicit accepted release.
+    # accept-release.ps1 creates an irreversible enforcement marker; after
+    # adoption, missing/corrupt manifests fail closed instead of rebuilding.
+    Ensure-ProductionBuilds
+    Add-StartupCheckpoint "legacyProductionBuild"
+  } else {
+    Add-StartupCheckpoint "acceptedReleaseVerified"
+  }
   $env:NODE_ENV = "production"
   Start-NodeApp "API" (Join-Path $ProjectRoot "apps\api") @("--conditions=production", (Join-Path $ProjectRoot "apps\api\dist\server.js")) (Join-Path $LogDir "api.out.log") (Join-Path $LogDir "api.err.log")
   Start-NodeApp "worker-hot-a" (Join-Path $ProjectRoot "apps\worker") @("--conditions=production", (Join-Path $ProjectRoot "apps\worker\dist\index.js"), "--role=hot", "--instance=a") (Join-Path $LogDir "worker-hot-a.out.log") (Join-Path $LogDir "worker-hot-a.err.log")
