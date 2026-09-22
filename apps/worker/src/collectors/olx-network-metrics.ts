@@ -65,6 +65,7 @@ export function parseOlxNetworkSamples(value: unknown): SourceNetworkTelemetry[]
       const sample: SourceNetworkTelemetry = {};
       for (const field of [
         "dispatcherWaitMs",
+        "decodeMs",
         "connectionSetupMs",
         "wireTtfbMs",
         "downloadMs",
@@ -74,6 +75,9 @@ export function parseOlxNetworkSamples(value: unknown): SourceNetworkTelemetry[]
         if (typeof number === "number" && Number.isFinite(number) && number >= 0) sample[field] = number;
       }
       if (typeof input.connectionReused === "boolean") sample.connectionReused = input.connectionReused;
+      if (typeof input.requestId === "string" && input.requestId.length <= 128) sample.requestId = input.requestId;
+      if (typeof input.originQueuedAt === "string") sample.originQueuedAt = input.originQueuedAt;
+      if (typeof input.originAdmittedAt === "string") sample.originAdmittedAt = input.originAdmittedAt;
       return Object.keys(sample).length > 0 ? [sample] : [];
     });
   } catch {

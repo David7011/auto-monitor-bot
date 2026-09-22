@@ -2,7 +2,11 @@ import diagnosticsChannel from "node:diagnostics_channel";
 import { performance } from "node:perf_hooks";
 
 export type SourceNetworkTelemetry = {
+  requestId?: string;
+  originQueuedAt?: string;
+  originAdmittedAt?: string;
   dispatcherWaitMs?: number;
+  decodeMs?: number;
   connectionSetupMs?: number;
   connectionReused?: boolean;
   wireTtfbMs?: number;

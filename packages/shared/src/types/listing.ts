@@ -76,14 +76,20 @@ export type NormalizedListing = {
   requestStartedAt?: Date;
   /** Wall-clock instant when fetch resolves with response headers (TTFB boundary). */
   firstByteAt?: Date;
-  /** Wall-clock instant after the bounded response body is fully decoded. */
+  /** Wall-clock instant after all bounded response bytes have arrived. */
   bodyReceivedAt?: Date;
+  /** Wall-clock instant after response bytes have been decoded into text. */
+  bodyDecodedAt?: Date;
   /** Wall-clock instant after source response parsing completes. */
   parsedAt?: Date;
   /** Instant a new OLX candidate is ready for the progressive hot handoff. */
   hotCandidateAt?: Date;
   networkTelemetry?: {
+    requestId?: string;
+    originQueuedAt?: string;
+    originAdmittedAt?: string;
     dispatcherWaitMs?: number;
+    decodeMs?: number;
     connectionSetupMs?: number;
     connectionReused?: boolean;
     wireTtfbMs?: number;

@@ -34,6 +34,7 @@ export async function fetchHtml(
   requestStartedAt?: Date;
   firstByteAt?: Date;
   bodyReceivedAt?: Date;
+  bodyDecodedAt?: Date;
   cacheAgeSeconds?: number;
   coordinatorWaitMs?: number;
   coordinatorPostFinishQuietMs?: number;
@@ -64,6 +65,7 @@ export async function fetchHtml(
     requestStartedAt: response.requestStartedAt,
     firstByteAt: response.firstByteAt,
     bodyReceivedAt: response.bodyReceivedAt,
+    bodyDecodedAt: response.bodyDecodedAt,
     cacheAgeSeconds: response.cacheAgeSeconds,
     coordinatorWaitMs: response.coordinatorWaitMs,
     coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,

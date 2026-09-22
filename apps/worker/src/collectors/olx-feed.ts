@@ -32,6 +32,7 @@ type OlxFeedMetadata = {
   requestStartedAt?: Date;
   firstByteAt?: Date;
   bodyReceivedAt?: Date;
+  bodyDecodedAt?: Date;
   parsedAt?: Date;
   cacheAgeSeconds?: number;
   coordinatorWaitMs?: number;
@@ -168,6 +169,7 @@ export async function fetchOlxFeed(
       requestStartedAt: apiResult.requestStartedAt ?? htmlResult.requestStartedAt,
       firstByteAt: apiResult.firstByteAt ?? htmlResult.firstByteAt,
       bodyReceivedAt: apiResult.bodyReceivedAt ?? htmlResult.bodyReceivedAt,
+      bodyDecodedAt: apiResult.bodyDecodedAt ?? htmlResult.bodyDecodedAt,
       parsedAt: apiResult.parsedAt ?? htmlResult.parsedAt,
       coordinatorWaitMs: apiResult.coordinatorWaitMs ?? htmlResult.coordinatorWaitMs,
       coordinatorPostFinishQuietMs:
@@ -227,6 +229,7 @@ async function requestOlxApiFeed(
     requestStartedAt: response.requestStartedAt,
     firstByteAt: response.firstByteAt,
     bodyReceivedAt: response.bodyReceivedAt,
+    bodyDecodedAt: response.bodyDecodedAt,
     parsedAt: response.parsedAt,
     cacheAgeSeconds: response.cacheAgeSeconds,
     coordinatorWaitMs: response.coordinatorWaitMs,
@@ -325,6 +328,7 @@ async function requestOlxHtmlFeed(
       requestStartedAt: response.requestStartedAt,
       firstByteAt: response.firstByteAt,
       bodyReceivedAt: response.bodyReceivedAt,
+      bodyDecodedAt: response.bodyDecodedAt,
       cacheAgeSeconds: response.cacheAgeSeconds,
       coordinatorWaitMs: response.coordinatorWaitMs,
       coordinatorPostFinishQuietMs: response.coordinatorPostFinishQuietMs,

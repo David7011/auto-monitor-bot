@@ -39,8 +39,11 @@ export type JournalLatencySample = {
   firstSeenAt: Date;
   notifiedAt: Date | null;
   requestStartedAt?: Date | null;
+  originQueuedAt?: Date | null;
+  originAdmittedAt?: Date | null;
   firstByteAt?: Date | null;
   bodyReceivedAt?: Date | null;
+  bodyDecodedAt?: Date | null;
   parsedAt?: Date | null;
   hotCandidateAt?: Date | null;
   journalPersistedAt?: Date | null;
@@ -59,7 +62,11 @@ export type JournalLatencySummary = {
   /** Source-reported publication timestamp to a confirmed Telegram send. */
   publicationTimestampToTelegramMs: MetricSummary;
   requestStartToFirstByteMs: MetricSummary;
+  originAdmissionWaitMs: MetricSummary;
+  originAdmissionToRequestStartMs: MetricSummary;
   firstByteToBodyReceivedMs: MetricSummary;
+  bodyReceivedToDecodedMs: MetricSummary;
+  bodyDecodedToParsedMs: MetricSummary;
   bodyReceivedToParsedMs: MetricSummary;
   parsedToHotCandidateMs: MetricSummary;
   firstByteToHotCandidateMs: MetricSummary;
@@ -168,7 +175,11 @@ export function summarizeJournalLatencies(samples: JournalLatencySample[]): Jour
   const firstSeenToTelegram: number[] = [];
   const publicationTimestampToTelegram: number[] = [];
   const requestStartToFirstByte: number[] = [];
+  const originAdmissionWait: number[] = [];
+  const originAdmissionToRequestStart: number[] = [];
   const firstByteToBodyReceived: number[] = [];
+  const bodyReceivedToDecoded: number[] = [];
+  const bodyDecodedToParsed: number[] = [];
   const bodyReceivedToParsed: number[] = [];
   const parsedToHotCandidate: number[] = [];
   const firstByteToHotCandidate: number[] = [];
@@ -184,7 +195,11 @@ export function summarizeJournalLatencies(samples: JournalLatencySample[]): Jour
 
   for (const sample of samples) {
     pushDuration(requestStartToFirstByte, sample.requestStartedAt, sample.firstByteAt);
+    pushDuration(originAdmissionWait, sample.originQueuedAt, sample.originAdmittedAt);
+    pushDuration(originAdmissionToRequestStart, sample.originAdmittedAt, sample.requestStartedAt);
     pushDuration(firstByteToBodyReceived, sample.firstByteAt, sample.bodyReceivedAt);
+    pushDuration(bodyReceivedToDecoded, sample.bodyReceivedAt, sample.bodyDecodedAt);
+    pushDuration(bodyDecodedToParsed, sample.bodyDecodedAt, sample.parsedAt);
     pushDuration(bodyReceivedToParsed, sample.bodyReceivedAt, sample.parsedAt);
     pushDuration(parsedToHotCandidate, sample.parsedAt, sample.hotCandidateAt);
     pushDuration(firstByteToHotCandidate, sample.firstByteAt, sample.hotCandidateAt);
@@ -214,7 +229,11 @@ export function summarizeJournalLatencies(samples: JournalLatencySample[]): Jour
     firstSeenToTelegramMs: summarizeMetric(firstSeenToTelegram),
     publicationTimestampToTelegramMs: summarizeMetric(publicationTimestampToTelegram),
     requestStartToFirstByteMs: summarizeMetric(requestStartToFirstByte),
+    originAdmissionWaitMs: summarizeMetric(originAdmissionWait),
+    originAdmissionToRequestStartMs: summarizeMetric(originAdmissionToRequestStart),
     firstByteToBodyReceivedMs: summarizeMetric(firstByteToBodyReceived),
+    bodyReceivedToDecodedMs: summarizeMetric(bodyReceivedToDecoded),
+    bodyDecodedToParsedMs: summarizeMetric(bodyDecodedToParsed),
     bodyReceivedToParsedMs: summarizeMetric(bodyReceivedToParsed),
     parsedToHotCandidateMs: summarizeMetric(parsedToHotCandidate),
     firstByteToHotCandidateMs: summarizeMetric(firstByteToHotCandidate),

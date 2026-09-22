@@ -47,8 +47,10 @@ export type SourceHttpTextResult = {
   coordinatorPostFinishQuietMs?: number;
   requestStartedAt?: Date;
   firstByteAt?: Date;
-  /** Instant the complete bounded response body has been read and decoded. */
+  /** Instant the complete bounded response body has been read. */
   bodyReceivedAt?: Date;
+  /** Instant the complete bounded response body has been decoded. */
+  bodyDecodedAt?: Date;
   /** Instant JSON parsing completes; HTML parsers set this at their call site. */
   parsedAt?: Date;
   cacheAgeSeconds?: number;
@@ -134,6 +136,12 @@ export class SourceHttpClient {
             coordinatorStartedAt: coordinatorTiming.coordinatorStartedAt,
             coordinatorWaitMs: coordinatorTiming.coordinatorWaitMs,
             coordinatorPostFinishQuietMs: coordinatorTiming.postFinishQuietMs,
+            network: {
+              ...result.network,
+              requestId: result.requestId,
+              originQueuedAt: coordinatorTiming.queuedAt.toISOString(),
+              originAdmittedAt: coordinatorTiming.coordinatorStartedAt.toISOString(),
+            },
           }
         : result;
     } catch (error) {
@@ -230,10 +238,16 @@ export class SourceHttpClient {
       }
 
       const encoding = options.encoding ?? (contentType.toLowerCase().includes("windows-1251") ? "windows-1251" : "utf8");
+      const decodeStartedAt = performance.now();
       const body = new TextDecoder(encoding).decode(buffer);
       const bodyReceivedAt = windowsResponseTiming.get(response)?.bodyReceivedAt ?? new Date();
+      const bodyDecodedAt = new Date();
       const network = takeSourceNetworkTelemetry(requestId);
-      if (network) network.responseBytes = buffer.byteLength;
+      if (network) {
+        network.requestId = requestId;
+        network.decodeMs = Math.max(0, Math.round((performance.now() - decodeStartedAt) * 100) / 100);
+        network.responseBytes = buffer.byteLength;
+      }
       const { classification, detector } = classifyResponse(
         response.status,
         contentType,
@@ -247,6 +261,7 @@ export class SourceHttpClient {
         requestStartedAt,
         firstByteAt,
         bodyReceivedAt,
+        bodyDecodedAt,
         status: response.status,
         contentType,
         body,

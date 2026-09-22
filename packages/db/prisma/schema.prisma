@@ -444,8 +444,12 @@ model SourceSeenListing {
   telegramRequestedAt  DateTime?
   notifiedAt           DateTime?
   requestStartedAt     DateTime?
+  originQueuedAt       DateTime?
+  originAdmittedAt     DateTime?
+  firstRequestId       String?
   firstByteAt          DateTime?
   bodyReceivedAt       DateTime?
+  bodyDecodedAt        DateTime?
   parsedAt             DateTime?
   hotCandidateAt       DateTime?
   journalPersistedAt   DateTime?            @default(now())

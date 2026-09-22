@@ -224,6 +224,7 @@ export function deserializeNormalizedListing(value: Prisma.JsonValue): Normalize
     skipReason: stringValue(data.skipReason) as NormalizedListing["skipReason"],
     firstSeenAt: dateValue(data.firstSeenAt) ?? new Date(),
     requestStartedAt: dateValue(data.requestStartedAt),
+    bodyDecodedAt: dateValue(data.bodyDecodedAt),
     firstByteAt: dateValue(data.firstByteAt),
     bodyReceivedAt: dateValue(data.bodyReceivedAt),
     parsedAt: dateValue(data.parsedAt),
@@ -240,12 +241,20 @@ function networkTelemetryValue(value: Prisma.JsonValue | undefined): NormalizedL
   const data = value as Record<string, Prisma.JsonValue>;
   const telemetry: NonNullable<NormalizedListing["networkTelemetry"]> = {};
   const dispatcherWaitMs = numberValue(data.dispatcherWaitMs);
+  const requestId = stringValue(data.requestId);
+  const originQueuedAt = stringValue(data.originQueuedAt);
+  const originAdmittedAt = stringValue(data.originAdmittedAt);
+  const decodeMs = numberValue(data.decodeMs);
   const connectionSetupMs = numberValue(data.connectionSetupMs);
   const connectionReused = booleanValue(data.connectionReused);
   const wireTtfbMs = numberValue(data.wireTtfbMs);
   const downloadMs = numberValue(data.downloadMs);
   const responseBytes = numberValue(data.responseBytes);
+  if (requestId) telemetry.requestId = requestId;
+  if (originQueuedAt) telemetry.originQueuedAt = originQueuedAt;
+  if (originAdmittedAt) telemetry.originAdmittedAt = originAdmittedAt;
   if (dispatcherWaitMs != null) telemetry.dispatcherWaitMs = dispatcherWaitMs;
+  if (decodeMs != null) telemetry.decodeMs = decodeMs;
   if (connectionSetupMs != null) telemetry.connectionSetupMs = connectionSetupMs;
   if (connectionReused != null) telemetry.connectionReused = connectionReused;
   if (wireTtfbMs != null) telemetry.wireTtfbMs = wireTtfbMs;
@@ -292,8 +301,12 @@ function observationData(listing: NormalizedListing, lane: ListingDiscoveryLane)
     normalizerVersion: NORMALIZER_VERSION,
     firstSeenAt: new Date(listing.firstSeenAt),
     requestStartedAt: listing.requestStartedAt ?? null,
+    originQueuedAt: telemetryDate(listing.networkTelemetry?.originQueuedAt) ?? null,
+    originAdmittedAt: telemetryDate(listing.networkTelemetry?.originAdmittedAt) ?? null,
+    firstRequestId: listing.networkTelemetry?.requestId ?? null,
     firstByteAt: listing.firstByteAt ?? null,
     bodyReceivedAt: listing.bodyReceivedAt ?? null,
+    bodyDecodedAt: listing.bodyDecodedAt ?? null,
     parsedAt: listing.parsedAt ?? null,
     hotCandidateAt: listing.hotCandidateAt ?? null,
     lastSeenAt: new Date(),
@@ -356,6 +369,12 @@ function stringArray(value: Prisma.JsonValue | undefined): string[] {
 
 function dateValue(value: Prisma.JsonValue | undefined): Date | undefined {
   if (typeof value !== "string") return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function telemetryDate(value: string | undefined): Date | undefined {
+  if (!value) return undefined;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? undefined : date;
 }

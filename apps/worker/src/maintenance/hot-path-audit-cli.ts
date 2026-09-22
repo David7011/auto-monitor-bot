@@ -49,8 +49,11 @@ try {
       notifiedAt: true,
       timestampConfidence: true,
       requestStartedAt: true,
+      originQueuedAt: true,
+      originAdmittedAt: true,
       firstByteAt: true,
       bodyReceivedAt: true,
+      bodyDecodedAt: true,
       parsedAt: true,
       hotCandidateAt: true,
       journalPersistedAt: true,
@@ -139,9 +142,12 @@ function networkSampleFromNormalizedData(value: unknown): SourceNetworkTelemetry
 }
 
 function isCompleteChronologicalHotPath(sample: {
+  originQueuedAt?: Date | null;
+  originAdmittedAt?: Date | null;
   requestStartedAt: Date | null;
   firstByteAt: Date | null;
   bodyReceivedAt?: Date | null;
+  bodyDecodedAt?: Date | null;
   parsedAt?: Date | null;
   hotCandidateAt: Date | null;
   journalPersistedAt: Date | null;
@@ -149,9 +155,12 @@ function isCompleteChronologicalHotPath(sample: {
   telegramAcceptedAt: Date | null;
 }): boolean {
   const timestamps = [
+    sample.originQueuedAt,
+    sample.originAdmittedAt,
     sample.requestStartedAt,
     sample.firstByteAt,
     sample.bodyReceivedAt,
+    sample.bodyDecodedAt,
     sample.parsedAt,
     sample.hotCandidateAt,
     sample.journalPersistedAt,

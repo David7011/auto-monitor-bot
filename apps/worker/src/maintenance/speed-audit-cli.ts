@@ -23,7 +23,8 @@ try {
       select: {
         source: true, externalId: true, url: true, decision: true, timestampConfidence: true,
         publishedAt: true, firstSeenAt: true, notifiedAt: true, requestStartedAt: true,
-        firstByteAt: true, bodyReceivedAt: true, parsedAt: true, hotCandidateAt: true, journalPersistedAt: true, telegramAcceptedAt: true,
+        originQueuedAt: true, originAdmittedAt: true, firstRequestId: true,
+        firstByteAt: true, bodyReceivedAt: true, bodyDecodedAt: true, parsedAt: true, hotCandidateAt: true, journalPersistedAt: true, telegramAcceptedAt: true,
         filterCompletedAt: true, dispatchAttemptedAt: true, telegramRequestedAt: true,
       },
       orderBy: { firstSeenAt: "asc" },
@@ -67,8 +68,9 @@ try {
       }),
       examples: accepted.slice(-5).map((row) => ({
         externalId: row.externalId, url: row.url, timestampConfidence: row.timestampConfidence,
-        publishedAt: row.publishedAt, requestStartedAt: row.requestStartedAt, firstByteAt: row.firstByteAt,
-        bodyReceivedAt: row.bodyReceivedAt, parsedAt: row.parsedAt, hotCandidateAt: row.hotCandidateAt,
+        publishedAt: row.publishedAt, originQueuedAt: row.originQueuedAt, originAdmittedAt: row.originAdmittedAt,
+        requestId: row.firstRequestId, requestStartedAt: row.requestStartedAt, firstByteAt: row.firstByteAt,
+        bodyReceivedAt: row.bodyReceivedAt, bodyDecodedAt: row.bodyDecodedAt, parsedAt: row.parsedAt, hotCandidateAt: row.hotCandidateAt,
         journalPersistedAt: row.journalPersistedAt, telegramAcceptedAt: row.telegramAcceptedAt,
         filterCompletedAt: row.filterCompletedAt, dispatchAttemptedAt: row.dispatchAttemptedAt, telegramRequestedAt: row.telegramRequestedAt,
       })),

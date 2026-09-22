@@ -90,9 +90,12 @@ describe("metrics summary", () => {
         firstSeenAt: new Date("2026-07-22T10:00:02.000Z"),
         notifiedAt: new Date("2026-07-22T10:00:05.000Z"),
         timestampConfidence: "HIGH",
+        originQueuedAt: new Date("2026-07-22T10:00:00.000Z"),
+        originAdmittedAt: new Date("2026-07-22T10:00:00.050Z"),
         requestStartedAt: new Date("2026-07-22T10:00:00.100Z"),
         firstByteAt: new Date("2026-07-22T10:00:00.300Z"),
         bodyReceivedAt: new Date("2026-07-22T10:00:00.320Z"),
+        bodyDecodedAt: new Date("2026-07-22T10:00:00.330Z"),
         parsedAt: new Date("2026-07-22T10:00:00.340Z"),
         hotCandidateAt: new Date("2026-07-22T10:00:00.350Z"),
         journalPersistedAt: new Date("2026-07-22T10:00:00.400Z"),
@@ -128,7 +131,11 @@ describe("metrics summary", () => {
     expect(summary.firstSeenToTelegramMs).toMatchObject({ count: 3, p50: 3_000, p95: 4_000 });
     expect(summary.publicationTimestampToTelegramMs).toMatchObject({ count: 1, p95: 5_000 });
     expect(summary.requestStartToFirstByteMs).toMatchObject({ count: 1, p95: 200 });
+    expect(summary.originAdmissionWaitMs).toMatchObject({ count: 1, p95: 50 });
+    expect(summary.originAdmissionToRequestStartMs).toMatchObject({ count: 1, p95: 50 });
     expect(summary.firstByteToBodyReceivedMs).toMatchObject({ count: 1, p95: 20 });
+    expect(summary.bodyReceivedToDecodedMs).toMatchObject({ count: 1, p95: 10 });
+    expect(summary.bodyDecodedToParsedMs).toMatchObject({ count: 1, p95: 10 });
     expect(summary.bodyReceivedToParsedMs).toMatchObject({ count: 1, p95: 20 });
     expect(summary.parsedToHotCandidateMs).toMatchObject({ count: 1, p95: 10 });
     expect(summary.firstByteToHotCandidateMs).toMatchObject({ count: 1, p95: 50 });

@@ -29,10 +29,15 @@ describe("observation journal serialization", () => {
       requestStartedAt: new Date("2026-07-14T08:00:01.000Z"),
       firstByteAt: new Date("2026-07-14T08:00:02.000Z"),
       bodyReceivedAt: new Date("2026-07-14T08:00:02.500Z"),
+      bodyDecodedAt: new Date("2026-07-14T08:00:02.550Z"),
       parsedAt: new Date("2026-07-14T08:00:02.700Z"),
       hotCandidateAt: new Date("2026-07-14T08:00:03.000Z"),
       networkTelemetry: {
+        requestId: "olx-trace-123",
+        originQueuedAt: "2026-07-14T08:00:00.900Z",
+        originAdmittedAt: "2026-07-14T08:00:00.950Z",
         dispatcherWaitMs: 4.5,
+        decodeMs: 0.75,
         connectionSetupMs: 0,
         connectionReused: true,
         wireTtfbMs: 812.25,
@@ -64,6 +69,7 @@ describe("observation journal serialization", () => {
     expect(restored?.requestStartedAt?.toISOString()).toBe("2026-07-14T08:00:01.000Z");
     expect(restored?.firstByteAt?.toISOString()).toBe("2026-07-14T08:00:02.000Z");
     expect(restored?.bodyReceivedAt?.toISOString()).toBe("2026-07-14T08:00:02.500Z");
+    expect(restored?.bodyDecodedAt?.toISOString()).toBe("2026-07-14T08:00:02.550Z");
     expect(restored?.parsedAt?.toISOString()).toBe("2026-07-14T08:00:02.700Z");
     expect(restored?.hotCandidateAt?.toISOString()).toBe("2026-07-14T08:00:03.000Z");
     expect(restored?.networkTelemetry).toEqual(listing.networkTelemetry);

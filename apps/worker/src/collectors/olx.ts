@@ -816,6 +816,7 @@ export class OlxCollector implements SourceCollector {
           requestStartedAt: feed.requestStartedAt,
           firstByteAt: feed.firstByteAt,
           bodyReceivedAt: feed.bodyReceivedAt,
+          bodyDecodedAt: feed.bodyDecodedAt,
           parsedAt: feed.parsedAt,
           networkTelemetry: feed.network,
         });
@@ -1080,6 +1081,7 @@ function selectHotOlxCandidates(
       requestStartedAt: feed.requestStartedAt,
       firstByteAt: feed.firstByteAt,
       bodyReceivedAt: feed.bodyReceivedAt,
+      bodyDecodedAt: feed.bodyDecodedAt,
       parsedAt: feed.parsedAt,
       networkTelemetry: feed.network,
     });
@@ -1204,6 +1206,7 @@ export function selectOlxCandidates(
     requestStartedAt?: Date;
     firstByteAt?: Date;
     bodyReceivedAt?: Date;
+    bodyDecodedAt?: Date;
     parsedAt?: Date;
     hotCandidateAt?: Date;
     networkTelemetry?: NormalizedListing["networkTelemetry"];
@@ -1283,6 +1286,7 @@ export function selectOlxCandidates(
     listing.requestStartedAt = options.requestStartedAt;
     listing.firstByteAt = options.firstByteAt;
     listing.bodyReceivedAt = options.bodyReceivedAt;
+    listing.bodyDecodedAt = options.bodyDecodedAt;
     listing.parsedAt = options.parsedAt;
     listing.hotCandidateAt = options.hotCandidateAt;
     listing.networkTelemetry = options.networkTelemetry;

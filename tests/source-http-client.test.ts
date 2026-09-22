@@ -23,6 +23,8 @@ describe("SourceHttpClient", () => {
     expect(result.requestStartedAt).toBeInstanceOf(Date);
     expect(result.firstByteAt).toBeInstanceOf(Date);
     expect(result.bodyReceivedAt).toBeInstanceOf(Date);
+    expect(result.bodyDecodedAt).toBeInstanceOf(Date);
+    expect(result.bodyDecodedAt!.getTime()).toBeGreaterThanOrEqual(result.bodyReceivedAt!.getTime());
     expect(result.bodyReceivedAt!.getTime()).toBeGreaterThanOrEqual(result.firstByteAt!.getTime());
     expect(result.firstByteAt!.getTime()).toBeGreaterThanOrEqual(result.requestStartedAt!.getTime());
     expect(result.coordinatorQueuedAt).toBeInstanceOf(Date);
@@ -30,6 +32,11 @@ describe("SourceHttpClient", () => {
     expect(result.coordinatorWaitMs).toBeGreaterThanOrEqual(0);
     expect(result.coordinatorWaitMs).toBeLessThan(100);
     expect(result.coordinatorPostFinishQuietMs).toBe(0);
+    expect(result.network).toMatchObject({
+      requestId: result.requestId,
+      originQueuedAt: result.coordinatorQueuedAt!.toISOString(),
+      originAdmittedAt: result.coordinatorStartedAt!.toISOString(),
+    });
 
     const blockedLocally = await client.text("https://example.test/list", { source: "OLX" });
     expect(blockedLocally.classification).toBe("RATE_LIMITED");
