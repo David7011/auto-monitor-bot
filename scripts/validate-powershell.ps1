@@ -112,4 +112,50 @@ if (Test-AmbParentChildLink -Parent $currentParent -Child $otherSessionChild) {
   throw "A cross-session process was accepted as an application child"
 }
 
+$releaseTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("amb-release-" + [guid]::NewGuid().ToString("N"))
+try {
+  New-Item -ItemType Directory -Force -Path $releaseTestRoot | Out-Null
+  . (Join-Path $PSScriptRoot "accepted-release.ps1")
+  $releaseId = "0123456789ab-20260922090000"
+  $artifacts = foreach ($relativeRoot in $script:AmbReleaseArtifactRoots) {
+    $active = Join-Path $releaseTestRoot (Join-Path $relativeRoot "fixture.bin")
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $active) | Out-Null
+    [IO.File]::WriteAllText($active, "accepted:$relativeRoot", [Text.UTF8Encoding]::new($false))
+    $relative = Get-AmbRelativePath $releaseTestRoot $active
+    $snapshot = Join-Path (Join-Path $releaseTestRoot ".runtime\releases\$releaseId\artifacts") $relative
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $snapshot) | Out-Null
+    Copy-Item -LiteralPath $active -Destination $snapshot
+    [ordered]@{
+      path = $relative
+      size = (Get-Item -LiteralPath $active).Length
+      sha256 = Get-AmbFileSha256 $active
+    }
+  }
+  $manifest = [ordered]@{
+    format = "amb-accepted-release-v1"
+    releaseId = $releaseId
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    createdAt = "2026-09-22T09:00:00.000Z"
+    runtimeVersion = "v24.18.0"
+    schemaSha256 = ("0" * 64)
+    migrationIds = @()
+    artifactRoots = $script:AmbReleaseArtifactRoots
+    artifacts = @($artifacts)
+  }
+  $manifestJson = $manifest | ConvertTo-Json -Depth 8
+  $releaseManifest = Join-Path $releaseTestRoot ".runtime\releases\$releaseId\release-manifest.json"
+  [IO.File]::WriteAllText($releaseManifest, $manifestJson, [Text.UTF8Encoding]::new($false))
+  [IO.File]::WriteAllText((Join-Path $releaseTestRoot ".runtime\accepted-release.json"), $manifestJson, [Text.UTF8Encoding]::new($false))
+  [void](Assert-AmbAcceptedRelease $releaseTestRoot "v24.18.0")
+  $victim = Join-Path $releaseTestRoot "apps\api\dist\fixture.bin"
+  [IO.File]::WriteAllText($victim, "corrupt", [Text.UTF8Encoding]::new($false))
+  $checksumRejected = $false
+  try { [void](Assert-AmbAcceptedRelease $releaseTestRoot "v24.18.0") } catch { $checksumRejected = $true }
+  if (!$checksumRejected) { throw "Accepted release checksum mismatch was not rejected" }
+  [void](Restore-AmbAcceptedRelease $releaseTestRoot $releaseId)
+  [void](Assert-AmbAcceptedRelease $releaseTestRoot "v24.18.0")
+} finally {
+  if (Test-Path -LiteralPath $releaseTestRoot) { Remove-Item -LiteralPath $releaseTestRoot -Recurse -Force }
+}
+
 Write-Host "PowerShell syntax validation passed"
