@@ -9,7 +9,7 @@ import { qualificationEvidence, selectQualificationSamples } from "./hot-path-qu
 
 const hoursArgument = process.argv.slice(2).find((value) => /^\d+$/u.test(value));
 const hours = Math.max(1, Math.min(24 * 30, Number(hoursArgument ?? 24)));
-const legacySchema = process.argv.includes("--legacy-schema");
+let legacySchema = process.argv.includes("--legacy-schema");
 const until = new Date();
 const since = new Date(until.getTime() - hours * 60 * 60 * 1_000);
 
@@ -21,8 +21,19 @@ try {
       firstSeenAt: { gte: since, lte: until },
     },
   } as const;
-  const observations = legacySchema
-    ? await prisma.sourceSeenListing.findMany({
+  if (!legacySchema) {
+    const traceSchema = await prisma.$queryRaw<Array<{ present: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'source_seen_listings'
+          AND column_name = 'originQueuedAt'
+      ) AS "present"
+    `;
+    legacySchema = traceSchema[0]?.present !== true;
+  }
+  const queryLegacyObservations = () => prisma.sourceSeenListing.findMany({
       ...common,
       select: {
         source: true,
@@ -39,8 +50,8 @@ try {
         telegramRequestedAt: true,
         telegramAcceptedAt: true,
       },
-    })
-    : await prisma.sourceSeenListing.findMany({
+    });
+  const queryCurrentObservations = () => prisma.sourceSeenListing.findMany({
       ...common,
       select: {
       source: true,
@@ -64,6 +75,18 @@ try {
       normalizedData: true,
       },
     });
+  let observations: Awaited<ReturnType<typeof queryLegacyObservations>> | Awaited<ReturnType<typeof queryCurrentObservations>>;
+  if (legacySchema) {
+    observations = await queryLegacyObservations();
+  } else {
+    try {
+      observations = await queryCurrentObservations();
+    } catch (error) {
+      if (!isMissingTraceColumn(error)) throw error;
+      legacySchema = true;
+      observations = await queryLegacyObservations();
+    }
+  }
   const collectorRuns = legacySchema ? [] : await prisma.collectorRun.findMany({
     where: {
       source: "OLX",
@@ -120,6 +143,10 @@ try {
   }, null, 2));
 } finally {
   await closeDatabase();
+}
+
+function isMissingTraceColumn(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "P2022");
 }
 
 function qualifyStages(stages: ReturnType<typeof summarizeJournalLatencies>) {
