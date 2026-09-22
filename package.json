@@ -47,7 +47,7 @@
     "db:generate": "pnpm --filter @amb/db db:generate",
     "db:migrate": "pnpm --filter @amb/db db:migrate",
     "db:migrate:dev": "pnpm --filter @amb/db db:migrate:dev",
-    "db:migrate:deploy": "pnpm --filter @amb/db db:migrate:deploy",
+    "db:migrate:deploy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/migrate-deploy.ps1",
     "db:push": "pnpm --filter @amb/db db:push",
     "db:seed": "pnpm --filter @amb/db db:seed",
     "db:studio": "pnpm --filter @amb/db db:studio",

@@ -59,4 +59,13 @@ describe("accepted production release policy", () => {
     expect(accept).toContain("New-AmbAcceptedReleaseFromCandidate");
     expect(accept).toContain("Restore-AmbAcceptedRelease $ProjectRoot $manifest.releaseId");
   });
+
+  it("keeps the WDAC migration fallback closed to checksum-pinned additive migrations", () => {
+    const migration = script("migrate-deploy.ps1");
+
+    expect(migration).toContain("Application Control|blocked this file|failed to run");
+    expect(migration).toContain("Pending migration is not approved for the restricted psql fallback");
+    expect(migration).toContain("Applied migration checksum mismatch");
+    expect(migration).toContain("--single-transaction");
+  });
 });
