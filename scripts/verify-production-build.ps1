@@ -38,6 +38,14 @@ function Remove-ValidationOutput {
   Remove-Item -LiteralPath $resolved -Recurse -Force
 }
 
+function Restore-DashboardNextEnv {
+  if ($DashboardNextEnvExisted) {
+    [IO.File]::WriteAllBytes($DashboardNextEnvPath, $DashboardNextEnvBytes)
+  } elseif (Test-Path -LiteralPath $DashboardNextEnvPath) {
+    Remove-Item -LiteralPath $DashboardNextEnvPath -Force
+  }
+}
+
 New-Item -ItemType Directory -Path $RuntimeDir -Force | Out-Null
 if (-not $SkipLock) {
   try {
@@ -90,6 +98,9 @@ try {
   }
 
   if ($PreserveOutputs) {
+    # next build rewrites next-env.d.ts even when output is isolated. Restore
+    # the tracked input before proving that the source commit is clean.
+    Restore-DashboardNextEnv
     $runtimeVersion = (& node --version).Trim()
     $candidate = New-AmbReleaseCandidateManifest $ProjectRoot $runtimeVersion
     Write-Host "Release candidate built from commit $($candidate.commit)" -ForegroundColor Green
@@ -100,11 +111,7 @@ try {
   if (!$PreserveOutputs) {
     foreach ($directory in $validationDirs) { Remove-ValidationOutput -Path $directory }
   }
-  if ($DashboardNextEnvExisted) {
-    [IO.File]::WriteAllBytes($DashboardNextEnvPath, $DashboardNextEnvBytes)
-  } elseif (Test-Path -LiteralPath $DashboardNextEnvPath) {
-    Remove-Item -LiteralPath $DashboardNextEnvPath -Force
-  }
+  Restore-DashboardNextEnv
   if ($LockStream) {
     $LockStream.Dispose()
     Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
