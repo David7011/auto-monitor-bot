@@ -433,7 +433,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
     );
     return existing.listingIds;
   }
-  if (existing.status === "PROCESSING" && existing.leaseExpiresAt && existing.leaseExpiresAt > now) return [];
+  if (["PROCESSING", "SENDING"].includes(existing.status) && existing.leaseExpiresAt && existing.leaseExpiresAt > now) return [];
 
   // A persisted bundle may predate the shadow guard. Never trust cached text
   // containing suppressed links; release eligible items as individual cards.
@@ -444,7 +444,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
   if (eligibleIds.size !== existing.listingIds.length) {
     const liveIds = existing.listingIds.filter((id) => eligibleIds.has(id));
     await prisma.telegramFlashBundle.update({ where: { id: flashBundleId }, data: {
-      status: "FAILED", attemptCount: 10, leaseExpiresAt: null,
+      status: "PERMANENT", leaseExpiresAt: null, nextAttemptAt: null,
       lastErrorCode: "SHADOW_SUPPRESSED", lastErrorMessage: "Suppressed entries removed; live items released to individual cards",
     } });
     await releaseFlashListingsToCards(flashBundleId, liveIds);
@@ -456,19 +456,20 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
       id: flashBundleId,
       attemptCount: existing.attemptCount,
       messageId: null,
-      status: { not: "SENT" },
+      status: { notIn: ["SENT", "DELIVERED", "PERMANENT", "QUARANTINED"] },
       OR: [
-        { status: { not: "PROCESSING" } },
+        { status: { notIn: ["PROCESSING", "SENDING"] } },
         { leaseExpiresAt: null },
         { leaseExpiresAt: { lte: now } },
       ],
     },
     data: {
-      status: "PROCESSING",
+      status: "SENDING",
       attemptCount: { increment: 1 },
       processingStartedAt: now,
       lastAttemptAt: now,
       leaseExpiresAt,
+      nextAttemptAt: null,
       lastErrorCode: null,
       lastErrorMessage: null,
     },
@@ -481,7 +482,8 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
     await prisma.telegramFlashBundle.update({
       where: { id: flashBundleId },
       data: {
-        status: "FAILED",
+        status: "TRANSIENT",
+        nextAttemptAt: new Date(Date.now() + telegramDeliveryRetryDelayMs(existing.attemptCount + 1)),
         leaseExpiresAt: null,
         lastErrorCode: "TELEGRAM_NOT_CONFIGURED",
         lastErrorMessage: "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured",
@@ -490,13 +492,15 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
     throw new Error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not configured");
   }
 
+  let requestStarted = false;
+  let acceptancePersisted = false;
   try {
     return await withRenewableTelegramLease(async () => {
       const now = new Date();
       const renewed = await prisma.telegramFlashBundle.updateMany({
         where: {
           id: flashBundleId, attemptCount: existing.attemptCount + 1,
-          status: "PROCESSING", messageId: null, leaseExpiresAt: { gt: now },
+          status: "SENDING", messageId: null, leaseExpiresAt: { gt: now },
         },
         data: { leaseExpiresAt: new Date(now.getTime() + TELEGRAM_FLASH_SEND_LEASE_MS) },
       });
@@ -504,6 +508,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
     }, async (assertOwned) => {
       await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.FLASH, Number.NEGATIVE_INFINITY);
       await assertOwned();
+      requestStarted = true;
       const telegramRequestedAt = new Date();
       const sent = await telegramBot.api.sendMessage(chatId, existing.lastText, {
         parse_mode: "HTML",
@@ -518,14 +523,16 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
         data: {
           chatId,
           messageId: String(sent.message_id),
-          status: "SENT",
+          status: "DELIVERED",
           sentAt,
           acceptedAt,
           leaseExpiresAt: null,
+          nextAttemptAt: null,
           lastErrorCode: null,
           lastErrorMessage: null,
         },
       });
+      acceptancePersisted = true;
       await syncAcceptedFlashBundle(flashBundleId, existing.listingIds, acceptedAt, telegramRequestedAt);
       return existing.listingIds;
     });
@@ -533,12 +540,28 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
     await deferGlobalTelegramGate(error);
     const message = error instanceof Error ? error.message : String(error);
     const retryAfterSeconds = telegramRetryAfterSeconds(error);
+    const failureState = classifyTelegramDeliveryFailure({
+      message,
+      requestStarted,
+      acceptancePersisted,
+      retryAfterSeconds,
+    });
+    const nextAttemptAt = failureState === "PERMANENT"
+      ? null
+      : new Date(Date.now() + telegramDeliveryRetryDelayMs(existing.attemptCount + 1, retryAfterSeconds));
     await prisma.telegramFlashBundle.updateMany({
-      where: { id: flashBundleId, attemptCount: existing.attemptCount + 1, status: "PROCESSING", messageId: null },
+      where: { id: flashBundleId, attemptCount: existing.attemptCount + 1, status: "SENDING", messageId: null },
       data: {
-        status: "RETRY_PENDING",
+        status: failureState,
+        nextAttemptAt,
         leaseExpiresAt: null,
-        lastErrorCode: retryAfterSeconds ? "TELEGRAM_RATE_LIMITED" : "TELEGRAM_FLASH_SEND_FAILED",
+        lastErrorCode: retryAfterSeconds
+          ? "TELEGRAM_RATE_LIMITED"
+          : failureState === "AMBIGUOUS"
+            ? "TELEGRAM_FLASH_ACCEPTANCE_AMBIGUOUS"
+            : failureState === "PERMANENT"
+              ? "TELEGRAM_FLASH_PERMANENT"
+              : "TELEGRAM_FLASH_SEND_FAILED",
         lastErrorMessage: message,
       },
     });

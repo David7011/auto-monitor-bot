@@ -5,18 +5,21 @@ const mocks = vi.hoisted(() => ({
   executeRaw: vi.fn(),
   queryRaw: vi.fn(),
   findMany: vi.fn(),
+  flashFindMany: vi.fn(),
 }));
 
 vi.mock("../packages/db/src/index.js", () => ({
   prisma: {
     $transaction: mocks.transaction,
     telegramNotification: { findMany: mocks.findMany },
+    telegramFlashBundle: { findMany: mocks.flashFindMany },
   },
 }));
 
 import {
   reconcileOrphanDeliveryIntents,
   selectPendingCardDeliveryIntents,
+  selectPendingFlashDeliveryIntents,
 } from "../apps/worker/src/modules/delivery-outbox.js";
 
 describe("durable delivery outbox", () => {
@@ -27,6 +30,7 @@ describe("durable delivery outbox", () => {
     mocks.executeRaw.mockResolvedValue(0);
     mocks.queryRaw.mockResolvedValue([{ id: "intent-1" }, { id: "intent-2" }]);
     mocks.findMany.mockResolvedValue([{ listingId: "listing-1" }]);
+    mocks.flashFindMany.mockResolvedValue([{ id: "flash-1", attemptCount: 47 }]);
   });
 
   it.each([
@@ -57,6 +61,22 @@ describe("durable delivery outbox", () => {
         listing: { notificationMode: "LIVE", status: { notIn: ["IGNORED", "DUPLICATE"] } },
       },
       select: { listingId: true },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: 17,
+    });
+  });
+
+  it("selects due flash bundles after arbitrarily many attempts", async () => {
+    const now = new Date("2026-09-21T12:00:00.000Z");
+    await expect(selectPendingFlashDeliveryIntents(17, now)).resolves.toEqual([
+      { id: "flash-1", attemptCount: 47 },
+    ]);
+    expect(mocks.flashFindMany).toHaveBeenCalledWith({
+      where: {
+        status: { in: ["PENDING", "TRANSIENT", "AMBIGUOUS", "RETRY_PENDING", "FAILED"] },
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+      },
+      select: { id: true, attemptCount: true },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       take: 17,
     });

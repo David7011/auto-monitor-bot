@@ -138,7 +138,7 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
   it("persists a flash receipt before projection updates and only replays projections", async () => {
     mocks.transaction.mockRejectedValueOnce(new Error("journal connection failed"));
     await expect(sendTelegramFlashBundle("flash-1")).rejects.toThrow("journal connection failed");
-    expect(mocks.flash.status).toBe("SENT");
+    expect(mocks.flash.status).toBe("DELIVERED");
     await expect(sendTelegramFlashBundle("flash-1")).resolves.toEqual(["listing-1"]);
     expect(mocks.send).toHaveBeenCalledOnce();
     expect(mocks.listingUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
@@ -154,5 +154,26 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
     });
     await expect(sendTelegramFlashBundle("flash-1")).resolves.toEqual([]);
     expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unconfirmed flash request durable and retryable without an attempt ceiling", async () => {
+    mocks.flash.attemptCount = 42;
+    mocks.send.mockRejectedValueOnce(new Error("socket hang up"));
+
+    await expect(sendTelegramFlashBundle("flash-1")).rejects.toThrow("socket hang up");
+
+    expect(mocks.flash.status).toBe("AMBIGUOUS");
+    expect(mocks.flash.attemptCount).toBe(43);
+    expect((mocks.flash as typeof mocks.flash & { nextAttemptAt?: Date }).nextAttemptAt).toBeInstanceOf(Date);
+    expect(mocks.flash.leaseExpiresAt).toBeNull();
+  });
+
+  it("terminates a permanent flash failure without scheduling an endless retry", async () => {
+    mocks.send.mockRejectedValueOnce(new Error("Bad Request: chat not found"));
+
+    await expect(sendTelegramFlashBundle("flash-1")).rejects.toThrow("chat not found");
+
+    expect(mocks.flash.status).toBe("PERMANENT");
+    expect((mocks.flash as typeof mocks.flash & { nextAttemptAt?: Date | null }).nextAttemptAt).toBeNull();
   });
 });

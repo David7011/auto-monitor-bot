@@ -46,3 +46,19 @@ export async function selectPendingCardDeliveryIntents(
     take: limit,
   });
 }
+
+/** Durable flash retries are age-independent and never stop at an attempt ceiling. */
+export async function selectPendingFlashDeliveryIntents(
+  limit: number,
+  now = new Date(),
+): Promise<Array<{ id: string; attemptCount: number }>> {
+  return prisma.telegramFlashBundle.findMany({
+    where: {
+      status: { in: ["PENDING", "TRANSIENT", "AMBIGUOUS", "RETRY_PENDING", "FAILED"] },
+      OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+    },
+    select: { id: true, attemptCount: true },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    take: limit,
+  });
+}

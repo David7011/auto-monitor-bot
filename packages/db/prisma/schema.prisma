@@ -159,6 +159,12 @@ enum TelegramFlashBundleStatus {
   RETRY_PENDING
   SENT
   FAILED
+  SENDING
+  TRANSIENT
+  AMBIGUOUS
+  DELIVERED
+  PERMANENT
+  QUARANTINED
 }
 
 enum ErrorLogLevel {
@@ -641,6 +647,7 @@ model TelegramFlashBundle {
   attemptCount Int                    @default(0)
   processingStartedAt DateTime?
   lastAttemptAt DateTime?
+  nextAttemptAt DateTime?
   leaseExpiresAt DateTime?
   lastErrorCode String?
   lastErrorMessage String?
@@ -650,6 +657,7 @@ model TelegramFlashBundle {
   createdAt DateTime                  @default(now())
 
   @@index([status, leaseExpiresAt])
+  @@index([status, nextAttemptAt, createdAt])
   @@index([createdAt])
   @@map("telegram_flash_bundles")
 }

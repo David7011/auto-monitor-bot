@@ -30,7 +30,11 @@ import {
   releaseFlashListingsToCards,
 } from "./modules/telegram-service.js";
 import { env } from "./env.js";
-import { reconcileOrphanDeliveryIntents, selectPendingCardDeliveryIntents } from "./modules/delivery-outbox.js";
+import {
+  reconcileOrphanDeliveryIntents,
+  selectPendingCardDeliveryIntents,
+  selectPendingFlashDeliveryIntents,
+} from "./modules/delivery-outbox.js";
 import { closePhotoOcrWorker } from "./modules/photo-identifier-ocr.js";
 import { closeSourceHttpClient } from "./collectors/source-http-client.js";
 import {
@@ -409,11 +413,12 @@ async function recoverInterruptedPipeline(closeStaleRuns = true): Promise<void> 
   });
   await prisma.telegramFlashBundle.updateMany({
     where: {
-      status: "PROCESSING",
+      status: { in: ["PROCESSING", "SENDING"] },
       OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: now } }],
     },
     data: {
-      status: "RETRY_PENDING",
+      status: "TRANSIENT",
+      nextAttemptAt: now,
       leaseExpiresAt: null,
       lastErrorCode: "WORKER_RECOVERY",
       lastErrorMessage: "Flash bundle восстановлен после перезапуска worker",
@@ -441,15 +446,7 @@ async function recoverInterruptedPipeline(closeStaleRuns = true): Promise<void> 
     }
   }
 
-  const pendingFlashBundles = await prisma.telegramFlashBundle.findMany({
-    where: {
-      status: { in: ["PENDING", "RETRY_PENDING", "FAILED"] },
-      attemptCount: { lt: 10 },
-    },
-    select: { id: true, attemptCount: true },
-    orderBy: { createdAt: "asc" },
-    take: env.STARTUP_RECOVERY_LIMIT,
-  });
+  const pendingFlashBundles = await selectPendingFlashDeliveryIntents(env.STARTUP_RECOVERY_LIMIT, now);
   for (const bundle of pendingFlashBundles) {
     await enqueue(
       QUEUE_NAMES.TELEGRAM_FLASH,
