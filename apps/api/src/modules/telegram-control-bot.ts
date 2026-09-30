@@ -51,7 +51,6 @@ import {
   answerTelegramCallback as answerCallback,
   editTelegramMessage as editMessage,
   editTelegramReplyMarkup as editMessageReplyMarkup,
-  isAllowedTelegramChat as isAllowedChat,
   sendTelegramMessage as sendMessage,
   sendTelegramMessageToChat,
   telegramApi,
@@ -277,7 +276,7 @@ function isHelpCommand(text: string): boolean {
 
 async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
   const chatId = callback.message?.chat.id;
-  if (!chatId || !isAllowedChat(chatId)) {
+  if (!chatId) {
     await answerCallback(callback.id, "Нет доступа");
     return;
   }
@@ -287,6 +286,14 @@ async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
 
   if (data.startsWith(TELEGRAM_FAVORITE_CALLBACK_PREFIX)) {
     await handleListingFavoriteCallback(callback.id, chatId, messageId, data);
+    return;
+  }
+
+  // Public subscribers may acknowledge listing actions, but Telegram must
+  // never be a configuration path. Filter/source/replay callbacks are kept
+  // for backwards compatibility with old messages and rejected centrally.
+  if (data.startsWith(CONTROL_PREFIX)) {
+    await answerCallback(callback.id, "Настройки изменяются только в локальной панели");
     return;
   }
 
