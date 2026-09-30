@@ -23,7 +23,7 @@ export async function reconcileOrphanDeliveryIntents(chatId: string, limit: numb
                            OR seen."telegramAcceptedAt" IS NOT NULL))
       ORDER BY listing."firstSeenAt" ASC, listing.id ASC
       LIMIT ${take}
-      ON CONFLICT ("listingId") DO NOTHING
+      ON CONFLICT ("listingId", "chatId") DO NOTHING
       RETURNING id
     `;
     return inserted.length;

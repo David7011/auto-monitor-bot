@@ -15,6 +15,7 @@ $FallbackSafe = @{
   "20260921_delivery_state_machine" = "cb084f6af2130c708a18c0d9ee8373890332103b84dbb98e7f6f86920f8a180b"
   "20260922_flash_delivery_state_machine" = "e582013fad602abd6256fbb9bab72595d225b9b4dac6bc8a08fa12fde1144715"
   "20260922_hot_path_trace_boundaries" = "94b4d65d37970ac8481aca263fcca696d2efd2186ec71222a9740297236d06cc"
+  "20260930_public_telegram_subscribers" = "e964f34a43f946c2057e765d3e9a351c868fd68c7d1c52af3044fce4689e1e78"
 }
 
 function Get-DotEnvValue([string]$Name) {

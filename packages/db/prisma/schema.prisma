@@ -626,7 +626,9 @@ model TelegramNotification {
 
   listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
 
-  @@unique([listingId])
+  // A receipt belongs to one recipient. Keeping it per chat makes retries,
+  // Telegram acceptance and permanent blocks independent between subscribers.
+  @@unique([listingId, chatId])
   @@index([messageId])
   @@index([status, leaseExpiresAt])
   @@index([status, nextAttemptAt, createdAt])
@@ -635,6 +637,20 @@ model TelegramNotification {
   @@index([cleanupAttemptedAt])
   @@index([flashBundleId])
   @@map("telegram_notifications")
+}
+
+model TelegramSubscriber {
+  id        String   @id @default(cuid())
+  chatId    String   @unique
+  active    Boolean  @default(true)
+  startedAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  blockedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([active, startedAt])
+  @@map("telegram_subscribers")
 }
 
 model TelegramFlashBundle {

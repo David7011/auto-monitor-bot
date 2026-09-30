@@ -100,7 +100,47 @@ export function configureTelegramApiRootForIntegrationTest(value: string): void 
 }
 
 export function isTelegramConfigured(): boolean {
-  return Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID);
+  return Boolean(env.TELEGRAM_BOT_TOKEN);
+}
+
+/**
+ * The configured chat remains the owner's backward-compatible recipient.
+ * Every active /start subscriber is then added independently, so one blocked
+ * chat cannot suppress delivery or acknowledgement for the others.
+ */
+async function activeRecipientChatIds(): Promise<string[]> {
+  // Isolated legacy test stands deliberately expose only the old delegate set.
+  // Runtime uses generated Prisma with telegramSubscriber after the migration.
+  const subscriberStore = (prisma as typeof prisma & {
+    telegramSubscriber?: typeof prisma.telegramSubscriber;
+  }).telegramSubscriber;
+  if (!subscriberStore) return env.TELEGRAM_CHAT_ID ? [env.TELEGRAM_CHAT_ID] : [];
+  const subscribers = await subscriberStore.findMany({
+    where: { active: true },
+    select: { chatId: true },
+  });
+  return [...new Set([
+    ...(env.TELEGRAM_CHAT_ID ? [env.TELEGRAM_CHAT_ID] : []),
+    ...subscribers.map((subscriber) => subscriber.chatId),
+  ])];
+}
+
+async function ensureRecipientReceipts(listingId: string): Promise<string[]> {
+  const chatIds = await activeRecipientChatIds();
+  if (chatIds.length === 0) return [];
+  const subscriberStore = (prisma as typeof prisma & {
+    telegramSubscriber?: typeof prisma.telegramSubscriber;
+  }).telegramSubscriber;
+  // The legacy owner receipt is written atomically with the listing. Only
+  // extra public subscribers need receipts created here.
+  if (!subscriberStore) return chatIds;
+  const subscribers = await subscriberStore.findMany({ where: { active: true }, select: { chatId: true } });
+  if (subscribers.length === 0) return chatIds;
+  await prisma.telegramNotification.createMany({
+    data: subscribers.map((subscriber) => ({ listingId, chatId: subscriber.chatId, status: "PENDING" as const })),
+    skipDuplicates: true,
+  });
+  return chatIds;
 }
 
 export async function sendSystemAlert(text: string): Promise<void> {
@@ -179,7 +219,18 @@ export async function applyListingRetentionKeyboard(input: {
 export async function sendListingLink(
   listingId: string,
   snapshot?: TelegramListingSnapshot,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; chatId?: string } = {},
+): Promise<void> {
+  const chatIds = options.chatId ? [options.chatId] : await ensureRecipientReceipts(listingId);
+  for (const chatId of chatIds) {
+    await sendListingLinkToChat(listingId, snapshot, { ...options, chatId });
+  }
+}
+
+async function sendListingLinkToChat(
+  listingId: string,
+  snapshot: TelegramListingSnapshot | undefined,
+  options: { signal?: AbortSignal; chatId: string },
 ): Promise<void> {
   const listing = snapshot ?? (await loadListingForTelegram(listingId));
   if (!listing) throw new Error(`Listing not found: ${listingId}`);
@@ -187,7 +238,7 @@ export async function sendListingLink(
   if (listing.notificationMode === "SHADOW") return;
 
   const text = initialMessageText(listing);
-  const reservation = await reserveTelegramNotification(listingId, env.TELEGRAM_CHAT_ID || "not-configured", text);
+  const reservation = await reserveTelegramNotification(listingId, options.chatId, text);
 
   if (reservation.kind === "already-sent") {
     if (reservation.acceptedAt) await syncAcceptedListing(listingId, reservation.acceptedAt);
@@ -196,14 +247,14 @@ export async function sendListingLink(
   if (reservation.kind === "locked") return;
 
   const telegramBot = getBot();
-  const chatId = env.TELEGRAM_CHAT_ID;
+  const chatId = options.chatId;
 
-  if (!telegramBot || !chatId) {
+  if (!telegramBot) {
     const nextAttemptAt = new Date(Date.now() + telegramDeliveryRetryDelayMs(reservation.attemptCount));
     await prisma.telegramNotification.update({
       where: { id: reservation.notificationId },
       data: {
-        chatId: chatId || "not-configured",
+        chatId,
         status: "TRANSIENT",
         nextAttemptAt,
         lastText: text,
@@ -331,7 +382,7 @@ export async function stageListingForFlash(
   const chatId = env.TELEGRAM_CHAT_ID || "not-configured";
   const text = initialMessageText(listing);
   const now = new Date();
-  const existing = await prisma.telegramNotification.findUnique({ where: { listingId } });
+  const existing = await prisma.telegramNotification.findFirst({ where: { listingId, chatId } });
   if ((existing?.status === "SENT" || existing?.status === "UPDATED") && existing.messageId) return false;
   if (existing?.status === "PROCESSING" && existing.leaseExpiresAt && existing.leaseExpiresAt > now) return false;
 
@@ -575,7 +626,11 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
  * Never sends a second message.
  */
 export async function updateListingMessage(listingId: string): Promise<void> {
-  const notification = await prisma.telegramNotification.findUnique({ where: { listingId } });
+  // Enrichment is best-effort; first delivery is already durable per chat.
+  // The owner's card remains the canonical card for the legacy flash/update UI.
+  const notification = await prisma.telegramNotification.findFirst({
+    where: { listingId, chatId: env.TELEGRAM_CHAT_ID || "not-configured" },
+  });
   if (notification && env.TELEGRAM_CHAT_ID && notification.chatId !== env.TELEGRAM_CHAT_ID) {
     await prisma.telegramNotification.update({
       where: { id: notification.id },
@@ -783,7 +838,7 @@ async function reserveTelegramNotification(
 > {
   const now = new Date();
   const leaseExpiresAt = new Date(now.getTime() + TELEGRAM_SEND_LEASE_MS);
-  const existing = await prisma.telegramNotification.findUnique({ where: { listingId } });
+  const existing = await prisma.telegramNotification.findUnique({ where: { listingId_chatId: { listingId, chatId } } });
 
   if (existing?.messageId) {
     return { kind: "already-sent", acceptedAt: existing.acceptedAt ?? existing.sentAt };

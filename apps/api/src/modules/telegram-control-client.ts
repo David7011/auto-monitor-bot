@@ -31,10 +31,19 @@ export function abortActiveTelegramRequests(): void {
 }
 
 export async function sendTelegramMessage(text: string, replyMarkup: ReplyMarkup): Promise<void> {
+  return sendTelegramMessageToChat(env.TELEGRAM_CHAT_ID, text, replyMarkup);
+}
+
+/** Public subscriber replies must never reuse the owner's configured chat. */
+export async function sendTelegramMessageToChat(
+  chatId: number | string,
+  text: string,
+  replyMarkup?: ReplyMarkup,
+): Promise<void> {
   await telegramApi<unknown>("sendMessage", {
-    chat_id: env.TELEGRAM_CHAT_ID,
+    chat_id: chatId,
     text: trimTelegramMessage(text),
-    reply_markup: replyMarkup,
+    ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     disable_web_page_preview: true,
   });
 }

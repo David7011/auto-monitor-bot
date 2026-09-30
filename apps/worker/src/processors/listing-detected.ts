@@ -396,10 +396,9 @@ async function authorizeExistingNotification(
       where: { id: listingId, notificationMode: "SHADOW" },
       data: { notificationMode: "LIVE", provisionalReasons },
     }),
-    prisma.telegramNotification.upsert({
-      where: { listingId },
-      create: { listingId, chatId: env.TELEGRAM_CHAT_ID || "not-configured", status: "PENDING" },
-      update: {},
+    prisma.telegramNotification.createMany({
+      data: [{ listingId, chatId: env.TELEGRAM_CHAT_ID || "not-configured", status: "PENDING" }],
+      skipDuplicates: true,
     }),
   ]);
 }

@@ -31,8 +31,6 @@ import {
 import {
   addAutoRiaToCompatibleFilters,
   cancelKeyboard,
-  clearPendingAction,
-  createFilterFromTelegram,
   deleteFilterById,
   filterDetailsKeyboard,
   filtersKeyboard,
@@ -41,10 +39,7 @@ import {
   geoCitiesKeyboard,
   geoPrompt,
   geoRegionsKeyboard,
-  getPendingAction,
   newFilterPrompt,
-  runFilterTextCommand,
-  runPendingAction,
   setFilterAllSources,
   setFilterGeoByIds,
   setPendingAction,
@@ -58,6 +53,7 @@ import {
   editTelegramReplyMarkup as editMessageReplyMarkup,
   isAllowedTelegramChat as isAllowedChat,
   sendTelegramMessage as sendMessage,
+  sendTelegramMessageToChat,
   telegramApi,
 } from "./telegram-control-client.js";
 import {
@@ -80,6 +76,7 @@ type TelegramMessage = {
   text?: string;
   chat: {
     id: number | string;
+    type?: string;
   };
 };
 
@@ -127,7 +124,7 @@ let pollingPromise: Promise<void> | null = null;
 
 export function startTelegramControlBot(): void {
   if (!env.TELEGRAM_CONTROL_BOT_ENABLED) return;
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  if (!env.TELEGRAM_BOT_TOKEN) return;
   if (pollingPromise) return;
 
   stopRequested = false;
@@ -135,7 +132,7 @@ export function startTelegramControlBot(): void {
     pollingPromise = null;
   });
 
-  if (env.TELEGRAM_CONTROL_NOTIFY_ON_START) {
+  if (env.TELEGRAM_CONTROL_NOTIFY_ON_START && env.TELEGRAM_CHAT_ID) {
     void sendPanel("Автомонитор запущен на ноутбуке.\nУправление доступно с этой панели.").catch((err) =>
       logError("telegram-control", "Failed to send startup panel", errorMessage(err)),
     );
@@ -237,45 +234,45 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
 }
 
 async function handleMessage(message: TelegramMessage): Promise<void> {
-  if (!isAllowedChat(message.chat.id)) return;
   const text = message.text ?? "";
   const chatId = message.chat.id;
 
-  if (isCancelCommand(text)) {
-    clearPendingAction(chatId);
-    await sendPanel(await formatPanelText());
+  // Public bot mode deliberately exposes no mutation path in Telegram. A
+  // subscriber receives the globally configured stream; filters stay solely
+  // under the authenticated local dashboard owner's control.
+  if (isStartCommand(text)) {
+    if (message.chat.type && message.chat.type !== "private") {
+      await sendTelegramMessageToChat(chatId, "Подписка доступна только в личном чате с ботом.");
+      return;
+    }
+    await prisma.telegramSubscriber.upsert({
+      where: { chatId: String(chatId) },
+      create: { chatId: String(chatId), active: true },
+      update: { active: true, blockedAt: null, lastSeenAt: new Date() },
+    });
+    await sendTelegramMessageToChat(
+      chatId,
+      "Готово — вы подписаны на новые объявления. Фильтры настраивает владелец через локальную панель проекта.",
+    );
     return;
   }
 
-  const pending = getPendingAction(chatId);
-  if (pending && !text.trim().startsWith("/")) {
-    const result = await runPendingAction(pending, text);
-    clearPendingAction(chatId);
-    await sendFiltersPanel(result);
+  if (isHelpCommand(text)) {
+    await sendTelegramMessageToChat(chatId, "Отправьте /start, чтобы получать объявления по общим фильтрам. Изменение фильтров через Telegram отключено.");
     return;
   }
 
-  if (isFiltersCommand(text)) {
-    await sendFiltersPanel(await formatFiltersPanel());
-    return;
-  }
+  // No dashboard, source, filter or monitoring command is accepted from a
+  // Telegram chat, including the owner's chat. This prevents forged command
+  // updates from becoming a configuration path.
+}
 
-  if (isFilterCreateCommand(text)) {
-    await sendFiltersPanel(await createFilterFromTelegram(text));
-    return;
-  }
+function isStartCommand(text: string): boolean {
+  return /^\/start(?:\s|@|$)/iu.test(text.trim());
+}
 
-  const filterCommandResult = await runFilterTextCommand(text);
-  if (filterCommandResult) {
-    await sendFiltersPanel(filterCommandResult);
-    return;
-  }
-
-  const command = parseTextCommand(text);
-  if (!command) return;
-
-  const responseText = command === "panel" ? await formatPanelText() : await runControlCommand(command);
-  await sendPanel(responseText);
+function isHelpCommand(text: string): boolean {
+  return /^\/(?:help|помощь)(?:\s|@|$)/iu.test(text.trim());
 }
 
 async function handleCallback(callback: TelegramCallbackQuery): Promise<void> {
@@ -508,8 +505,8 @@ async function handleListingFavoriteCallback(
 
   const toggle = await prisma.$transaction(async (tx) => {
     await acquireTelegramRetentionLock(tx, listingId);
-    const notification = await tx.telegramNotification.findUnique({
-      where: { listingId },
+    const notification = await tx.telegramNotification.findFirst({
+      where: { listingId, chatId: String(chatId) },
       include: { listing: { select: { url: true } } },
     });
     if (
@@ -631,30 +628,6 @@ function sendPanel(text: string): Promise<void> {
   return sendMessage(text, PANEL_KEYBOARD);
 }
 
-async function sendFiltersPanel(text: string): Promise<void> {
-  await sendMessage(text, await filtersKeyboard());
-}
-
-
-function parseTextCommand(text: string | undefined): ControlCommand | null {
-  const normalized = (text ?? "").trim().toLowerCase();
-  if (normalized === "/start" || normalized === "/panel" || normalized === "панель") return "panel";
-  if (normalized === "/status" || normalized === "статус") return "status";
-  if (normalized === "/live" || normalized === "/боевой" || normalized === "боевой") return "live";
-  if (normalized === "/start_monitoring" || normalized === "/run" || normalized === "/пуск" || normalized === "старт") return "start";
-  if (normalized === "/standard" || normalized === "/обычный" || normalized === "обычный") return "standard";
-  if (normalized === "/stop" || normalized === "/стоп" || normalized === "стоп") return "stop";
-  if (normalized === "/scan" || normalized === "/скан" || normalized === "скан") return "scan";
-  if (normalized === "/sources_on" || normalized === "/источники_вкл") return "sources_on";
-  if (normalized === "/sources_off" || normalized === "/источники_выкл") return "sources_off";
-  return null;
-}
-
-function isCancelCommand(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  return normalized === "/cancel" || normalized === "отмена" || normalized === "скасувати";
-}
-
 function parseCallbackCommand(value: string | undefined): ControlCommand | null {
   if (!value?.startsWith(CONTROL_PREFIX)) return null;
   const command = value.slice(CONTROL_PREFIX.length);
@@ -672,15 +645,6 @@ function parseCallbackCommand(value: string | undefined): ControlCommand | null 
     return command;
   }
   return null;
-}
-
-function isFiltersCommand(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  return normalized === "/filters" || normalized === "/фильтры" || normalized === "фильтры";
-}
-
-function isFilterCreateCommand(text: string): boolean {
-  return /^\/?(filter|фильтр)\s+/iu.test(text.trim());
 }
 
 function sleep(ms: number): Promise<void> {
