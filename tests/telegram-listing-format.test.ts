@@ -37,11 +37,24 @@ const listing: TelegramListingSnapshot = {
 describe("Telegram listing formatting", () => {
   it("keeps the fast first message complete and deterministic", () => {
     const text = initialMessageText(listing);
-    expect(text).toContain("НОВОЕ ОБЪЯВЛЕНИЕ");
+    expect(text).toContain("🔥 НОВОЕ ОБЪЯВЛЕНИЕ 🔥");
     expect(text).toContain("Источник: OLX");
-    expect(text).toContain("Скорость обнаружения: 5 сек");
-    expect(text).toContain("Рынок: рассчитываю среднюю цену");
+    expect(text).toContain("Автомобиль: Volkswagen Golf 2018");
+    expect(text).toContain("Цена: 12000 $");
+    expect(text).toContain("Год/пробег: 2018 / 120000 км");
+    expect(text).toContain("Место: Киев, Киевская область");
     expect(text).toContain(listing.url);
+  });
+
+  it("keeps the card compact without market and filter noise", () => {
+    const text = initialMessageText({ ...listing, sellerPhone: "+380671234567" });
+    expect(text).toContain("Телефон: +380671234567");
+    expect(text).not.toContain("Фильтры:");
+    expect(text).not.toContain("Рынок:");
+    expect(text).not.toContain("Медиана");
+    expect(text).not.toContain("Проверка авто");
+    expect(text).not.toContain("Скорость обнаружения");
+    expect(text).not.toContain("Опубликовано:");
   });
 
   it("clamps oversized Telegram messages below the API limit", () => {

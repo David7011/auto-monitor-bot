@@ -668,7 +668,7 @@ export async function updateListingMessage(listingId: string): Promise<void> {
 
   if (!check && !market && !snapshot.sellerPhone) return;
 
-  const text = enrichedMessageText(snapshot, check, market);
+  const text = enrichedMessageText(snapshot);
 
   const telegramBot = getBot();
   if (!telegramBot || !notification?.messageId) {
@@ -680,6 +680,10 @@ export async function updateListingMessage(listingId: string): Promise<void> {
     }
     return;
   }
+
+  // The compact card no longer renders market/vehicle details, so an update
+  // whose text already matches the sent message is a no-op: skip the API call.
+  if (notification.lastText === text) return;
 
   try {
     await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.UPDATE);

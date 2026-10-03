@@ -1,4 +1,3 @@
-import type { MarketPriceEstimate, VehicleCheck } from "@amb/db";
 import { categoryProfile, marketplaceCategoryKey, validateCategoryAttributes, type ListingDiscoveryLane } from "@amb/shared";
 
 const TELEGRAM_MESSAGE_LIMIT = 3900;
@@ -42,34 +41,14 @@ export function initialMessageText(listing: TelegramListingSnapshot): string {
   if (marketplaceCategoryKey(listing.categoryKey) !== "vehicle.car") {
     return categoryMessageText(listing);
   }
-  return clampTelegramText([
-    messageHeading(listing),
-    "",
-    ...listingSummaryLines(listing),
-    "Рынок: рассчитываю среднюю цену",
-    "Проверка авто: выполняется",
-    "",
-    `Ссылка: ${listing.url}`,
-  ]);
+  return clampTelegramText([...carCardLines(listing), "", `Ссылка: ${listing.url}`]);
 }
 
-export function enrichedMessageText(
-  listing: TelegramListingSnapshot,
-  check: VehicleCheck | null,
-  market: MarketPriceEstimate | null,
-): string {
+export function enrichedMessageText(listing: TelegramListingSnapshot): string {
   if (marketplaceCategoryKey(listing.categoryKey) !== "vehicle.car") {
     return categoryMessageText(listing);
   }
-  const lines = [
-    messageHeading(listing),
-    "",
-    ...listingSummaryLines(listing),
-    ...marketPriceLines(market),
-    ...vehicleCheckLines(check),
-  ];
-  lines.push("", `Ссылка: ${listing.url}`);
-  return clampTelegramText(lines);
+  return clampTelegramText([...carCardLines(listing), "", `Ссылка: ${listing.url}`]);
 }
 
 function categoryMessageText(listing: TelegramListingSnapshot): string {
@@ -77,10 +56,9 @@ function categoryMessageText(listing: TelegramListingSnapshot): string {
   const profile = categoryProfile(categoryKey);
   const attributes = validateCategoryAttributes(categoryKey, listing.categoryAttributes).attributes;
   const title = listing.title ?? ([listing.brand, listing.model].filter(Boolean).join(" ") || profile.label);
-  const filters = listing.matches?.map((match) => match.filter.name).filter(Boolean).slice(0, 3) ?? [];
   const attributeLines = categoryAttributeLines(attributes);
   return clampTelegramText([
-    listing.discoveryLane === "REALTIME" ? `🔥 НОВОЕ — ${profile.telegramLabel}` : messageHeading(listing),
+    listing.discoveryLane === "REALTIME" ? `🔥 НОВОЕ — ${profile.telegramLabel} 🔥` : messageHeading(listing),
     ...(listing.provisionalReasons?.length ? ["⚠️ Возможно подходит: часть характеристик ещё не подтверждена.",
       ...listing.provisionalReasons.slice(0, 3).map((reason) => `Уточнить: ${reason}`)] : []),
     "",
@@ -90,10 +68,6 @@ function categoryMessageText(listing: TelegramListingSnapshot): string {
     `Место: ${[listing.city, listing.region].filter(Boolean).join(", ") || "-"}`,
     ...attributeLines,
     ...sellerPhoneLines(listing),
-    `Опубликовано: ${formatDate(listing.publishedAt)}`,
-    `Обнаружено: ${formatDate(listing.firstSeenAt)}`,
-    ...(discoveryLatencyLine(listing) ? [discoveryLatencyLine(listing)!] : []),
-    `Фильтры: ${filters.length ? filters.join(", ") : "-"}`,
     "",
     `Ссылка: ${listing.url}`,
   ]);
@@ -122,9 +96,8 @@ function formatCategoryPrice(listing: TelegramListingSnapshot): string {
   return formatPrice(listing);
 }
 
-function listingSummaryLines(listing: TelegramListingSnapshot): string[] {
+function carCardLines(listing: TelegramListingSnapshot): string[] {
   const title = listing.title ?? ([listing.brand, listing.model, listing.year].filter(Boolean).join(" ") || "Авто без названия");
-  const filters = listing.matches?.map((match) => match.filter.name).filter(Boolean).slice(0, 3) ?? [];
   const specs = [
     listing.engineVolume != null ? `${listing.engineVolume} л` : null,
     vehicleAttributeLabel(listing.fuelType),
@@ -132,19 +105,15 @@ function listingSummaryLines(listing: TelegramListingSnapshot): string[] {
     vehicleAttributeLabel(listing.driveType),
     vehicleAttributeLabel(listing.bodyType),
   ].filter(Boolean);
-  const latency = discoveryLatencyLine(listing);
   return [
+    messageHeading(listing),
+    "",
     `Источник: ${sourceLabel(listing.source)}`,
     `Автомобиль: ${title}`,
     `Цена: ${formatPrice(listing)}`,
     `Год/пробег: ${listing.year ?? "-"} / ${listing.mileage != null ? `${listing.mileage} км` : "-"}`,
     ...(specs.length ? [`Характеристики: ${specs.join(" / ")}`] : []),
     `Место: ${[listing.city, listing.region].filter(Boolean).join(", ") || "-"}`,
-    `Опубликовано: ${formatDate(listing.publishedAt)}`,
-    `Обнаружено: ${formatDate(listing.firstSeenAt)}`,
-    ...(latency ? [latency] : []),
-    `Фильтры: ${filters.length ? filters.join(", ") : "-"}`,
-    `Номер/VIN: ${listing.plateNormalized ?? "-"} / ${listing.vin ?? "-"}`,
     ...sellerPhoneLines(listing),
   ];
 }
@@ -163,7 +132,7 @@ function messageHeading(listing: TelegramListingSnapshot): string {
   if (listing.discoveryLane === "BACKFILL") return "НАЙДЕНО ПРИ ФОНОВОЙ СВЕРКЕ";
   if (listing.discoveryLane === "COVERAGE") return "НАЙДЕНО ПРИ СВЕРКЕ ИСТОЧНИКА";
   if (listing.discoveryLane === "MANUAL") return "НАЙДЕНО ПРИ РУЧНОЙ ПРОВЕРКЕ";
-  return "НОВОЕ ОБЪЯВЛЕНИЕ";
+  return "🔥 НОВОЕ ОБЪЯВЛЕНИЕ 🔥";
 }
 
 function vehicleAttributeLabel(value: string | null): string | null {
@@ -197,117 +166,10 @@ function vehicleAttributeLabel(value: string | null): string | null {
   return labels[value.toLowerCase()] ?? value;
 }
 
-function marketPriceLines(market: MarketPriceEstimate | null): string[] {
-  if (!market) return ["Рынок: считаю среднюю цену"];
-  const research = marketResearchLines(market);
-  if (market.status !== "READY") return [`Рынок: мало похожих объявлений (${market.sampleSize})`, ...research];
-
-  return [
-    `Рынок: ${marketVerdictLabel(market.verdict)} (${market.sampleSize} похожих)`,
-    `Медиана/средняя: ${formatUsd(market.medianPrice)} / ${formatUsd(market.averagePrice)}`,
-    `Нормальный коридор: ${formatUsd(market.fairLowPrice)} - ${formatUsd(market.fairHighPrice)}`,
-    `Разброс выборки: ${formatUsd(market.minPrice)} - ${formatUsd(market.maxPrice)}`,
-    ...research,
-  ];
-}
-
-function marketResearchLines(market: MarketPriceEstimate): string[] {
-  const params = asJsonObject(market.params);
-  if (!params) return [];
-  const breakdown = asJsonObject(params.sourceBreakdown);
-  const sourceParts = breakdown
-    ? Object.entries(breakdown)
-        .filter((entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] > 0)
-        .map(([source, count]) => `${sourceLabel(source)}: ${count}`)
-    : [];
-  const active = numberValue(params.activeSampleSize);
-  const database = numberValue(params.databaseSampleSize);
-  const lines: string[] = [];
-  if (sourceParts.length > 0) lines.push(`Источники цен: ${sourceParts.join(", ")}`);
-  if (active != null || database != null) {
-    lines.push(`Проверка рынка: свежая выдача ${active ?? 0}, база проекта ${database ?? 0}`);
-  }
-  return lines;
-}
-
-function asJsonObject(value: unknown): Record<string, unknown> | null {
-  return value != null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-function numberValue(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function vehicleCheckLines(check: VehicleCheck | null): string[] {
-  if (!check) return ["Проверка авто: выполняется"];
-  if (!check.plateNormalized && !check.vin) {
-    return ["Проверка авто: выполнена", "Номер/VIN: не найдено в объявлении"];
-  }
-
-  const vinData = [
-    check.make,
-    check.model,
-    check.year,
-    check.engineVolume != null ? `${check.engineVolume} л` : null,
-    check.fuelType,
-  ].filter(Boolean);
-  const discrepancies = check.discrepancies.length ? check.discrepancies.slice(0, 3).join(" | ") : "нет";
-  const extra = [check.accidents, check.restrictions].filter(Boolean);
-
-  return [
-    `Проверка авто: ${vehicleStatusLabel(check.checkStatus)}${check.provider ? ` через ${providerLabel(check.provider)}` : ""}`,
-    `Номер: ${check.plateNormalized ?? "-"}`,
-    `VIN: ${check.vin ?? "-"}`,
-    `Данные VIN: ${vinData.length ? vinData.join(" / ") : "-"}`,
-    `Риски: ${extra.length ? extra.join(" | ") : "-"}`,
-    `Несовпадения: ${discrepancies}`,
-  ];
-}
-
-function marketVerdictLabel(verdict: MarketPriceEstimate["verdict"]): string {
-  switch (verdict) {
-    case "HIGH_RISK_BARGAIN": return "очень дешево, проверять жестко";
-    case "BELOW_MARKET": return "ниже рынка";
-    case "FAIR": return "рыночная цена";
-    case "ABOVE_MARKET": return "выше рынка";
-    default: return "недостаточно данных";
-  }
-}
-
 function formatPrice(listing: TelegramListingSnapshot): string {
   if (listing.priceNormalized != null) return `${listing.priceNormalized} $`;
   if (listing.priceOriginal != null) return `${listing.priceOriginal} ${listing.currencyOriginal ?? ""}`.trim();
   return "-";
-}
-
-function formatUsd(value: number | null): string {
-  return value == null ? "-" : `${value} $`;
-}
-
-function formatDate(value: Date | null): string {
-  if (!value) return "-";
-  return new Intl.DateTimeFormat("ru-RU", {
-    timeZone: "Europe/Kyiv",
-    day: "2-digit",
-    month: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(value);
-}
-
-function discoveryLatencyLine(listing: TelegramListingSnapshot): string | null {
-  if (!listing.publishedAt || !["HIGH", "MEDIUM"].includes(listing.timestampConfidence)) return null;
-  const latencyMs = listing.firstSeenAt.getTime() - listing.publishedAt.getTime();
-  if (latencyMs < 0) return null;
-  return `Скорость обнаружения: ${formatDuration(latencyMs)}`;
-}
-
-function formatDuration(valueMs: number): string {
-  const seconds = Math.max(0, Math.round(valueMs / 1000));
-  if (seconds < 60) return `${seconds} сек`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return rest ? `${minutes} мин ${rest} сек` : `${minutes} мин`;
 }
 
 export function clampTelegramText(lines: string[]): string {
@@ -323,28 +185,4 @@ function sourceLabel(source: string): string {
     case "MOCK": return "Тестовый";
     default: return source;
   }
-}
-
-function vehicleStatusLabel(status: VehicleCheck["checkStatus"]): string {
-  switch (status) {
-    case "NOT_STARTED": return "не начата";
-    case "PENDING": return "выполняется";
-    case "NO_PLATE_OR_VIN_FOUND": return "номер и VIN не найдены";
-    case "PLATE_FOUND": return "найден номер";
-    case "VIN_FOUND": return "найден VIN";
-    case "CHECK_DONE": return "готова";
-    case "CHECK_PARTIAL": return "частично готова";
-    case "CHECK_FAILED": return "ошибка проверки";
-    default: return status;
-  }
-}
-
-function providerLabel(provider: string): string {
-  return provider
-    .replace("listing_text", "текст объявления")
-    .replace("nhtsa_vpic", "NHTSA VIN")
-    .replace("nhtsa_recalls", "NHTSA отзывы")
-    .replace("data_gov_ua_stolen", "розыск МВД/Нацполиция")
-    .replace("cache", "кэш предыдущей проверки")
-    .replace(/\+/gu, " + ");
 }
