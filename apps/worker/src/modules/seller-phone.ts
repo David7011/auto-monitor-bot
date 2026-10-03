@@ -192,28 +192,13 @@ function extractAutoRiaUserHash(data: unknown): string | null {
 }
 
 /**
- * Background-only OLX phone lookup. Goes through the shared origin
- * coordinator with ENRICHMENT class, so realtime is never delayed and an
- * open protection circuit returns an empty result instead of new traffic.
- */
-export async function fetchOlxLimitedPhones(externalId: string): Promise<string[]> {
-  if (!/^\d+$/u.test(externalId)) return [];
-  try {
-    const result = await sourceHttpClient.json<unknown>(
-      `https://www.olx.ua/api/v1/offers/${encodeURIComponent(externalId)}/limited-phones/`,
-      { source: "OLX", requestClass: "ENRICHMENT", timeoutMs: SELLER_PHONE_TIMEOUT_MS, maxBytes: 256_000 },
-    );
-    if (result.classification !== "SUCCESS" || result.data == null) return [];
-    return parseOlxLimitedPhones(result.data);
-  } catch {
-    return [];
-  }
-}
-
-/**
  * Background-only AUTO.RIA phone lookup (public rotator + phones endpoints).
  * The official developers.ria.com API always masks phones, so the public
  * two-step flow is the only source. Never consumes paid API quota.
+ *
+ * OLX has no anonymous phone surface: the detail page and prerendered state
+ * contain no number, and `limited-phones` answers 400 "Disallowed for this
+ * user" without an OLX login session. OLX is therefore text-only.
  */
 export async function fetchAutoRiaPhones(externalId: string): Promise<string[]> {
   if (!/^\d+$/u.test(externalId)) return [];
@@ -270,8 +255,9 @@ export type SellerPhoneLookup = {
 
 /**
  * Resolves seller phones with zero extra traffic first (text/raw), then at
- * most one cached background lookup per listing (OLX `limited-phones` or the
- * AUTO.RIA public rotator flow). Never throws and never touches realtime.
+ * most one cached background lookup per AUTO.RIA listing. OLX exposes no
+ * anonymous phone surface, so it stays text-only. Never throws and never
+ * touches realtime.
  */
 export async function resolveSellerPhones(lookup: SellerPhoneLookup): Promise<string[]> {
   try {
@@ -281,14 +267,12 @@ export async function resolveSellerPhones(lookup: SellerPhoneLookup): Promise<st
     const fromText = extractPhonesFromText(haystack);
     if (fromText.length > 0) return fromText;
 
-    if (lookup.source !== "OLX" && lookup.source !== "AUTO_RIA") return [];
+    if (lookup.source !== "AUTO_RIA") return [];
 
     const cached = await readCachedPhones(lookup.source, lookup.externalId);
     if (cached) return cached.slice(0, SELLER_PHONE_MAX);
 
-    const fetched = lookup.source === "OLX"
-      ? await fetchOlxLimitedPhones(lookup.externalId)
-      : await fetchAutoRiaPhones(lookup.externalId);
+    const fetched = await fetchAutoRiaPhones(lookup.externalId);
     await writeCachedPhones(lookup.source, lookup.externalId, fetched);
     return fetched;
   } catch (error) {
