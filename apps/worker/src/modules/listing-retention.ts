@@ -171,7 +171,7 @@ export async function adoptFreshListingNotifications(now = new Date()): Promise<
       chatId: true,
       messageId: true,
       sentAt: true,
-      listing: { select: { url: true } },
+      listing: { select: { url: true, sellerPhone: true } },
     },
   });
   const summary = { selected: notifications.length, adopted: 0, deferred: 0, permanentFailures: 0 };
@@ -183,6 +183,7 @@ export async function adoptFreshListingNotifications(now = new Date()): Promise<
       messageId: notification.messageId,
       listingId: notification.listingId,
       url: notification.listing.url,
+      sellerPhone: notification.listing.sellerPhone,
     });
     if (result.outcome === "RETRY") {
       summary.deferred += 1;

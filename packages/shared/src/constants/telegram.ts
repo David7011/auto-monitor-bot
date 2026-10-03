@@ -15,7 +15,8 @@ export function telegramRetentionClaimIsActive(
 
 export type TelegramListingButton =
   | { text: string; url: string }
-  | { text: string; callback_data: string };
+  | { text: string; callback_data: string }
+  | { text: string; copy_text: { text: string } };
 
 export type TelegramListingKeyboard = {
   inline_keyboard: TelegramListingButton[][];
@@ -30,10 +31,17 @@ export function telegramListingKeyboard(
   listingId: string,
   retainUntil: Date | string | null = null,
   favoriteRetentionDays = 10,
+  sellerPhone: string | string[] | null = null,
 ): TelegramListingKeyboard {
+  const phones = Array.isArray(sellerPhone)
+    ? sellerPhone.map((phone) => phone.trim()).filter(Boolean).slice(0, 2)
+    : typeof sellerPhone === "string"
+      ? sellerPhone.split(",").map((phone) => phone.trim()).filter(Boolean).slice(0, 2)
+      : [];
   return {
     inline_keyboard: [
       [{ text: "Открыть объявление", url }],
+      ...phones.map((phone) => [{ text: `📋 ${phone}`, copy_text: { text: phone } } as TelegramListingButton]),
       [
         {
           text: retainUntil

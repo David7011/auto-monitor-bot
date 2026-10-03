@@ -4,6 +4,7 @@ import { enqueue } from "../lib/queues.js";
 import { log } from "../lib/log.js";
 import { runMarketPriceEstimate } from "../modules/market-price.js";
 import { findPossibleDuplicate } from "../modules/duplicate-guard.js";
+import { ensureListingSellerPhone } from "../modules/seller-phone.js";
 
 export type ListingEnrichJob = { listingId: string };
 
@@ -36,6 +37,18 @@ export async function processListingEnrich(job: ListingEnrichJob): Promise<void>
     });
     return;
   }
+  // Seller phone runs in background only: cached, bounded, and never on the
+  // first-send path. A resolved number is delivered via the same Telegram
+  // card update as the market estimate below.
+  const resolveSellerPhone = ensureListingSellerPhone(job.listingId).catch((err) => {
+    void log.warn(
+      "seller-phone",
+      "Background phone lookup failed",
+      err instanceof Error ? err.message : String(err),
+    ).catch(() => undefined);
+    return [] as string[];
+  });
+
   // VIN/plate checks and market research are independent. Start the slower
   // vehicle branch immediately instead of waiting for market I/O to finish.
   await enqueue(QUEUE_NAMES.VEHICLE_CHECK, "check", { listingId: job.listingId });
@@ -67,9 +80,15 @@ export async function processListingEnrich(job: ListingEnrichJob): Promise<void>
     await enqueue(QUEUE_NAMES.TELEGRAM_UPDATE, "update", { listingId: job.listingId });
   } catch (err) {
     await log.warn("market-price", "Market price estimate failed", err instanceof Error ? err.message : String(err));
+    // A resolved phone alone still deserves a card update.
+    const phones = await resolveSellerPhone;
+    if (phones.length > 0) {
+      await enqueue(QUEUE_NAMES.TELEGRAM_UPDATE, "update", { listingId: job.listingId }).catch(() => undefined);
+    }
   }
 
   await annotatePossibleDuplicate;
+  await resolveSellerPhone;
 
   await prisma.sourceSeenListing.updateMany({
     where: { listingId: job.listingId },

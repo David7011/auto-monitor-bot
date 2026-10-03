@@ -17,6 +17,7 @@ import {
   type TelegramListingSnapshot,
 } from "../modules/telegram-service.js";
 import { claimHotListing, releaseHotListingClaim } from "../modules/hot-duplicate-guard.js";
+import { extractPhonesFromText } from "../modules/seller-phone.js";
 import { dispatchFirstNotification } from "../modules/first-notification-dispatch.js";
 import {
   buildFilterSetRevision,
@@ -204,6 +205,13 @@ async function processClaimedListing(
   }
 
   // 3. Persist listing + matches
+  // Zero-request phone prefill: when the seller wrote the number in the
+  // title/description it is shown in the very first message at no extra cost.
+  // Numbers hidden behind "show phone" are resolved later in background
+  // enrichment and added to the card via Telegram update.
+  const textPhones = extractPhonesFromText(
+    [listing.title ?? "", listing.description ?? ""].filter(Boolean).join("\n"),
+  );
   const createData = {
     source: listing.source,
     externalId: listing.externalId,
@@ -236,7 +244,7 @@ async function processClaimedListing(
     mileage: listing.mileage ?? null,
     city: listing.city ?? null,
     region: listing.region ?? null,
-    sellerPhone: listing.sellerPhone ?? null,
+    sellerPhone: textPhones.length > 0 ? textPhones.join(", ") : (listing.sellerPhone ?? null),
     vin: listing.vin ?? null,
     plateNormalized: listing.plateNormalized ?? null,
     description: listing.description ?? null,

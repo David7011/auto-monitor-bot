@@ -28,7 +28,9 @@ import { extractGeo, parseQuickFilter } from "./telegram-filter-parser.js";
 import { getMarks, getModels, type TaxonomyOption } from "./vehicle-taxonomy.js";
 
 export type ReplyMarkup = {
-  inline_keyboard: Array<Array<{ text: string; callback_data: string } | { text: string; url: string }>>;
+  inline_keyboard: Array<
+    Array<{ text: string; callback_data: string } | { text: string; url: string } | { text: string; copy_text: { text: string } }>
+  >;
 };
 
 export type PendingAction =

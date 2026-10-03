@@ -33,6 +33,7 @@ export type TelegramListingSnapshot = {
   discoveryLane: ListingDiscoveryLane;
   vin: string | null;
   plateNormalized: string | null;
+  sellerPhone?: string | null;
   matches?: Array<{ filter: { name: string } }>;
   rawData: unknown;
 };
@@ -88,6 +89,7 @@ function categoryMessageText(listing: TelegramListingSnapshot): string {
     `Цена: ${formatCategoryPrice(listing)}`,
     `Место: ${[listing.city, listing.region].filter(Boolean).join(", ") || "-"}`,
     ...attributeLines,
+    ...sellerPhoneLines(listing),
     `Опубликовано: ${formatDate(listing.publishedAt)}`,
     `Обнаружено: ${formatDate(listing.firstSeenAt)}`,
     ...(discoveryLatencyLine(listing) ? [discoveryLatencyLine(listing)!] : []),
@@ -143,7 +145,18 @@ function listingSummaryLines(listing: TelegramListingSnapshot): string[] {
     ...(latency ? [latency] : []),
     `Фильтры: ${filters.length ? filters.join(", ") : "-"}`,
     `Номер/VIN: ${listing.plateNormalized ?? "-"} / ${listing.vin ?? "-"}`,
+    ...sellerPhoneLines(listing),
   ];
+}
+
+export function sellerPhoneList(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value.split(",").map((phone) => phone.trim()).filter(Boolean).slice(0, 3);
+}
+
+function sellerPhoneLines(listing: Pick<TelegramListingSnapshot, "sellerPhone">): string[] {
+  const phones = sellerPhoneList(listing.sellerPhone);
+  return phones.length > 0 ? [`Телефон: ${phones.join(", ")}`] : [];
 }
 
 function messageHeading(listing: TelegramListingSnapshot): string {

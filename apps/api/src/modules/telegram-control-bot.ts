@@ -514,7 +514,7 @@ async function handleListingFavoriteCallback(
     await acquireTelegramRetentionLock(tx, listingId);
     const notification = await tx.telegramNotification.findFirst({
       where: { listingId, chatId: String(chatId) },
-      include: { listing: { select: { url: true } } },
+      include: { listing: { select: { url: true, sellerPhone: true } } },
     });
     if (
       !notification
@@ -579,6 +579,7 @@ async function handleListingFavoriteCallback(
       listingId,
       toggle.updated.retainUntil,
       env.LISTING_FAVORITE_RETENTION_DAYS,
+      toggle.notification.listing.sellerPhone,
     ),
   ).catch((error) =>
     logError(

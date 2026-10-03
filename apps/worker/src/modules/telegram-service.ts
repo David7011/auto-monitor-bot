@@ -14,6 +14,7 @@ import {
   type TelegramListingSnapshot,
 } from "./telegram-listing-format.js";
 import { telegramFlashBundleText } from "./telegram-flash-format.js";
+import { ensureListingSellerPhone } from "./seller-phone.js";
 
 export type { TelegramListingSnapshot } from "./telegram-listing-format.js";
 
@@ -166,10 +167,11 @@ export type TelegramListingKeyboardResult =
 
 export async function applyListingRetentionKeyboard(input: {
   chatId: string;
-  messageId: string;
+  messageId: string | null;
   listingId: string;
   url: string;
   retainUntil?: Date | null;
+  sellerPhone?: string | null;
 }): Promise<TelegramListingKeyboardResult> {
   const telegramBot = getBot();
   if (!telegramBot) {
@@ -191,6 +193,7 @@ export async function applyListingRetentionKeyboard(input: {
         input.listingId,
         input.retainUntil ?? null,
         env.LISTING_FAVORITE_RETENTION_DAYS,
+        input.sellerPhone ?? null,
       ),
     });
     return { outcome: "UPDATED" };
@@ -298,6 +301,7 @@ async function sendListingLinkToChat(
           listing.id,
           null,
           env.LISTING_FAVORITE_RETENTION_DAYS,
+          listing.sellerPhone ?? null,
         ),
       }, options.signal);
 
@@ -647,9 +651,24 @@ export async function updateListingMessage(listingId: string): Promise<void> {
     prisma.marketPriceEstimate.findUnique({ where: { listingId } }),
   ]);
 
-  if (!listing || (!check && !market)) return;
+  if (!listing) return;
+  // Background phone resolution is best-effort and cached: listings that went
+  // out before this feature (or whose number hides behind "show phone") get
+  // the number into the same card edit as market/vehicle enrichment.
+  // The load above may have raced the persist, so patch the snapshot in memory.
+  let snapshot: TelegramListingSnapshot = listing;
+  try {
+    const phones = await ensureListingSellerPhone(listingId);
+    if (phones.length > 0 && !listing.sellerPhone) {
+      snapshot = { ...listing, sellerPhone: phones.join(", ") };
+    }
+  } catch {
+    // Phone lookup must never block the market/vehicle card update.
+  }
 
-  const text = enrichedMessageText(listing, check, market);
+  if (!check && !market && !snapshot.sellerPhone) return;
+
+  const text = enrichedMessageText(snapshot, check, market);
 
   const telegramBot = getBot();
   if (!telegramBot || !notification?.messageId) {
@@ -667,10 +686,11 @@ export async function updateListingMessage(listingId: string): Promise<void> {
     await telegramBot.api.editMessageText(notification.chatId, Number(notification.messageId), text, {
       link_preview_options: { is_disabled: true },
       reply_markup: telegramListingKeyboard(
-        listing.url,
-        listing.id,
+        snapshot.url,
+        snapshot.id,
         notification.retainUntil,
         env.LISTING_FAVORITE_RETENTION_DAYS,
+        snapshot.sellerPhone ?? null,
       ),
     });
     await prisma.telegramNotification.update({
@@ -693,10 +713,11 @@ export async function updateListingMessage(listingId: string): Promise<void> {
       await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.UPDATE);
       await telegramBot.api.editMessageReplyMarkup(notification.chatId, Number(notification.messageId), {
         reply_markup: telegramListingKeyboard(
-          listing.url,
-          listing.id,
+          snapshot.url,
+          snapshot.id,
           currentRetention?.retainUntil ?? null,
           env.LISTING_FAVORITE_RETENTION_DAYS,
+          snapshot.sellerPhone ?? null,
         ),
       });
     }
