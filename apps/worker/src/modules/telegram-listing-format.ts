@@ -1,6 +1,8 @@
 import { categoryProfile, marketplaceCategoryKey, validateCategoryAttributes, type ListingDiscoveryLane } from "@amb/shared";
 
 const TELEGRAM_MESSAGE_LIMIT = 3900;
+const TELEGRAM_CAPTION_LIMIT = 1000;
+const TELEGRAM_ALBUM_LIMIT = 10;
 
 export type TelegramListingSnapshot = {
   id: string;
@@ -33,6 +35,7 @@ export type TelegramListingSnapshot = {
   vin: string | null;
   plateNormalized: string | null;
   sellerPhone?: string | null;
+  photoUrls?: string[] | null;
   matches?: Array<{ filter: { name: string } }>;
   rawData: unknown;
 };
@@ -175,6 +178,46 @@ function formatPrice(listing: TelegramListingSnapshot): string {
 export function clampTelegramText(lines: string[]): string {
   const text = lines.join("\n");
   return text.length <= TELEGRAM_MESSAGE_LIMIT ? text : `${text.slice(0, TELEGRAM_MESSAGE_LIMIT - 20)}\n...обрезано`;
+}
+
+export function clampTelegramCaption(value: string): string {
+  return value.length <= TELEGRAM_CAPTION_LIMIT ? value : `${value.slice(0, TELEGRAM_CAPTION_LIMIT - 20)}\n...обрезано`;
+}
+
+export type TelegramSendKind = "TEXT" | "PHOTO" | "ALBUM";
+
+/** Public http(s) photo URLs only; Telegram cannot fetch anything else. */
+export function sendablePhotoUrls(value: readonly string[] | string[] | null | undefined): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((url): url is string => typeof url === "string" && /^https:\/\//iu.test(url));
+}
+
+export function describeTelegramSend(
+  photoUrls: readonly string[] | string[] | null | undefined,
+): { kind: TelegramSendKind; photos: string[] } {
+  const photos = sendablePhotoUrls(photoUrls).slice(0, TELEGRAM_ALBUM_LIMIT);
+  if (photos.length >= 2) return { kind: "ALBUM", photos };
+  if (photos.length === 1) return { kind: "PHOTO", photos };
+  return { kind: "TEXT", photos: [] };
+}
+
+/**
+ * Album messages store all ids comma-joined in the single messageId column:
+ * "123,124,125". Caption and tombstone edits target the primary (first) id,
+ * cleanup deletes every id. Favorite callbacks can only originate from
+ * keyboard messages, which always carry a single id.
+ */
+export function splitTelegramMessageIds(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return value.split(",").map((id) => id.trim()).filter((id) => /^\d+$/u.test(id));
+}
+
+export function primaryTelegramMessageId(value: string | null | undefined): string | null {
+  return splitTelegramMessageIds(value)[0] ?? null;
+}
+
+export function isTelegramAlbumMessage(value: string | null | undefined): boolean {
+  return splitTelegramMessageIds(value).length > 1;
 }
 
 function sourceLabel(source: string): string {

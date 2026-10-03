@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  clampTelegramCaption,
   clampTelegramText,
+  describeTelegramSend,
   initialMessageText,
+  isTelegramAlbumMessage,
+  primaryTelegramMessageId,
+  splitTelegramMessageIds,
   type TelegramListingSnapshot,
 } from "../apps/worker/src/modules/telegram-listing-format.js";
 
@@ -68,5 +73,28 @@ describe("Telegram listing formatting", () => {
       .toContain("НАЙДЕНО ПРИ СВЕРКЕ ИСТОЧНИКА");
     expect(initialMessageText({ ...listing, discoveryLane: "BACKFILL" }))
       .toContain("НАЙДЕНО ПРИ ФОНОВОЙ СВЕРКЕ");
+  });
+
+  it("selects text, single photo, or album delivery by photo count", () => {
+    expect(describeTelegramSend([]).kind).toBe("TEXT");
+    expect(describeTelegramSend(["ftp://example.com/x.jpg"]).kind).toBe("TEXT");
+    expect(describeTelegramSend(["https://example.com/1.jpg"]).kind).toBe("PHOTO");
+    const many = Array.from({ length: 12 }, (_, index) => `https://example.com/${index}.jpg`);
+    const album = describeTelegramSend(many);
+    expect(album.kind).toBe("ALBUM");
+    expect(album.photos).toHaveLength(10);
+  });
+
+  it("clamps captions to the Telegram caption limit", () => {
+    expect(clampTelegramCaption("x".repeat(5_000)).length).toBeLessThanOrEqual(1_000);
+    expect(clampTelegramCaption("short")).toBe("short");
+  });
+
+  it("tracks album message ids comma-joined in one column", () => {
+    expect(splitTelegramMessageIds("123,124,125")).toEqual(["123", "124", "125"]);
+    expect(primaryTelegramMessageId("123,124")).toBe("123");
+    expect(isTelegramAlbumMessage("123,124")).toBe(true);
+    expect(isTelegramAlbumMessage("123")).toBe(false);
+    expect(isTelegramAlbumMessage(null)).toBe(false);
   });
 });

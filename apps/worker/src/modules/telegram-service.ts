@@ -8,9 +8,14 @@ import { redisConnection } from "../lib/queues.js";
 import { TelegramSendGate, telegramRateGateKey } from "./telegram-send-gate.js";
 import { withRenewableTelegramLease } from "./telegram-send-lease.js";
 import {
+  clampTelegramCaption,
   clampTelegramText,
+  describeTelegramSend,
   enrichedMessageText,
   initialMessageText,
+  isTelegramAlbumMessage,
+  primaryTelegramMessageId,
+  splitTelegramMessageIds,
   type TelegramListingSnapshot,
 } from "./telegram-listing-format.js";
 import { telegramFlashBundleText } from "./telegram-flash-format.js";
@@ -182,6 +187,8 @@ export async function applyListingRetentionKeyboard(input: {
     };
   }
   const messageId = Number(input.messageId);
+  // Photo albums store comma-joined ids and expose no keyboard to refresh.
+  if (isTelegramAlbumMessage(input.messageId)) return { outcome: "UPDATED" };
   if (!Number.isSafeInteger(messageId) || messageId <= 0) {
     return { outcome: "PERMANENT_FAILURE", errorMessage: "Invalid Telegram message ID" };
   }
@@ -294,18 +301,9 @@ async function sendListingLinkToChat(
       });
       await assertOwned();
       requestStarted = true;
-      const sent = await telegramBot.api.sendMessage(chatId, text, {
-        link_preview_options: { is_disabled: true },
-        reply_markup: telegramListingKeyboard(
-          listing.url,
-          listing.id,
-          null,
-          env.LISTING_FAVORITE_RETENTION_DAYS,
-          listing.sellerPhone ?? null,
-        ),
-      }, options.signal);
+      const receipt = await sendListingCard(telegramBot, chatId, listing, text, options.signal);
 
-      // A resolved sendMessage call is Telegram Bot API acceptance. Keep this
+      // A resolved send call is Telegram Bot API acceptance. Keep this
       // separate from queue reservation and later local persistence.
       const acceptedAt = new Date();
       const sentAt = acceptedAt;
@@ -315,7 +313,7 @@ async function sendListingLinkToChat(
         where: { id: reservation.notificationId },
         data: {
           chatId,
-          messageId: String(sent.message_id),
+          messageId: receipt.messageIds,
           status: "DELIVERED",
           lastText: text,
           leaseExpiresAt: null,
@@ -369,9 +367,126 @@ async function sendListingLinkToChat(
         lastErrorMessage: message,
       },
     });
-    await log.error("telegram", aborted ? "sendMessage deadline exceeded" : "sendMessage failed", message);
+    await log.error("telegram", aborted ? "send deadline exceeded" : "card send failed", message);
     if (retryAfterSeconds) throw new TelegramRateLimitError(message, retryAfterSeconds);
     throw err;
+  }
+}
+
+/**
+ * Sends one listing card: a photo album (2-10 photos) with the card as the
+ * caption, a single photo with caption and buttons, or plain text with
+ * buttons. Bot API albums cannot carry an inline keyboard, so the link and
+ * the phone stay tappable plain text in the caption there. Rejected media
+ * (dead CDN links) falls back down the chain; anything else rethrows into
+ * the regular retry/ambiguity handling so a half-sent card is never doubled.
+ */
+async function sendListingCard(
+  telegramBot: NonNullable<ReturnType<typeof getBot>>,
+  chatId: string,
+  listing: TelegramListingSnapshot,
+  text: string,
+  signal?: AbortSignal,
+): Promise<{ messageIds: string }> {
+  const keyboard = () => telegramListingKeyboard(
+    listing.url,
+    listing.id,
+    null,
+    env.LISTING_FAVORITE_RETENTION_DAYS,
+    listing.sellerPhone ?? null,
+  );
+  const { kind, photos } = describeTelegramSend(listing.photoUrls);
+  if (kind === "TEXT") {
+    const sent = await telegramBot.api.sendMessage(chatId, text, {
+      link_preview_options: { is_disabled: true },
+      reply_markup: keyboard(),
+    }, signal);
+    return { messageIds: String(sent.message_id) };
+  }
+  const caption = clampTelegramCaption(text);
+  const sendSingle = async () => {
+    const sent = await telegramBot.api.sendPhoto(chatId, photos[0]!, { caption, reply_markup: keyboard() }, signal);
+    return { messageIds: String(sent.message_id) };
+  };
+  const sendText = async () => {
+    const sent = await telegramBot.api.sendMessage(chatId, text, {
+      link_preview_options: { is_disabled: true },
+      reply_markup: keyboard(),
+    }, signal);
+    return { messageIds: String(sent.message_id) };
+  };
+  if (kind === "PHOTO") {
+    try {
+      return await sendSingle();
+    } catch (error) {
+      if (!isTelegramMediaRejected(error) || telegramRetryAfterSeconds(error)) throw error;
+      return sendText();
+    }
+  }
+  try {
+    const sent = await telegramBot.api.sendMediaGroup(chatId, [
+      { type: "photo" as const, media: photos[0]!, caption },
+      ...photos.slice(1).map((media) => ({ type: "photo" as const, media })),
+    ], undefined, signal);
+    return { messageIds: sent.map((message) => String(message.message_id)).join(",") };
+  } catch (error) {
+    if (!isTelegramMediaRejected(error) || telegramRetryAfterSeconds(error)) throw error;
+    try {
+      return await sendSingle();
+    } catch (nested) {
+      if (!isTelegramMediaRejected(nested) || telegramRetryAfterSeconds(nested)) throw nested;
+      return sendText();
+    }
+  }
+}
+
+/** Dead CDN links and invalid media payloads are safe to downgrade to text. */
+function isTelegramMediaRejected(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:wrong file|failed to get http url content|wrong type of the web page|can't download|media (?:empty|invalid)|photo (?:invalid|dimensions)|empty url|file identifier)/iu.test(message);
+}
+
+/**
+ * Edits a card in place, crossing between caption and text when the stored
+ * message turns out to be the other kind (pre-photo legacy text cards).
+ * "Not modified" is a successful no-op, anything else propagates.
+ */
+async function editCardText(
+  telegramBot: NonNullable<ReturnType<typeof getBot>>,
+  chatId: string,
+  messageId: number,
+  input: {
+    text: string;
+    caption: string;
+    isCaption: boolean;
+    replyMarkup?: ReturnType<typeof telegramListingKeyboard>;
+  },
+): Promise<void> {
+  const markup = input.replyMarkup ? { reply_markup: input.replyMarkup } : {};
+  try {
+    if (input.isCaption) {
+      await telegramBot.api.editMessageCaption(chatId, messageId, { caption: input.caption, ...markup });
+    } else {
+      await telegramBot.api.editMessageText(chatId, messageId, input.text, {
+        link_preview_options: { is_disabled: true },
+        ...markup,
+      });
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/message is not modified/iu.test(message)) return;
+    if (input.isCaption && /no caption/iu.test(message)) {
+      await telegramBot.api.editMessageText(chatId, messageId, input.text, {
+        link_preview_options: { is_disabled: true },
+        ...markup,
+      });
+      return;
+    }
+    if (!input.isCaption && /no text in the message/iu.test(message)) {
+      await telegramBot.api.editMessageCaption(chatId, messageId, { caption: input.caption });
+      return;
+    }
+    throw error;
   }
 }
 
@@ -687,9 +802,18 @@ export async function updateListingMessage(listingId: string): Promise<void> {
 
   try {
     await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.UPDATE);
-    await telegramBot.api.editMessageText(notification.chatId, Number(notification.messageId), text, {
-      link_preview_options: { is_disabled: true },
-      reply_markup: telegramListingKeyboard(
+    const primaryId = Number(primaryTelegramMessageId(notification.messageId));
+    // Albums were sent without a keyboard and carry the card in the caption;
+    // legacy text messages with photos fall back to a text edit inside.
+    const album = isTelegramAlbumMessage(notification.messageId)
+      || describeTelegramSend(snapshot.photoUrls).kind === "ALBUM";
+    await editCardText(telegramBot, notification.chatId, primaryId, {
+      text,
+      caption: clampTelegramCaption(text),
+      isCaption: album || describeTelegramSend(snapshot.photoUrls).kind === "PHOTO",
+      // Albums cannot carry a keyboard at all; single-photo and text cards
+      // refresh it so the copy-phone and favorite buttons stay current.
+      replyMarkup: album ? undefined : telegramListingKeyboard(
         snapshot.url,
         snapshot.id,
         notification.retainUntil,
@@ -709,11 +833,12 @@ export async function updateListingMessage(listingId: string): Promise<void> {
 
     // A favorite callback can race with enrichment. Reconcile only the markup
     // after editing the text so a stale worker snapshot never removes a heart.
+    // Albums have no keyboard to reconcile.
     const currentRetention = await prisma.telegramNotification.findUnique({
       where: { id: notification.id },
       select: { retainUntil: true },
     });
-    if (currentRetention?.retainUntil?.getTime() !== notification.retainUntil?.getTime()) {
+    if (!album && currentRetention?.retainUntil?.getTime() !== notification.retainUntil?.getTime()) {
       await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.UPDATE);
       await telegramBot.api.editMessageReplyMarkup(notification.chatId, Number(notification.messageId), {
         reply_markup: telegramListingKeyboard(
@@ -757,8 +882,8 @@ export async function cleanupListingTelegramMessage(input: {
 }): Promise<TelegramListingCleanupResult> {
   if (!input.messageId) return { outcome: "CLEARED", detail: "No Telegram message ID" };
 
-  const messageId = Number(input.messageId);
-  if (!Number.isSafeInteger(messageId) || messageId <= 0) {
+  const messageIds = splitTelegramMessageIds(input.messageId);
+  if (messageIds.length === 0) {
     return { outcome: "CLEARED", detail: "Invalid Telegram message ID" };
   }
 
@@ -771,54 +896,87 @@ export async function cleanupListingTelegramMessage(input: {
     };
   }
 
-  try {
-    await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.RETENTION);
-    await telegramBot.api.deleteMessage(input.chatId, messageId);
-    return { outcome: "CLEARED" };
-  } catch (error) {
-    await deferGlobalTelegramGate(error);
-    const message = error instanceof Error ? error.message : String(error);
-    if (isTelegramMessageGoneError(message) || isPermanentTelegramChatError(message)) {
-      return { outcome: "CLEARED", detail: message };
+  // Album children are deleted one by one; an already-gone sibling never
+  // fails the whole cleanup. Messages past the 48h delete window are
+  // collected for the tombstone pass below.
+  const remaining: number[] = [];
+  for (const rawId of messageIds) {
+    try {
+      await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.RETENTION);
+      await telegramBot.api.deleteMessage(input.chatId, Number(rawId));
+    } catch (error) {
+      await deferGlobalTelegramGate(error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (isTelegramMessageGoneError(message) || isPermanentTelegramChatError(message)) {
+        continue;
+      }
+      if (!isTelegramDeleteTooOldError(message)) {
+        return {
+          outcome: "RETRY",
+          errorCode: telegramRetryAfterSeconds(error) ? "TELEGRAM_RATE_LIMITED" : "TELEGRAM_DELETE_FAILED",
+          errorMessage: message,
+        };
+      }
+      remaining.push(Number(rawId));
     }
-    if (!isTelegramDeleteTooOldError(message)) {
+  }
+  if (remaining.length === 0) return { outcome: "CLEARED" };
+
+  // Bot API cannot physically delete normal messages after 48 hours. Bot-owned
+  // messages can still be edited, so remove the listing content and buttons
+  // from every remaining message (photo captions and plain text alike).
+  const tombstoneText = input.favoriteExpired
+    ? `🗑 Сохранённое объявление удалено из проекта после ${env.LISTING_FAVORITE_RETENTION_DAYS} дней.`
+    : "🗑 Объявление удалено из проекта по истечении срока хранения.";
+  for (const tombstoneId of remaining) {
+    try {
+      await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.RETENTION);
+      await telegramBot.api.editMessageText(input.chatId, tombstoneId, tombstoneText, {
+        link_preview_options: { is_disabled: true },
+        reply_markup: { inline_keyboard: [] },
+      });
+    } catch (error) {
+      await deferGlobalTelegramGate(error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (/no text in the message/iu.test(message)) {
+        try {
+          await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.RETENTION);
+          await telegramBot.api.editMessageCaption(input.chatId, tombstoneId, { caption: tombstoneText });
+          continue;
+        } catch (nested) {
+          await deferGlobalTelegramGate(nested);
+          const nestedMessage = nested instanceof Error ? nested.message : String(nested);
+          if (
+            /message is not modified/iu.test(nestedMessage) ||
+            isTelegramMessageGoneError(nestedMessage) ||
+            isPermanentTelegramChatError(nestedMessage) ||
+            isPermanentTelegramEditError(nestedMessage)
+          ) {
+            continue;
+          }
+          return {
+            outcome: "RETRY",
+            errorCode: telegramRetryAfterSeconds(nested) ? "TELEGRAM_RATE_LIMITED" : "TELEGRAM_CLEAR_FAILED",
+            errorMessage: nestedMessage,
+          };
+        }
+      }
+      if (
+        /message is not modified/iu.test(message) ||
+        isTelegramMessageGoneError(message) ||
+        isPermanentTelegramChatError(message) ||
+        isPermanentTelegramEditError(message)
+      ) {
+        continue;
+      }
       return {
         outcome: "RETRY",
-        errorCode: telegramRetryAfterSeconds(error) ? "TELEGRAM_RATE_LIMITED" : "TELEGRAM_DELETE_FAILED",
+        errorCode: telegramRetryAfterSeconds(error) ? "TELEGRAM_RATE_LIMITED" : "TELEGRAM_CLEAR_FAILED",
         errorMessage: message,
       };
     }
   }
-
-  // Bot API cannot physically delete normal messages after 48 hours. Bot-owned
-  // messages can still be edited, so remove the listing content and buttons.
-  const tombstoneText = input.favoriteExpired
-    ? `🗑 Сохранённое объявление удалено из проекта после ${env.LISTING_FAVORITE_RETENTION_DAYS} дней.`
-    : "🗑 Объявление удалено из проекта по истечении срока хранения.";
-  try {
-    await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.RETENTION);
-    await telegramBot.api.editMessageText(input.chatId, messageId, tombstoneText, {
-      link_preview_options: { is_disabled: true },
-      reply_markup: { inline_keyboard: [] },
-    });
-    return { outcome: "CLEARED", detail: "Telegram message content cleared" };
-  } catch (error) {
-    await deferGlobalTelegramGate(error);
-    const message = error instanceof Error ? error.message : String(error);
-    if (
-      /message is not modified/iu.test(message) ||
-      isTelegramMessageGoneError(message) ||
-      isPermanentTelegramChatError(message) ||
-      isPermanentTelegramEditError(message)
-    ) {
-      return { outcome: "CLEARED", detail: message };
-    }
-    return {
-      outcome: "RETRY",
-      errorCode: telegramRetryAfterSeconds(error) ? "TELEGRAM_RATE_LIMITED" : "TELEGRAM_CLEAR_FAILED",
-      errorMessage: message,
-    };
-  }
+  return { outcome: "CLEARED", detail: "Telegram message content cleared" };
 }
 
 export function isTelegramDeleteTooOldError(message: string): boolean {

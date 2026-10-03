@@ -52,6 +52,11 @@ vi.mock("../apps/worker/src/modules/telegram-send-gate.js", () => ({
 }));
 vi.mock("../apps/worker/src/modules/telegram-listing-format.js", () => ({
   initialMessageText: () => "a listing", enrichedMessageText: () => "a listing", clampTelegramText: (text: string) => text,
+  clampTelegramCaption: (text: string) => text,
+  describeTelegramSend: () => ({ kind: "TEXT", photos: [] }),
+  isTelegramAlbumMessage: () => false,
+  primaryTelegramMessageId: (value: string | null) => value,
+  splitTelegramMessageIds: (value: string | null) => (value ? [value] : []),
 }));
 
 import { sendListingLink, sendTelegramFlashBundle, type TelegramListingSnapshot } from "../apps/worker/src/modules/telegram-service.js";
