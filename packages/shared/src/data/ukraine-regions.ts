@@ -301,6 +301,13 @@ export function listingMatchesGeoSelection(
   if (listingCityId && cityIds.includes(listingCityId)) return true;
   if (!listingRegionId || !regionIds.includes(listingRegionId)) return false;
 
+  // When the user selects only regions (no cities), the region check on line 302
+  // is sufficient. The fallback below was intended for the case where the user
+  // selected cities that belong to the listing's region; it must not fire when
+  // cityIds is empty, otherwise a listing from Lviv with region=Dnipropetrovsk
+  // would incorrectly match a Dnipropetrovsk-only filter.
+  if (cityIds.length === 0) return true;
+
   const selectedCitiesInListingRegion = cityIds.filter((cityId) => CITY_BY_ID.get(cityId)?.regionId === listingRegionId);
   return selectedCitiesInListingRegion.length === 0;
 }
