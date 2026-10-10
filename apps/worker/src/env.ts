@@ -22,6 +22,11 @@ export const env = {
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN ?? "",
   TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID ?? "",
   AUTO_RIA_API_KEY: process.env.AUTO_RIA_API_KEY ?? "",
+  // User-saved AUTO.RIA searches (comma-separated full URLs), polled in
+  // addition to the bot-built query. Same newest-first parser; candidates
+  // flow through the identical matching pipeline, so saved pages can only
+  // add coverage, never bypass filters.
+  AUTO_RIA_SAVED_SEARCH_URLS: process.env.AUTO_RIA_SAVED_SEARCH_URLS ?? "",
   AUTO_RIA_ACCESS_MODE: enumEnv("AUTO_RIA_ACCESS_MODE", ["public", "api"] as const, "public"),
   LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS: numberEnv("LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS", 60),
   LIVE_AUTO_RIA_JITTER_SECONDS: numberEnv("LIVE_AUTO_RIA_JITTER_SECONDS", 5),

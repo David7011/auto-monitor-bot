@@ -18,6 +18,7 @@ import {
 } from "./base.js";
 import { inferBargainPossible, inferCustomsCleared, isBlockedHtml, parseEnginePower, parseEngineVolume } from "./html-utils.js";
 import { sourceHttpClient } from "./source-http-client.js";
+import { env } from "../env.js";
 
 const PUBLIC_BASE = "https://auto.ria.com";
 const PUBLIC_LIMITATION = "AUTO.RIA public: новизна определяется первым появлением; точное время публикации и полнота исторического окна не доказаны";
@@ -55,12 +56,10 @@ export class AutoRiaPublicCollector implements SourceCollector {
     let pageCount = 0;
     let parserDegraded = false;
 
-    for (let page = 0; page < maxPages; page += 1) {
-      if (scanDeadlineReached(scan)) {
-        semanticWarnings.push("AUTO.RIA public scan deadline reached");
-        break;
-      }
-      const url = buildAutoRiaPublicSearchUrl(context, page);
+    type IngestOutcome =
+      | { kind: "ok"; empty: boolean }
+      | { kind: "blocked"; result: CollectorResult };
+    const ingestSearchPage = async (url: string): Promise<IngestOutcome> => {
       const response = await sourceHttpClient.text(url, {
         source: "AUTO_RIA",
         timeoutMs: Math.max(1, Math.min(15_000, scan.deadlineAt.getTime() - Date.now())),
@@ -69,7 +68,7 @@ export class AutoRiaPublicCollector implements SourceCollector {
       requestCount += 1;
       const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds, response);
       if (blocked.rateLimited || blocked.captchaDetected) {
-        return { listings, ...blocked, affectedUrl: url, requestCount, pageCount, observedCount: observedIds.size };
+        return { kind: "blocked", result: { listings, ...blocked, affectedUrl: url, requestCount, pageCount, observedCount: observedIds.size } };
       }
       if (response.classification !== "SUCCESS") {
         throw new Error(`AUTO.RIA public search failed: ${response.classification} HTTP ${response.status}`);
@@ -102,9 +101,26 @@ export class AutoRiaPublicCollector implements SourceCollector {
         candidates.push(listing);
       }
       if (candidates.length > 0 && scan.onHotCandidates) await scan.onHotCandidates(candidates);
-      // Refreshed/promoted cards invalidate known-ID early exit: an unseen
-      // advert can still be on the next page of the bounded background scan.
-      if (parsed.cards.length === 0 || listings.length >= maxCandidates) break;
+      return { kind: "ok", empty: parsed.cards.length === 0 };
+    };
+
+    for (let page = 0; page < maxPages; page += 1) {
+      if (scanDeadlineReached(scan)) {
+        semanticWarnings.push("AUTO.RIA public scan deadline reached");
+        break;
+      }
+      const outcome = await ingestSearchPage(buildAutoRiaPublicSearchUrl(context, page));
+      if (outcome.kind === "blocked") return outcome.result;
+      if (outcome.empty || listings.length >= maxCandidates) break;
+    }
+    for (const savedUrl of savedAutoRiaSearchUrls()) {
+      if (scanDeadlineReached(scan)) {
+        semanticWarnings.push("AUTO.RIA public scan deadline reached");
+        break;
+      }
+      if (listings.length >= maxCandidates) break;
+      const outcome = await ingestSearchPage(savedUrl);
+      if (outcome.kind === "blocked") return outcome.result;
     }
     return {
       listings,
@@ -119,6 +135,15 @@ export class AutoRiaPublicCollector implements SourceCollector {
       parserHealthDetails: { strategy: "PUBLIC_HTTP", exactPublicationTimestamp: false, continuityVerified: false },
     };
   }
+}
+
+/** User-saved searches from env (comma-separated). Test seam accepts raw input. */
+export function savedAutoRiaSearchUrls(raw?: string): string[] {
+  const value = raw ?? env.AUTO_RIA_SAVED_SEARCH_URLS;
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => /^https?:\/\//iu.test(entry));
 }
 
 export function buildAutoRiaPublicSearchUrl(context: SourceSearchContext, page = 0): string {

@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildAutoRiaPublicSearchUrl,
   parseAutoRiaPublicCards,
+  savedAutoRiaSearchUrls,
   AutoRiaPublicCollector,
 } from "../apps/worker/src/collectors/auto-ria-public.js";
 import { sourceHttpClient } from "../apps/worker/src/collectors/source-http-client.js";
+import { env } from "../apps/worker/src/env.js";
 import type { SourceSearchContext } from "../apps/worker/src/collectors/base.js";
 
 const context = {
@@ -28,7 +30,10 @@ const context = {
 } satisfies SourceSearchContext;
 
 describe("AUTO.RIA public search", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    env.AUTO_RIA_SAVED_SEARCH_URLS = "";
+  });
 
   it("continues bounded backfill past known promoted cards and keeps realtime to one page", async () => {
     const body = (id: number) => '"advertisementCard":' + JSON.stringify({ data: {
@@ -76,5 +81,53 @@ describe("AUTO.RIA public search", () => {
       cards: [],
       malformedCount: 1,
     });
+  });
+
+  it("parses user-saved search URLs, ignoring junk", () => {
+    expect(savedAutoRiaSearchUrls("")).toEqual([]);
+    expect(savedAutoRiaSearchUrls("  , not-a-url,")).toEqual([]);
+    expect(
+      savedAutoRiaSearchUrls("https://auto.ria.com/uk/search/?a=1, https://auto.ria.com/uk/search/?b=2 ,junk"),
+    ).toEqual(["https://auto.ria.com/uk/search/?a=1", "https://auto.ria.com/uk/search/?b=2"]);
+  });
+
+  it("unions built and saved searches with cross-page dedup", async () => {
+    env.AUTO_RIA_SAVED_SEARCH_URLS = "https://saved.test/sedan,https://saved.test/wagon";
+    const card = (id: number) => '"advertisementCard":' + JSON.stringify({ data: {
+      id, type: "Auto", link: `/auto_test_${id}.html`, title: { content: `Car ${id} 2010` },
+    } });
+    const request = vi.spyOn(sourceHttpClient, "text").mockImplementation(async (url) => ({
+      requestId: "test", status: 200, classification: "SUCCESS", contentType: "text/html",
+      body: url.includes("saved.test/sedan") ? `${card(111)}\n${card(222)}`
+        : url.includes("saved.test/wagon") ? `${card(222)}\n${card(333)}`
+        : card(111),
+    }));
+    const state = { id: "test", fingerprint: "test", knownExternalIds: new Set<string>() };
+    const collector = new AutoRiaPublicCollector();
+    const result = await collector.collect(context, state, {
+      lane: "REALTIME", maxPages: 1, maxCandidates: 50, deadlineAt: new Date(Date.now() + 20_000),
+    });
+    expect(result.listings.map((listing) => listing.externalId)).toEqual(["111", "222", "333"]);
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(result.pageCount).toBe(3);
+    expect(result.requestCount).toBe(3);
+  });
+
+  it("stops saved pages once the candidate budget is spent", async () => {
+    env.AUTO_RIA_SAVED_SEARCH_URLS = "https://saved.test/sedan,https://saved.test/wagon";
+    const card = (id: number) => '"advertisementCard":' + JSON.stringify({ data: {
+      id, type: "Auto", link: `/auto_test_${id}.html`, title: { content: `Car ${id} 2010` },
+    } });
+    const request = vi.spyOn(sourceHttpClient, "text").mockImplementation(async (url) => ({
+      requestId: "test", status: 200, classification: "SUCCESS", contentType: "text/html",
+      body: url.includes("saved.test") ? `${card(222)}\n${card(333)}` : card(111),
+    }));
+    const state = { id: "test", fingerprint: "test", knownExternalIds: new Set<string>() };
+    const collector = new AutoRiaPublicCollector();
+    const result = await collector.collect(context, state, {
+      lane: "REALTIME", maxPages: 1, maxCandidates: 2, deadlineAt: new Date(Date.now() + 20_000),
+    });
+    expect(result.listings.map((listing) => listing.externalId)).toEqual(["111", "222"]);
+    expect(request).toHaveBeenCalledTimes(2);
   });
 });
