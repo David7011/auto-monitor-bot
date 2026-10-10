@@ -611,7 +611,7 @@ export function olxFeedTargets(
   page: number,
   scopes: OlxLocationScope[] = olxLocationScopes(context),
 ): Array<{ apiUrl: string; htmlUrl: string; privateOnly: boolean; observationTarget: string }> {
-  return buildOlxFeedTargets(context, page, olxLocationScopes(context), {
+  return buildOlxFeedTargets(context, page, scopes, {
     pageSize: olxApiPageSize(),
     includePrivateFeed: env.OLX_PRIVATE_FEED_ENABLED,
   });
