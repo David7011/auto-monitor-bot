@@ -12,6 +12,12 @@ export default defineConfig({
       TELEGRAM_BOT_TOKEN: "",
       TELEGRAM_CHAT_ID: "",
       AUTO_RIA_API_KEY: "",
+      // Saved-search / session fixtures must never leak from production .env:
+      // collectors under test would otherwise fetch extra pages.
+      AUTO_RIA_SAVED_SEARCH_URLS: "",
+      OLX_SAVED_SEARCH_URLS: "",
+      RST_CF_CLEARANCE: "",
+      RST_USER_AGENT: "",
     },
     coverage: {
       provider: "v8",
