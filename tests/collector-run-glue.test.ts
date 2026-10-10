@@ -29,6 +29,8 @@ const mocks = vi.hoisted(() => ({
   markChallengeProbePending: vi.fn(),
   resolveChallengeIncidents: vi.fn(),
   realtimeHotHandoffEnabled: vi.fn(),
+  shouldSendRecoveryUnresolvedAlert: vi.fn(),
+  markRecoveryUnresolvedAlerted: vi.fn(),
 }));
 
 vi.mock("../packages/db/src/index.js", () => ({
@@ -59,6 +61,10 @@ vi.mock("../apps/worker/src/lib/queues.js", () => ({
 vi.mock("../apps/worker/src/modules/challenge-incident.js", () => ({
   markChallengeProbePending: mocks.markChallengeProbePending,
   resolveChallengeIncidents: mocks.resolveChallengeIncidents,
+}));
+vi.mock("../apps/worker/src/modules/recovery-unresolved-alert.js", () => ({
+  shouldSendRecoveryUnresolvedAlert: mocks.shouldSendRecoveryUnresolvedAlert,
+  markRecoveryUnresolvedAlerted: mocks.markRecoveryUnresolvedAlerted,
 }));
 vi.mock("../apps/worker/src/modules/source-search-plan.js", () => ({
   buildSourceSearchPlan: mocks.buildSourceSearchPlan,
@@ -233,6 +239,8 @@ describe("collector.run glue preflight invariants", () => {
     mocks.safeSystemAlert.mockResolvedValue(undefined);
     mocks.markChallengeProbePending.mockResolvedValue(undefined);
     mocks.resolveChallengeIncidents.mockResolvedValue(undefined);
+    mocks.shouldSendRecoveryUnresolvedAlert.mockResolvedValue(true);
+    mocks.markRecoveryUnresolvedAlerted.mockResolvedValue(undefined);
     mocks.realtimeHotHandoffEnabled.mockReturnValue(false);
   });
 
@@ -457,6 +465,53 @@ describe("collector.run glue preflight invariants", () => {
     expect(mocks.safeSystemAlert).toHaveBeenCalledWith(expect.stringContaining("PUBLIC_OFFSET_CAP"));
     expect(mocks.finishRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "SUCCESS" }));
     expect(mocks.sourceUpdate).not.toHaveBeenCalled();
+  });
+
+  it("claims the unresolved alert gate with state, window and reason", async () => {
+    mocks.loadSourceSearchState.mockResolvedValueOnce({ ...state, coverageRecoveryPending: true });
+    mocks.markSourceSearchSuccess.mockResolvedValueOnce({
+      recoveryRequired: false,
+      outageDetected: true,
+      recoveryWindowId: "window-9",
+      recoveryWindowOpened: false,
+      recoveryVerified: false,
+      recoveryUnresolved: true,
+      recoveryUnresolvedReason: "UNSTABLE_PAGINATION",
+      recoveryAttemptCount: 3,
+      requiredCutoffAt: new Date("2026-09-12T07:00:00Z"),
+    });
+
+    await processCollectorRun({ source: "OLX", lane: "BACKFILL", trigger: "RECOVERY" });
+
+    expect(mocks.shouldSendRecoveryUnresolvedAlert).toHaveBeenCalledWith({
+      sourceSearchStateId: "state-1",
+      windowId: "window-9",
+      unresolvedReason: "UNSTABLE_PAGINATION",
+    });
+    expect(mocks.safeSystemAlert).toHaveBeenCalledWith(expect.stringContaining("UNSTABLE_PAGINATION"));
+  });
+
+  it("suppresses a repeated unresolved alert when the gate denies the claim", async () => {
+    mocks.loadSourceSearchState.mockResolvedValueOnce({ ...state, coverageRecoveryPending: true });
+    mocks.markSourceSearchSuccess.mockResolvedValueOnce({
+      recoveryRequired: false,
+      outageDetected: true,
+      recoveryWindowId: "window-2",
+      recoveryWindowOpened: false,
+      recoveryVerified: false,
+      recoveryUnresolved: true,
+      recoveryUnresolvedReason: "UNSTABLE_PAGINATION",
+      recoveryAttemptCount: 4,
+      requiredCutoffAt: new Date("2026-09-12T07:30:00Z"),
+    });
+    mocks.shouldSendRecoveryUnresolvedAlert.mockResolvedValueOnce(false);
+
+    await processCollectorRun({ source: "OLX", lane: "BACKFILL", trigger: "RECOVERY" });
+
+    expect(mocks.shouldSendRecoveryUnresolvedAlert).toHaveBeenCalled();
+    expect(mocks.safeSystemAlert).not.toHaveBeenCalled();
+    expect(mocks.markRecoveryUnresolvedAlerted).not.toHaveBeenCalled();
+    expect(mocks.finishRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "SUCCESS" }));
   });
 
   it("enqueues a stable follow-up when realtime opens a recovery window", async () => {

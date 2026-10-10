@@ -16,6 +16,10 @@ import {
   resolveChallengeIncidents,
 } from "../modules/challenge-incident.js";
 import {
+  markRecoveryUnresolvedAlerted,
+  shouldSendRecoveryUnresolvedAlert,
+} from "../modules/recovery-unresolved-alert.js";
+import {
   buildSourceSearchPlan,
   contextForCoverageRecovery,
   loadSourceSearchState,
@@ -466,12 +470,26 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         });
       }
       if (stateUpdate.recoveryUnresolved && stateUpdate.recoveryWindowId) {
-        await safeSystemAlert([
-          "OLX: историческое окно не может быть доказано публичным источником.",
-          `Причина: ${stateUpdate.recoveryUnresolvedReason ?? "UNKNOWN"}.`,
-          `Граница: ${stateUpdate.requiredCutoffAt?.toISOString() ?? "unknown"}.`,
-          "Realtime продолжает работать; повторный глубокий проход отключён до изменения возможностей источника или ручного retry.",
-        ].join("\n"));
+        // Unstable pagination can keep every run unresolved for hours. Alert
+        // on transitions only (first window, new reason, return after
+        // recovery); repeats stay in the local log to avoid Telegram spam.
+        const shouldAlert = await shouldSendRecoveryUnresolvedAlert({
+          sourceSearchStateId: state.id,
+          windowId: stateUpdate.recoveryWindowId,
+          unresolvedReason: stateUpdate.recoveryUnresolvedReason,
+        });
+        if (shouldAlert) {
+          await safeSystemAlert([
+            "OLX: историческое окно не может быть доказано публичным источником.",
+            `Причина: ${stateUpdate.recoveryUnresolvedReason ?? "UNKNOWN"}.`,
+            `Граница: ${stateUpdate.requiredCutoffAt?.toISOString() ?? "unknown"}.`,
+            "Realtime продолжает работать; повторный глубокий проход отключён до изменения возможностей источника или ручного retry.",
+          ].join("\n"));
+          await markRecoveryUnresolvedAlerted({
+            windowId: stateUpdate.recoveryWindowId,
+            unresolvedReason: stateUpdate.recoveryUnresolvedReason,
+          });
+        }
       }
       const immediateRecoveryRequired = (
         lane === "REALTIME" && stateUpdate.recoveryRequired
