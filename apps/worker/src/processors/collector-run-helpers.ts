@@ -168,12 +168,16 @@ export async function handleExternalProtection(input: {
       "Автоматический обход защиты не выполняется. После паузы будет разрешена только одна безопасная проверка доступности.",
     ].join("\n"));
   } else if (!input.alreadyProtected && !incident.repeated) {
-    await safeSystemAlert([
+    const lines = [
       `Защита источника: ${sourceDisplayName(input.source)}`,
       `Статус: ${input.result.captchaDetected ? "обнаружена CAPTCHA или защитная страница" : protectionStatusText(input.result.responseStatus)}`,
       `Источник поставлен на паузу до ${formatKyivDate(pausedUntil)}. Остальные источники продолжают работать.`,
       "После паузы робот выполнит одну безопасную проверку доступности. Повторные одинаковые ответы не будут засорять Telegram.",
-    ].join("\n"));
+    ];
+    if (input.source === "RST") {
+      lines.push("RST открывается только через ручную капчу в Opera GX: пройдите проверку на rst.ua и пришлите новое значение cf_clearance.");
+    }
+    await safeSystemAlert(lines.join("\n"));
   }
 }
 

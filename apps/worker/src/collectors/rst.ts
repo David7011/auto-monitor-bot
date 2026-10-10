@@ -21,6 +21,7 @@ import {
   stripTags,
   withPageNumber,
 } from "./html-utils.js";
+import { getRstClearanceCookie, rstRequestHeaders } from "./rst-clearance.js";
 
 const BASE_URL = "https://rst.ua";
 const MAX_NEW_PER_RUN = 25;
@@ -53,7 +54,12 @@ export class RstCollector implements SourceCollector {
       }
 
       const pageUrl = withPageNumber(env.RST_SEARCH_URL, page);
-      const response = await fetchHtml(pageUrl, { source: "RST", encoding: "windows-1251" });
+      const clearanceCookie = await getRstClearanceCookie();
+      const response = await fetchHtml(pageUrl, {
+        source: "RST",
+        encoding: "windows-1251",
+        headers: rstRequestHeaders(clearanceCookie),
+      });
       requestCount += 1;
       const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds, response);
       if (blocked.rateLimited || blocked.captchaDetected) {

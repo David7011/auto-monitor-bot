@@ -83,6 +83,13 @@ export const env = {
   MARKET_RESEARCH_CACHE_TTL_SECONDS: numberEnv("MARKET_RESEARCH_CACHE_TTL_SECONDS", 6 * 60 * 60),
   MARKET_RESEARCH_DEADLINE_MS: numberEnv("MARKET_RESEARCH_DEADLINE_MS", 12_000),
   RST_SEARCH_URL: process.env.RST_SEARCH_URL ?? "https://rst.ua/ukr/oldcars/",
+  // Cloudflare clearance for rst.ua (cf_clearance harvested from a manual
+  // pass in Opera GX). Hot-swappable via the rst:cf_clearance Redis key;
+  // this env value is the fallback used when Redis is unavailable.
+  RST_CF_CLEARANCE: process.env.RST_CF_CLEARANCE ?? "",
+  // Clearance is bound to the solving browser: keep the Opera UA so the
+  // token stays valid. Override only together with a fresh clearance.
+  RST_USER_AGENT: process.env.RST_USER_AGENT ?? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36 OPR/136.0.0.0",
   CARS_UA_SEARCH_URL: process.env.CARS_UA_SEARCH_URL ?? "https://cars.ua/",
   // Cars.ua is a fast source (near-instant indexing). Realtime paginates
   // adaptively until it overlaps already-known adverts, so bursts are not lost.
