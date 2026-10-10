@@ -173,6 +173,9 @@ importers:
       ioredis:
         specifier: 5.11.1
         version: 5.11.1
+      playwright-core:
+        specifier: 1.62.0
+        version: 1.62.0
       tesseract.js:
         specifier: ^7.0.0
         version: 7.0.0

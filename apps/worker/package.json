@@ -32,6 +32,7 @@
     "dotenv": "^16.6.1",
     "grammy": "^1.45.1",
     "ioredis": "^5.11.1",
+    "playwright-core": "1.62.0",
     "tesseract.js": "^7.0.0",
     "undici": "^6.28.0"
   },

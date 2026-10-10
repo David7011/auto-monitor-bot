@@ -33,6 +33,7 @@ import {
   captchaPauseSeconds,
   rateLimitPauseSeconds,
 } from "../modules/source-protection-policy.js";
+import { kickOffRstHarvest } from "../modules/rst-clearance-harvester.js";
 import { laneOwnsSourceHealth } from "../modules/source-health-ownership.js";
 import {
   createTelegramFlashBundle,
@@ -160,6 +161,12 @@ export async function handleExternalProtection(input: {
     errorMessage: reason,
   });
   await log.warn("collector", `${input.source} ${input.lane} paused: ${reason}`);
+  if (input.source === "RST" && input.result.captchaDetected) {
+    // Best-effort unattended recovery: the harvester warms a persistent
+    // profile and stores a fresh clearance when it succeeds. Non-blocking;
+    // the manual captcha flow below stays as the guaranteed fallback.
+    kickOffRstHarvest("rst-protection-pause");
+  }
   if (incident.manualVerificationNew) {
     await safeSystemAlert([
       `Требуется ручная проверка: ${sourceDisplayName(input.source)}`,
