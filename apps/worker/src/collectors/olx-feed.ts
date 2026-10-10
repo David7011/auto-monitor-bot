@@ -611,10 +611,38 @@ export function olxFeedTargets(
   page: number,
   scopes: OlxLocationScope[] = olxLocationScopes(context),
 ): Array<{ apiUrl: string; htmlUrl: string; privateOnly: boolean; observationTarget: string }> {
-  return buildOlxFeedTargets(context, page, scopes, {
+  return buildOlxFeedTargets(context, page, olxLocationScopes(context), {
     pageSize: olxApiPageSize(),
     includePrivateFeed: env.OLX_PRIVATE_FEED_ENABLED,
   });
+}
+
+/**
+ * User-saved OLX searches (comma-separated full URLs), polled as bonus HTML
+ * targets alongside the bot-built query. Same parser and matching pipeline;
+ * saved pages can only add coverage, never bypass filters. Accepts raw input
+ * for tests; production reads env. Volatile continuation params (min_id,
+ * reason) must not be stored — the collector always polls the fresh head.
+ */
+export function savedOlxSearchUrls(raw?: string): string[] {
+  const value = raw ?? env.OLX_SAVED_SEARCH_URLS;
+  return value
+    .split(",")
+    .map((entry) => stripVolatileSearchParams(entry.trim()))
+    .filter((entry) => /^https?:\/\//iu.test(entry));
+}
+
+function stripVolatileSearchParams(url: string): string {
+  const queryIndex = url.indexOf("?");
+  if (queryIndex < 0) return url;
+  const kept = url
+    .slice(queryIndex + 1)
+    .split("&")
+    .filter((pair) => {
+      const key = pair.split("=")[0] ?? "";
+      return key !== "" && key !== "min_id" && key !== "reason";
+    });
+  return kept.length > 0 ? `${url.slice(0, queryIndex)}?${kept.join("&")}` : url.slice(0, queryIndex);
 }
 
 export function buildOlxFeedTargets(

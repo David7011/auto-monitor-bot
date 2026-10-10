@@ -40,6 +40,7 @@ import {
   isPrimaryBlockedResult,
   olxApiPageSize,
   olxFeedTargets,
+  savedOlxSearchUrls,
   type OlxFeedResult,
 } from "./olx-feed.js";
 import {
@@ -745,6 +746,66 @@ export class OlxCollector implements SourceCollector {
           .map((result) => `${result.url}: ${result.error.message}`)
           .join("; ");
         throw new Error(errors ? `OLX search failed: ${errors}` : "OLX search failed: no feeds returned listings");
+      }
+      // User-saved searches ride along as bonus HTML targets on the fresh
+      // head only (never backfill depth, never protection probes). Same
+      // parser, same candidate selection and hot dispatch; blocks and errors
+      // are contained locally as warnings so a saved page can never fail or
+      // pause the realtime run.
+      if (page === 1 && !isBackfill && !scan.olxProtectionProbe) {
+        const savedUrls = savedOlxSearchUrls();
+        if (savedUrls.length > 0) {
+          if (scan.deadlineAt.getTime() - Date.now() < 20_000) {
+            semanticWarnings.push("OLX saved searches skipped: insufficient realtime budget left");
+          } else {
+            const savedRequestClass: OlxRequestClass = scan.lane === "COVERAGE" ? "COVERAGE" : "REALTIME";
+            const savedResults = await Promise.all(
+              savedUrls.map((savedUrl, index) => fetchOlxHtmlFeed(
+                savedUrl,
+                false,
+                "OLX_PUBLIC_HTML",
+                `saved-search/${index}`,
+                savedRequestClass,
+              )),
+            );
+            for (const result of savedResults) {
+              if (result.requestCount > 0) for (const sample of result.networkSamples ?? []) networkMetrics.record(sample);
+            }
+            requestCount += savedResults.reduce((total, result) => total + result.requestCount, 0);
+            htmlFeedRequests += savedResults.reduce((total, result) => total + result.requestCount, 0);
+            if (savedResults.some(isBlockedResult)) {
+              semanticWarnings.push("OLX saved search temporarily protected; realtime continues on primary feeds");
+            }
+            for (const result of savedResults.filter(isAdsResult)) {
+              for (const ad of result.ads) htmlObservedIds.add(String(ad.id));
+              await dispatchHotFeedResult(result);
+              const selection = selectOlxCandidates(result.ads, {
+                now,
+                categoryKey: context.categoryKey,
+                publishedAfter: context.publishedAfter,
+                knownExternalIds: candidateKnownExternalIds,
+                continuityKnownExternalIds,
+                seenExternalIds,
+                continuityIgnoreExternalIds: undefined,
+                maxCandidates: Math.max(0, maxCandidates - listings.length),
+                observationChannel: result.channel,
+                observationTarget: result.observationTarget,
+                requestStartedAt: result.requestStartedAt,
+                firstByteAt: result.firstByteAt,
+                bodyReceivedAt: result.bodyReceivedAt,
+                bodyDecodedAt: result.bodyDecodedAt,
+                parsedAt: result.parsedAt,
+                networkTelemetry: result.network,
+              });
+              listings.push(...selection.listings);
+              for (const externalId of selection.scannedExternalIds) scannedExternalIds.add(externalId);
+              observedCount += selection.observedCount;
+              if (selection.oldestObservedAt && (!oldestObservedAt || selection.oldestObservedAt < oldestObservedAt)) {
+                oldestObservedAt = selection.oldestObservedAt;
+              }
+            }
+          }
+        }
       }
       if (coverageDue && page === 1) lastRegionalCoverageAt = now;
 
