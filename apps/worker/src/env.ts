@@ -135,6 +135,10 @@ export const env = {
   FAST_INLINE_LISTING_CONCURRENCY: numberEnv("FAST_INLINE_LISTING_CONCURRENCY", 4),
   FAST_INLINE_TELEGRAM_DEADLINE_MS: numberEnv("FAST_INLINE_TELEGRAM_DEADLINE_MS", 4_000),
   TELEGRAM_FLASH_BUNDLE_ENABLED: booleanEnv("TELEGRAM_FLASH_BUNDLE_ENABLED", true),
+  // Verified block suppression: after a PERMANENT send failure the chat is
+  // re-probed with a cheap typing action, and only a repeated platform
+  // verdict deactivates the subscriber. Never touches the owner chat.
+  TELEGRAM_BLOCK_SUPPRESS_ENABLED: booleanEnv("TELEGRAM_BLOCK_SUPPRESS_ENABLED", true),
   TELEGRAM_FLASH_BUNDLE_MIN_ITEMS: numberEnv("TELEGRAM_FLASH_BUNDLE_MIN_ITEMS", 2),
   TELEGRAM_FLASH_BUNDLE_MAX_ITEMS: numberEnv("TELEGRAM_FLASH_BUNDLE_MAX_ITEMS", 20),
   TELEGRAM_LISTING_SEND_MIN_INTERVAL_MS: numberEnv("TELEGRAM_LISTING_SEND_MIN_INTERVAL_MS", 1_100),
