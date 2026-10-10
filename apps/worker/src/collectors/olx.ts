@@ -757,19 +757,24 @@ export class OlxCollector implements SourceCollector {
       if (pageIndex === 0 && !isBackfill && !scan.olxProtectionProbe) {
         const savedUrls = savedOlxSearchUrls();
         if (savedUrls.length > 0) {
-          if (scan.deadlineAt.getTime() - Date.now() < 20_000) {
+          if (scan.deadlineAt.getTime() - Date.now() < 8_000) {
             semanticWarnings.push("OLX saved searches skipped: insufficient realtime budget left");
           } else {
             const savedRequestClass: OlxRequestClass = scan.lane === "COVERAGE" ? "COVERAGE" : "REALTIME";
-            const savedResults = await Promise.all(
-              savedUrls.map((savedUrl, index) => fetchOlxHtmlFeed(
+            const savedResults: OlxFeedResult[] = [];
+            for (const [index, savedUrl] of savedUrls.entries()) {
+              if (scan.deadlineAt.getTime() - Date.now() < 4_000) {
+                semanticWarnings.push("OLX saved searches truncated: realtime budget exhausted");
+                break;
+              }
+              savedResults.push(await fetchOlxHtmlFeed(
                 savedUrl,
                 false,
                 "OLX_PUBLIC_HTML",
                 `saved-search/${index}`,
                 savedRequestClass,
-              )),
-            );
+              ));
+            }
             for (const result of savedResults) {
               if (result.requestCount > 0) for (const sample of result.networkSamples ?? []) networkMetrics.record(sample);
             }
