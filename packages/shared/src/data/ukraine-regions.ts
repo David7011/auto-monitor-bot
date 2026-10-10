@@ -250,6 +250,28 @@ for (const item of UKRAINE_REGIONS) {
   }
 }
 
+// Tokens shared by same-named settlements in two or more regions, e.g. a
+// village name that exists in several oblasts. Resolving such a token picks
+// one arbitrary settlement, so it can never veto a match on its own.
+const AMBIGUOUS_CITY_TOKENS: Set<string> = (() => {
+  const tokenRegions = new Map<string, Set<string>>();
+  for (const item of UKRAINE_REGIONS) {
+    for (const cityItem of item.cities) {
+      for (const token of geoTokens(cityItem.id, cityItem.nameUk, cityItem.nameRu, cityItem.aliases)) {
+        let regions = tokenRegions.get(token);
+        if (!regions) {
+          regions = new Set();
+          tokenRegions.set(token, regions);
+        }
+        regions.add(item.id);
+      }
+    }
+  }
+  return new Set(
+    [...tokenRegions].filter(([, regions]) => regions.size > 1).map(([token]) => token),
+  );
+})();
+
 export function normalizeRegionIds(values: readonly string[] | null | undefined): string[] {
   return unique((values ?? []).map((value) => resolveRegionId(value)).filter(Boolean));
 }
@@ -298,15 +320,18 @@ export function listingMatchesGeoSelection(
   const listingCity = listingCityId ? CITY_BY_ID.get(listingCityId) : undefined;
   const listingRegionId = resolveRegionId(listing.region) ?? listingCity?.regionId;
 
+  // Contradictory source data, e.g. city "Львів" filed under region
+  // "Дніпропетровська область": the known city is more specific than the
+  // region field, so an unambiguous city outside the selected regions
+  // vetoes the match outright. Ambiguous city names keep the legacy
+  // region-based behavior to avoid false rejections of same-named
+  // settlements in the selected region.
+  if (listingCity && regionIds.length > 0 && !regionIds.includes(listingCity.regionId)) {
+    if (!AMBIGUOUS_CITY_TOKENS.has(normalizeGeoText(listing.city ?? ""))) return false;
+  }
+
   if (listingCityId && cityIds.includes(listingCityId)) return true;
   if (!listingRegionId || !regionIds.includes(listingRegionId)) return false;
-
-  // When the user selects only regions (no cities), the region check on line 302
-  // is sufficient. The fallback below was intended for the case where the user
-  // selected cities that belong to the listing's region; it must not fire when
-  // cityIds is empty, otherwise a listing from Lviv with region=Dnipropetrovsk
-  // would incorrectly match a Dnipropetrovsk-only filter.
-  if (cityIds.length === 0) return true;
 
   const selectedCitiesInListingRegion = cityIds.filter((cityId) => CITY_BY_ID.get(cityId)?.regionId === listingRegionId);
   return selectedCitiesInListingRegion.length === 0;

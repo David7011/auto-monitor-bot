@@ -90,4 +90,22 @@ describe("region/city filtering", () => {
       },
     ]);
   });
+
+  it("vetoes a known city outside the selected regions even when the region field claims otherwise", () => {
+    // Real case: OLX listing with region "Дніпропетровська область" but city
+    // "Львів" must not match a Dnipropetrovsk filter.
+    expect(listingMatchesGeoSelection({ region: "Дніпропетровська область", city: "Львів" }, ["dnipropetrovska"], [])).toBe(false);
+    expect(listingMatchesGeoSelection({ region: "Дніпропетровська область", city: "Львів" }, ["dnipropetrovska"], ["dnipro"])).toBe(false);
+    expect(listingMatchesGeoSelection({ region: "Дніпропетровська область", city: "Одеса" }, ["dnipropetrovska"], [])).toBe(false);
+    // In-region cities keep matching.
+    expect(listingMatchesGeoSelection({ region: "Дніпропетровська область", city: "Дніпро" }, ["dnipropetrovska"], [])).toBe(true);
+  });
+
+  it("keeps region-based behavior for ambiguous same-named settlements", () => {
+    // "Миколаїв" exists both in Lviv and Mykolaiv oblasts: the region field
+    // decides, the city must not veto.
+    expect(listingMatchesGeoSelection({ region: "Миколаївська область", city: "Миколаїв" }, ["mykolaivska"], [])).toBe(true);
+    expect(listingMatchesGeoSelection({ region: "Львівська область", city: "Миколаїв" }, ["lvivska"], [])).toBe(true);
+    expect(listingMatchesGeoSelection({ region: "Одеська область", city: "Миколаїв" }, ["mykolaivska"], [])).toBe(false);
+  });
 });

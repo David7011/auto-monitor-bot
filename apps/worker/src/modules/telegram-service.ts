@@ -367,6 +367,9 @@ async function sendListingLinkToChat(
         lastErrorMessage: message,
       },
     });
+    if (failureState === "PERMANENT") {
+      await verifyAndSuppressBlockedChat(chatId, message).catch(() => undefined);
+    }
     await log.error("telegram", aborted ? "send deadline exceeded" : "card send failed", message);
     if (retryAfterSeconds) throw new TelegramRateLimitError(message, retryAfterSeconds);
     throw err;
@@ -1141,4 +1144,67 @@ async function deferGlobalTelegramGate(error: unknown): Promise<void> {
   const retryAfterSeconds = telegramRetryAfterSeconds(error);
   if (!retryAfterSeconds) return;
   await listingSendGate.deferFor(retryAfterSeconds * 1_000).catch(() => undefined);
+}
+
+/**
+ * Verified block suppression.
+ *
+ * A single PERMANENT send failure ("bot was blocked by the user", deactivated
+ * user, missing chat) is not trusted blindly: the number is re-probed with a
+ * cheap `sendChatAction("typing")` that delivers nothing. Only a repeated
+ * platform verdict deactivates the subscriber, so flukes and migrated chats
+ * keep receiving. The owner chat (TELEGRAM_CHAT_ID) is never auto-suppressed:
+ * its failure is a configuration problem and stays loudly visible.
+ * A later manual /start reactivates the subscriber via the normal upsert.
+ */
+export async function verifyAndSuppressBlockedChat(chatId: string, sendError: string): Promise<boolean> {
+  if (!env.TELEGRAM_BLOCK_SUPPRESS_ENABLED || !chatId) return false;
+  if (chatId === env.TELEGRAM_CHAT_ID) {
+    await log.error(
+      "telegram",
+      "Owner chat delivery failed permanently — check TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID, auto-suppress refused",
+      sendError,
+    ).catch(() => undefined);
+    return false;
+  }
+  const telegramBot = getBot();
+  if (!telegramBot) return false;
+  let confirmed = false;
+  try {
+    await telegramBot.api.sendChatAction(chatId, "typing");
+  } catch (probeError) {
+    const probeMessage = probeError instanceof Error ? probeError.message : String(probeError);
+    confirmed = isPermanentTelegramChatError(probeMessage);
+    if (!confirmed) {
+      await log.warn(
+        "telegram",
+        "Block probe inconclusive, subscriber stays active",
+        `${chatId}: ${probeMessage}`,
+      ).catch(() => undefined);
+      return false;
+    }
+  }
+  if (!confirmed) return false;
+  try {
+    const updated = await prisma.telegramSubscriber.updateMany({
+      where: { chatId, active: true },
+      data: { active: false, blockedAt: new Date() },
+    });
+    if (updated.count > 0) {
+      await log.warn(
+        "telegram",
+        `Subscriber ${chatId} auto-suppressed after verified block; future sends skipped`,
+        sendError,
+      ).catch(() => undefined);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    await log.warn(
+      "telegram",
+      "Block suppression persist failed, subscriber stays active",
+      error instanceof Error ? error.message : String(error),
+    ).catch(() => undefined);
+    return false;
+  }
 }
