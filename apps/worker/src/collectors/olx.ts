@@ -7,6 +7,7 @@ import {
   type OlxRecoveryUnresolvedReason,
 } from "@amb/shared";
 import { env } from "../env.js";
+import { log } from "../lib/log.js";
 import {
   collectorScanOptions,
   scanDeadlineReached,
@@ -747,12 +748,13 @@ export class OlxCollector implements SourceCollector {
           .join("; ");
         throw new Error(errors ? `OLX search failed: ${errors}` : "OLX search failed: no feeds returned listings");
       }
-      // User-saved searches ride along as bonus HTML targets on the fresh
-      // head only (never backfill depth, never protection probes). Same
-      // parser, same candidate selection and hot dispatch; blocks and errors
-      // are contained locally as warnings so a saved page can never fail or
-      // pause the realtime run.
-      if (page === 1 && !isBackfill && !scan.olxProtectionProbe) {
+      // User-saved searches ride along as bonus HTML targets on the first
+      // page of the run only (never backfill depth, never protection
+      // probes). Same parser, same candidate selection and hot dispatch;
+      // blocks and errors are contained locally as warnings so a saved page
+      // can never fail or pause the realtime run. pageIndex (not page) is
+      // used because recovery windows may start past page 1.
+      if (pageIndex === 0 && !isBackfill && !scan.olxProtectionProbe) {
         const savedUrls = savedOlxSearchUrls();
         if (savedUrls.length > 0) {
           if (scan.deadlineAt.getTime() - Date.now() < 20_000) {
@@ -804,6 +806,10 @@ export class OlxCollector implements SourceCollector {
                 oldestObservedAt = selection.oldestObservedAt;
               }
             }
+            await log.info(
+              "collector",
+              `OLX saved searches polled: ${savedResults.filter(isAdsResult).reduce((total, result) => total + result.ads.length, 0)} ads from ${savedUrls.length} pages`,
+            );
           }
         }
       }
