@@ -9,6 +9,10 @@ import { sourceHttpClient } from "../apps/worker/src/collectors/source-http-clie
 import { env } from "../apps/worker/src/env.js";
 import type { SourceSearchContext } from "../apps/worker/src/collectors/base.js";
 
+vi.mock("../apps/worker/src/collectors/source-sessions.js", () => ({
+  getSourceSessionCookie: vi.fn(async () => null),
+}));
+
 const context = {
   source: "AUTO_RIA",
   categoryKey: "vehicle.car",

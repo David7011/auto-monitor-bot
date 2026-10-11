@@ -3,6 +3,12 @@ import * as html from "../apps/worker/src/collectors/html-utils.js";
 import { sourceHttpClient } from "../apps/worker/src/collectors/source-http-client.js";
 import { extractRenderedOlxCards, fetchOlxApiFeed, fetchOlxHtmlFeed, isAdsResult } from "../apps/worker/src/collectors/olx-feed.js";
 
+vi.mock("../apps/worker/src/collectors/source-sessions.js", () => ({
+  getSourceSessionCookie: vi.fn(async () => null),
+  withSessionCookie: (headers: Record<string, string>, cookie: string | null) =>
+    (cookie ? { ...headers, Cookie: cookie } : headers),
+}));
+
 afterEach(() => vi.restoreAllMocks());
 
 function htmlResponse(id: string) {

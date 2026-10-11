@@ -28,12 +28,28 @@ export function normalizeSessionCookie(raw: string | null | undefined): string |
   return value ? value : null;
 }
 
+type SessionCacheEntry = { value: string | null; expiresAt: number };
+const sessionCache = new Map<string, SessionCacheEntry>();
+const SESSION_CACHE_TTL_MS = 60_000;
+const SESSION_FAILURE_TTL_MS = 10_000;
+
+export function invalidateSourceSessionCache(source?: string): void {
+  if (source) sessionCache.delete(source);
+  else sessionCache.clear();
+}
+
 export async function getSourceSessionCookie(source: string): Promise<string | null> {
+  const now = Date.now();
+  const cached = sessionCache.get(source);
+  if (cached && cached.expiresAt > now) return cached.value;
   const fallback = normalizeSessionCookie(sourceSessionEnvFallback(source));
   try {
     const fromRedis = normalizeSessionCookie(await redisConnection.get(sourceSessionRedisKey(source)));
-    return fromRedis ?? fallback;
+    const value = fromRedis ?? fallback;
+    sessionCache.set(source, { value, expiresAt: now + SESSION_CACHE_TTL_MS });
+    return value;
   } catch (error) {
+    sessionCache.set(source, { value: fallback, expiresAt: now + SESSION_FAILURE_TTL_MS });
     await log.warn(
       "collector",
       `Source session Redis read failed for ${source}, using env fallback: ${
@@ -49,6 +65,7 @@ export async function storeSourceSessionCookie(source: string, cookie: string): 
   if (!normalized) return false;
   try {
     await redisConnection.set(sourceSessionRedisKey(source), normalized);
+    sessionCache.set(source, { value: normalized, expiresAt: Date.now() + SESSION_CACHE_TTL_MS });
     return true;
   } catch (error) {
     await log.warn(
