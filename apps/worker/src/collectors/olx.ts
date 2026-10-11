@@ -757,13 +757,13 @@ export class OlxCollector implements SourceCollector {
       if (pageIndex === 0 && !isBackfill && !scan.olxProtectionProbe) {
         const savedUrls = savedOlxSearchUrls();
         if (savedUrls.length > 0) {
-          if (scan.deadlineAt.getTime() - Date.now() < 8_000) {
+          if (scan.deadlineAt.getTime() - Date.now() < 5_000) {
             semanticWarnings.push("OLX saved searches skipped: insufficient realtime budget left");
           } else {
             const savedRequestClass: OlxRequestClass = scan.lane === "COVERAGE" ? "COVERAGE" : "REALTIME";
             const savedResults: OlxFeedResult[] = [];
             for (const [index, savedUrl] of savedUrls.entries()) {
-              if (scan.deadlineAt.getTime() - Date.now() < 4_000) {
+              if (scan.deadlineAt.getTime() - Date.now() < 3_000) {
                 semanticWarnings.push("OLX saved searches truncated: realtime budget exhausted");
                 break;
               }
