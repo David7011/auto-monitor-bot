@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  MANUAL_REMINDER_INTERVAL_MS,
+  manualReminderKey,
   nextChallengeIncidentStatus,
   requiresManualChallengeVerification,
+  shouldSendManualReminder,
 } from "../apps/worker/src/modules/challenge-incident-policy.js";
 
 describe("challenge incident policy", () => {
@@ -36,5 +39,14 @@ describe("challenge incident policy", () => {
       activeStatus: "MANUAL_VERIFICATION_REQUIRED",
       manualVerificationRequired: false,
     })).toBe("MANUAL_VERIFICATION_REQUIRED");
+  });
+
+  it("reminds about stuck manual verification at most once per day", () => {
+    expect(MANUAL_REMINDER_INTERVAL_MS).toBe(24 * 3_600_000);
+    expect(manualReminderKey("source-1")).toBe("challenge:manual-reminder:source-1");
+    expect(shouldSendManualReminder(null, Date.now())).toBe(true);
+    expect(shouldSendManualReminder("not-a-date", Date.now())).toBe(true);
+    expect(shouldSendManualReminder(new Date(Date.now() - 60 * 60 * 1000).toISOString(), Date.now())).toBe(false);
+    expect(shouldSendManualReminder(new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(), Date.now())).toBe(true);
   });
 });

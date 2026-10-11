@@ -19,6 +19,11 @@ import {
   recordChallengeIncident,
 } from "../modules/challenge-incident.js";
 import { requiresManualChallengeVerification } from "../modules/challenge-incident-policy.js";
+import {
+  MANUAL_REMINDER_KEY_TTL_SECONDS,
+  manualReminderKey,
+  shouldSendManualReminder,
+} from "../modules/challenge-incident-policy.js";
 import { loadSourceSearchState } from "../modules/source-search-plan.js";
 import { sendSystemAlert } from "../modules/telegram-service.js";
 import {
@@ -168,12 +173,17 @@ export async function handleExternalProtection(input: {
     kickOffRstHarvest("rst-protection-pause");
   }
   if (incident.manualVerificationNew) {
-    await safeSystemAlert([
+    const lines = [
       `Требуется ручная проверка: ${sourceDisplayName(input.source)}`,
       "Источник несколько раз подряд вернул CAPTCHA или защитную страницу.",
       `Он остаётся на паузе до ${formatKyivDate(pausedUntil)}; остальные источники продолжают работать.`,
       "Автоматический обход защиты не выполняется. После паузы будет разрешена только одна безопасная проверка доступности.",
-    ].join("\n"));
+    ];
+    if (input.source === "RST") {
+      lines.push("RST открывается только через ручную капчу в Opera GX: пройдите проверку на rst.ua и пришлите новое значение cf_clearance.");
+    }
+    await safeSystemAlert(lines.join("\n"));
+    await rememberManualReminderSent(input.sourceId).catch(() => undefined);
   } else if (!input.alreadyProtected && !incident.repeated) {
     const lines = [
       `Защита источника: ${sourceDisplayName(input.source)}`,
@@ -186,6 +196,41 @@ export async function handleExternalProtection(input: {
     }
     await safeSystemAlert(lines.join("\n"));
   }
+  if (incident.manualVerificationRequired && !incident.manualVerificationNew) {
+    // A source stuck in manual verification would otherwise go silently dark
+    // for days (pauses escalate to 3-7 days). One reminder per day keeps the
+    // human in the loop without spamming.
+    await maybeSendManualReminderAlert({
+      sourceId: input.sourceId,
+      source: input.source,
+      pausedUntil,
+    }).catch(() => undefined);
+  }
+}
+
+async function rememberManualReminderSent(sourceId: string): Promise<void> {  await redisConnection.set(manualReminderKey(sourceId), new Date().toISOString(), "EX", MANUAL_REMINDER_KEY_TTL_SECONDS);
+}
+
+async function maybeSendManualReminderAlert(input: {
+  sourceId: string;
+  source: ListingSource;
+  pausedUntil: Date;
+}): Promise<void> {
+  const key = manualReminderKey(input.sourceId);
+  const last = await redisConnection.get(key);
+  if (!shouldSendManualReminder(last, Date.now())) return;
+  const lines = input.source === "RST"
+    ? [
+      "Напоминание: RST всё ещё ждёт ручной капчи в Opera GX.",
+      `Пауза до ${formatKyivDate(input.pausedUntil)}; остальные источники продолжают работать.`,
+      "Пройдите проверку на rst.ua и пришлите новое значение cf_clearance — мониторинг RST возобновится за пару минут без рестарта.",
+    ]
+    : [
+      `Напоминание: требуется ручная проверка: ${sourceDisplayName(input.source)}.`,
+      `Источник на паузе до ${formatKyivDate(input.pausedUntil)}; остальные продолжают работать.`,
+    ];
+  await safeSystemAlert(lines.join("\n"));
+  await rememberManualReminderSent(input.sourceId);
 }
 
 export async function dispatchListings(
