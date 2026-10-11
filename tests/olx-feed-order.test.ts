@@ -8,7 +8,8 @@ import {
 
 const openServers: ReturnType<typeof createServer>[] = [];
 // Loopback parser test only; production singleton remains fail-closed by default.
-vi.mock("../packages/db/src/index.js", () => ({ prisma: {} }));
+// writeDeduplicatedLog is stubbed so worker log calls stay silent under the bare mock.
+vi.mock("../packages/db/src/index.js", () => ({ prisma: {}, writeDeduplicatedLog: async () => {} }));
 
 afterEach(async () => {
   await Promise.all(openServers.splice(0).map((server) => new Promise<void>((resolve, reject) => {
