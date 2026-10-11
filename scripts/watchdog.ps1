@@ -141,6 +141,27 @@ function Get-DotEnvValue([string]$Key) {
   return ($value -replace "\s+#.*$", "").Trim()
 }
 
+function Wait-TelegramSlotViaNode([string]$RedisUrl, [string]$Key, [int]$IntervalMs) {
+  # redis-cli.exe may be blocked by Application Control while node is allowed.
+  # Runs the same Lua gate through ioredis; returns $false (fallback to
+  # redis-cli, then emergency path) on any failure. Never throws.
+  try {
+    $nodeExe = (Get-Command "node.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+    if (!$nodeExe) {
+      $nodeExe = Get-ChildItem -LiteralPath (Join-Path $RuntimeRoot "node-runtime-v2") `
+        -Filter "node.exe" -File -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (!$nodeExe) { return $false }
+    $gateScript = Join-Path $PSScriptRoot "telegram-rate-gate.mjs"
+    if (!(Test-Path -LiteralPath $gateScript -PathType Leaf)) { return $false }
+    & $nodeExe $gateScript $RedisUrl $Key $IntervalMs 2>&1 | Out-Null
+    return $LASTEXITCODE -eq 0
+  } catch {
+    return $false
+  }
+}
+
 function Wait-TelegramGlobalSlot([string]$Token, [string]$ChatId) {
   $redisUrl = if ($env:REDIS_URL) { $env:REDIS_URL } else { Get-DotEnvValue "REDIS_URL" }
   if (!$redisUrl) { $redisUrl = "redis://127.0.0.1:6380" }
@@ -156,6 +177,13 @@ function Wait-TelegramGlobalSlot([string]$Token, [string]$ChatId) {
   }
 
   try {
+    $botId = (($Token -split ":", 2)[0] -replace "[^0-9]", "")
+    if (!$botId) { $botId = "unconfigured" }
+    $safeChatId = ($ChatId -replace "[^0-9-]", "_")
+    if (!$safeChatId) { $safeChatId = "unconfigured" }
+    $key = "amb:telegram:rate:v1:$botId`:$safeChatId"
+    $lua = 'local t=redis.call("TIME"); local n=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000); local i=math.max(0,tonumber(ARGV[1]) or 0); local c=tonumber(redis.call("GET",KEYS[1])) or 0; if c>n then return c-n end; local x=n+i; local ttl=math.max(5000,i*5); redis.call("SET",KEYS[1],tostring(x),"PX",tostring(ttl)); return 0'
+    if (Wait-TelegramSlotViaNode -RedisUrl $redisUrl -Key $key -IntervalMs $intervalMs) { return $true }
     $uri = [Uri]$redisUrl
     $redisCli = Get-ChildItem -LiteralPath (Join-Path $RuntimeRoot "redis-modern") `
       -Filter "redis-cli.exe" -File -Recurse -ErrorAction Stop |
@@ -165,12 +193,6 @@ function Wait-TelegramGlobalSlot([string]$Token, [string]$ChatId) {
     $database = 0
     $databaseText = $uri.AbsolutePath.Trim("/")
     if ($databaseText) { [void][int]::TryParse($databaseText, [ref]$database) }
-    $botId = (($Token -split ":", 2)[0] -replace "[^0-9]", "")
-    if (!$botId) { $botId = "unconfigured" }
-    $safeChatId = ($ChatId -replace "[^0-9-]", "_")
-    if (!$safeChatId) { $safeChatId = "unconfigured" }
-    $key = "amb:telegram:rate:v1:$botId`:$safeChatId"
-    $lua = 'local t=redis.call("TIME"); local n=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000); local i=math.max(0,tonumber(ARGV[1]) or 0); local c=tonumber(redis.call("GET",KEYS[1])) or 0; if c>n then return c-n end; local x=n+i; local ttl=math.max(5000,i*5); redis.call("SET",KEYS[1],tostring(x),"PX",tostring(ttl)); return 0'
     $arguments = @("--raw", "--no-auth-warning", "-h", $uri.Host, "-p", $port, "-n", $database)
     $previousRedisAuth = $env:REDISCLI_AUTH
     try {
