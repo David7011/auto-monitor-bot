@@ -13,7 +13,6 @@ import path from "node:path";
 const require = createRequire(
   path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "apps", "worker", "package.json"),
 );
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { default: Redis } = require("ioredis");
 
 const LUA = `local t=redis.call("TIME"); local n=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000); local i=math.max(0,tonumber(ARGV[1]) or 0); local c=tonumber(redis.call("GET",KEYS[1])) or 0; if c>n then return c-n end; local x=n+i; local ttl=math.max(5000,i*5); redis.call("SET",KEYS[1],tostring(x),"PX",tostring(ttl)); return 0`;

@@ -46,33 +46,34 @@ describe("recovery unresolved alert gate", () => {
     expect(result).toBe(true);
   });
 
-  it("suppresses a repeat for an already-notified state and reason", async () => {
+  it("suppresses a repeat while the same incident is ongoing", async () => {
     const notifiedAt = new Date(Date.now() - 60 * 60 * 1000);
     mocks.windowFindFirst
       .mockResolvedValueOnce({ unresolvedAt: notifiedAt, acknowledgedAt: notifiedAt })
-      .mockResolvedValueOnce(null);
+      .mockResolvedValueOnce({ id: "window-older-unresolved" });
 
     const result = await shouldSendRecoveryUnresolvedAlert(base);
 
     expect(result).toBe(false);
   });
 
-  it("suppresses even long after the notification while still unresolved", async () => {
-    const notifiedAt = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  it("does not re-arm on a lone verified window amid ongoing failures", async () => {
+    const notifiedAt = new Date(Date.now() - 60 * 60 * 1000);
     mocks.windowFindFirst
       .mockResolvedValueOnce({ unresolvedAt: notifiedAt, acknowledgedAt: notifiedAt })
-      .mockResolvedValueOnce(null);
+      .mockResolvedValueOnce({ id: "window-still-failing" });
 
     const result = await shouldSendRecoveryUnresolvedAlert(base);
 
     expect(result).toBe(false);
+    expect(mocks.windowUpdate).not.toHaveBeenCalled();
   });
 
-  it("alerts again when a window was verified after the last notification", async () => {
-    const notifiedAt = new Date(Date.now() - 60 * 60 * 1000);
+  it("alerts again after a sustained quiet period", async () => {
+    const notifiedAt = new Date(Date.now() - 13 * 60 * 60 * 1000);
     mocks.windowFindFirst
       .mockResolvedValueOnce({ unresolvedAt: notifiedAt, acknowledgedAt: notifiedAt })
-      .mockResolvedValueOnce({ id: "window-verified" });
+      .mockResolvedValueOnce(null);
 
     const result = await shouldSendRecoveryUnresolvedAlert(base);
 
@@ -80,10 +81,7 @@ describe("recovery unresolved alert gate", () => {
   });
 
   it("scopes the repeat check to the same reason", async () => {
-    const notifiedAt = new Date(Date.now() - 60 * 60 * 1000);
-    mocks.windowFindFirst
-      .mockResolvedValueOnce({ unresolvedAt: notifiedAt, acknowledgedAt: notifiedAt })
-      .mockResolvedValueOnce(null);
+    mocks.windowFindFirst.mockResolvedValueOnce(null);
 
     const result = await shouldSendRecoveryUnresolvedAlert({
       ...base,
@@ -94,7 +92,7 @@ describe("recovery unresolved alert gate", () => {
     expect(mocks.windowFindFirst).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ unresolvedReason: "PUBLIC_OFFSET_CAP" }),
     }));
-    expect(result).toBe(false);
+    expect(result).toBe(true);
   });
 
   it("suppresses when the current window was already acknowledged", async () => {

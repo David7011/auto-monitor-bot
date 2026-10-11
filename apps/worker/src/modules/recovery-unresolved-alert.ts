@@ -14,16 +14,18 @@ import { log } from "../lib/log.js";
  * Policy — alert on transitions only, never on repetition:
  * - first unresolved window for a (search state, reason) alerts;
  * - a different reason alerts (different incident);
- * - a VERIFIED window re-arms the policy, so an incident that returns after
- *   recovery alerts immediately;
- * - any further unresolved window for an already-notified (state, reason)
- *   stays silent (local log only, handled by the caller).
+ * - a sustained quiet period (no unresolved window for the same key) means
+ *   the incident is over, so the next failure alerts as a new incident.
+ * A lone VERIFIED window amid ongoing failures must NOT re-arm: fluke
+ * verifications happen inside chronic episodes and would re-open the spam.
  *
  * Call shouldSendRecoveryUnresolvedAlert() first; if it returns true, send
  * the alert and then call markRecoveryUnresolvedAlerted(). The check fails
  * open (true) on transient DB errors so a genuinely new incident is never
  * silently dropped by a hiccup in the alert gate itself.
  */
+export const RECOVERY_QUIET_HOURS = 12;
+
 export async function shouldSendRecoveryUnresolvedAlert(input: {
   sourceSearchStateId: string;
   windowId: string;
@@ -31,6 +33,7 @@ export async function shouldSendRecoveryUnresolvedAlert(input: {
 }): Promise<boolean> {
   if (!input.unresolvedReason) return true;
   const reason: OlxRecoveryUnresolvedReason = input.unresolvedReason;
+  const now = new Date();
   try {
     const current = await prisma.coverageRecoveryWindow.findUnique({
       where: { id: input.windowId },
@@ -51,15 +54,18 @@ export async function shouldSendRecoveryUnresolvedAlert(input: {
     if (!lastNotified) return true;
     const lastNotifiedAt = lastNotified.unresolvedAt ?? lastNotified.acknowledgedAt;
     if (!lastNotifiedAt) return true;
-    const recoveredSince = await prisma.coverageRecoveryWindow.findFirst({
+    const quietSince = new Date(now.getTime() - RECOVERY_QUIET_HOURS * 3_600_000);
+    const recentUnresolved = await prisma.coverageRecoveryWindow.findFirst({
       where: {
         sourceSearchStateId: input.sourceSearchStateId,
-        status: "VERIFIED",
-        verifiedAt: { gt: lastNotifiedAt },
+        status: "UNRESOLVED",
+        unresolvedReason: reason,
+        unresolvedAt: { gte: quietSince },
+        NOT: { id: input.windowId },
       },
       select: { id: true },
     });
-    return Boolean(recoveredSince);
+    return !recentUnresolved;
   } catch (error) {
     await log.warn(
       "collector",
