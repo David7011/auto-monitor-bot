@@ -43,7 +43,10 @@ function Get-AmbReleaseFiles([string]$ProjectPath) {
     Get-ChildItem -LiteralPath $artifactRoot -File -Recurse -Force | Where-Object {
       $relative = Get-AmbRelativePath $root $_.FullName
       $relative -notlike "apps\dashboard\.next\cache\*" -and
-        $relative -ne "apps\dashboard\.next\trace"
+        $relative -ne "apps\dashboard\.next\trace" -and
+        # ISR route cache churns at runtime (evicted between enumeration and
+        # snapshot); same category as cache\ above, never a release artifact.
+        $relative -notlike "apps\dashboard\.next\server\route-cache\*"
     }
   }
   return @($files | Sort-Object FullName -Unique)
@@ -70,7 +73,7 @@ function Get-AmbReleaseCandidateArtifacts([string]$ProjectPath) {
     foreach ($file in Get-ChildItem -LiteralPath $sourceRoot -File -Recurse -Force) {
       $sourceRelative = Get-AmbRelativePath $sourceRoot $file.FullName
       if ($activeRoot -eq "apps\dashboard\.next" -and
-          ($sourceRelative -like "cache\*" -or $sourceRelative -eq "trace")) { continue }
+          ($sourceRelative -like "cache\*" -or $sourceRelative -eq "trace" -or $sourceRelative -like "server\route-cache\*")) { continue }
       [pscustomobject][ordered]@{
         path = Join-Path $activeRoot $sourceRelative
         sourcePath = Get-AmbRelativePath $root $file.FullName
