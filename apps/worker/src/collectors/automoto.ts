@@ -33,6 +33,9 @@ const AUTOMOTO_CITY_PATH_BY_ID: Readonly<Record<string, string>> = {
   vinnytsia: "Vinnitsa",
   lutsk: "Lutsk",
   dnipro: "Dnepr-Dnepropetrovsk",
+  // Only verified City-Region paths: unknown slugs 404, so never guess.
+  kamianske: "Kamenskoe-Dneprodzerzhinsk",
+  "kryvyi-rih": "Krivoyrog",
   donetsk: "Donetsk",
   zhytomyr: "Zhitomir",
   uzhhorod: "Uzhgorod",

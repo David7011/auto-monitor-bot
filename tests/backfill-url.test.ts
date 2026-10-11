@@ -58,6 +58,13 @@ describe("backfill primitives", () => {
     ]);
   });
 
+  it("covers verified Dnipro-region cities on AutoMoto", () => {
+    expect(autoMotoSearchUrls("https://automoto.ua/uk/car?order=addDate", ["kamianske", "kryvyi-rih"])).toEqual([
+      "https://automoto.ua/uk/city/Kamenskoe-Dneprodzerzhinsk/car?order=addDate",
+      "https://automoto.ua/uk/city/Krivoyrog/car?order=addDate",
+    ]);
+  });
+
   it("keeps the national AutoMoto feed for unsupported or empty city selections", () => {
     expect(autoMotoSearchUrls("https://automoto.ua/uk/car?order=addDate", [])).toEqual([
       "https://automoto.ua/uk/car?order=addDate",
