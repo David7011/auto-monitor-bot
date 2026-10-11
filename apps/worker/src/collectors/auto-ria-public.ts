@@ -18,6 +18,7 @@ import {
 } from "./base.js";
 import { inferBargainPossible, inferCustomsCleared, isBlockedHtml, parseEnginePower, parseEngineVolume } from "./html-utils.js";
 import { sourceHttpClient } from "./source-http-client.js";
+import { getSourceSessionCookie } from "./source-sessions.js";
 import { env } from "../env.js";
 
 const PUBLIC_BASE = "https://auto.ria.com";
@@ -60,10 +61,12 @@ export class AutoRiaPublicCollector implements SourceCollector {
       | { kind: "ok"; empty: boolean }
       | { kind: "blocked"; result: CollectorResult };
     const ingestSearchPage = async (url: string): Promise<IngestOutcome> => {
+      const sessionCookie = await getSourceSessionCookie("AUTO_RIA");
       const response = await sourceHttpClient.text(url, {
         source: "AUTO_RIA",
         timeoutMs: Math.max(1, Math.min(15_000, scan.deadlineAt.getTime() - Date.now())),
         maxBytes: 4 * 1024 * 1024,
+        ...(sessionCookie ? { headers: { Cookie: sessionCookie } } : {}),
       });
       requestCount += 1;
       const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds, response);

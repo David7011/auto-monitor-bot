@@ -22,6 +22,7 @@ import { env } from "../env.js";
 import { redisConnection } from "../lib/queues.js";
 import { consumeAutoRiaQuota } from "../modules/auto-ria-quota.js";
 import { sourceHttpClient } from "./source-http-client.js";
+import { getSourceSessionCookie } from "./source-sessions.js";
 import { AutoRiaPublicCollector } from "./auto-ria-public.js";
 
 type RiaSearchResponse = {
@@ -320,7 +321,11 @@ async function loadAutoRiaInfo(id: string, apiKey: string): Promise<FetchJsonRes
 }
 
 async function fetchJson<T>(url: string): Promise<FetchJsonResult<T>> {
-  const response = await sourceHttpClient.json<T>(url, { source: "AUTO_RIA" });
+  const sessionCookie = await getSourceSessionCookie("AUTO_RIA");
+  const response = await sourceHttpClient.json<T>(url, {
+    source: "AUTO_RIA",
+    ...(sessionCookie ? { headers: { Cookie: sessionCookie } } : {}),
+  });
 
   if (response.classification === "SUCCESS" && response.data != null) return { ok: true, data: response.data, requestMade: true };
   if (response.classification === "RATE_LIMITED") {

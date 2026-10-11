@@ -22,6 +22,7 @@ import {
   type OlxApiResponse,
 } from "./olx-normalization.js";
 import { sourceHttpClient } from "./source-http-client.js";
+import { getSourceSessionCookie, withSessionCookie } from "./source-sessions.js";
 
 type OlxFeedMetadata = {
   primary: boolean;
@@ -114,7 +115,7 @@ export async function fetchOlxDetailAd(
   const response = await fetchHtml(url, {
     source: "OLX",
     timeoutMs: env.OLX_REQUEST_TIMEOUT_MS,
-    headers: { referer: OLX_DEFAULT_FEED_REFERER },
+    headers: withSessionCookie({ referer: OLX_DEFAULT_FEED_REFERER }, await getSourceSessionCookie("OLX")),
     requestClass,
   });
   const blocked = isBlockedHtml(response.status, response.body, response.retryAfterSeconds, response);
@@ -217,7 +218,7 @@ async function requestOlxApiFeed(
   const response = await sourceHttpClient.json<OlxApiResponse>(url, {
     source: "OLX",
     timeoutMs,
-    headers: { referer: OLX_DEFAULT_FEED_REFERER },
+    headers: withSessionCookie({ referer: OLX_DEFAULT_FEED_REFERER }, await getSourceSessionCookie("OLX")),
     requestClass,
   });
   const metadata: OlxFeedMetadata = {
@@ -316,7 +317,7 @@ async function requestOlxHtmlFeed(
     const response = await fetchHtml(url, {
       source: "OLX",
       timeoutMs: env.OLX_REQUEST_TIMEOUT_MS,
-      headers: { referer: OLX_DEFAULT_FEED_REFERER },
+      headers: withSessionCookie({ referer: OLX_DEFAULT_FEED_REFERER }, await getSourceSessionCookie("OLX")),
       requestClass,
     });
     const metadata: OlxFeedMetadata = {

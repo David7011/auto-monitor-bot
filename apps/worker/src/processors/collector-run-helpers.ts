@@ -39,6 +39,7 @@ import {
   rateLimitPauseSeconds,
 } from "../modules/source-protection-policy.js";
 import { kickOffRstHarvest } from "../modules/rst-clearance-harvester.js";
+import { kickOffChallengeSolve } from "../modules/challenge-solver.js";
 import { laneOwnsSourceHealth } from "../modules/source-health-ownership.js";
 import {
   createTelegramFlashBundle,
@@ -171,6 +172,13 @@ export async function handleExternalProtection(input: {
     // profile and stores a fresh clearance when it succeeds. Non-blocking;
     // the manual captcha flow below stays as the guaranteed fallback.
     kickOffRstHarvest("rst-protection-pause");
+  }
+  if ((input.source === "OLX" || input.source === "AUTO_RIA") && input.result.captchaDetected) {
+    // Interactive challenge only (never plain rate limits): the solver
+    // behaves like a human in a persistent profile and stores the session
+    // for collectors. Non-blocking; existing pause + alert flow is the
+    // guaranteed fallback.
+    kickOffChallengeSolve(input.source, "captcha-protection-pause");
   }
   if (incident.manualVerificationNew) {
     const lines = [

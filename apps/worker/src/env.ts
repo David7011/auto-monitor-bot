@@ -99,12 +99,24 @@ export const env = {
   // Clearance is bound to the solving browser: keep the Opera UA so the
   // token stays valid. Override only together with a fresh clearance.
   RST_USER_AGENT: process.env.RST_USER_AGENT ?? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36 OPR/136.0.0.0",
+  // Harvested browser sessions (full Cookie headers) per source. Empty by
+  // default: collectors behave exactly as before until a solver (or a manual
+  // pass) stores a session. Hot-swappable via session:<SOURCE> Redis keys.
+  OLX_SESSION_COOKIE: process.env.OLX_SESSION_COOKIE ?? "",
+  AUTO_RIA_SESSION_COOKIE: process.env.AUTO_RIA_SESSION_COOKIE ?? "",
   // Unattended clearance harvester: a best-effort browser agent that warms a
   // persistent profile and harvests cf_clearance when RST is challenged.
   // Every failure falls back to the manual flow; attempts are additionally
   // gated by RST_HARVEST_MIN_INTERVAL_HOURS so a struggling agent cannot
   // burn the egress reputation with aggressive retries.
   RST_HARVEST_ENABLED: booleanEnv("RST_HARVEST_ENABLED", true),
+  // Challenge solver (captcha auto-recovery): a best-effort browser agent
+  // that solves interactive protection pages like a human (persistent
+  // profile, input-layer behavior) and stores the session for collectors.
+  // Fires only on confirmed interactive challenges, never on rate limits.
+  CHALLENGE_SOLVER_ENABLED: booleanEnv("CHALLENGE_SOLVER_ENABLED", true),
+  CHALLENGE_SOLVER_TIMEOUT_MS: numberEnv("CHALLENGE_SOLVER_TIMEOUT_MS", 120_000),
+  CHALLENGE_SOLVER_MIN_INTERVAL_HOURS: numberEnv("CHALLENGE_SOLVER_MIN_INTERVAL_HOURS", 6),
   RST_HARVEST_TIMEOUT_MS: numberEnv("RST_HARVEST_TIMEOUT_MS", 120_000),
   RST_HARVEST_MIN_INTERVAL_HOURS: numberEnv("RST_HARVEST_MIN_INTERVAL_HOURS", 6),
   RST_HARVEST_PROFILE_DIR: process.env.RST_HARVEST_PROFILE_DIR ?? "",
@@ -226,6 +238,8 @@ assertIntegerRange("OLX_OUTAGE_RECOVERY_LOOKBACK_HOURS", env.OLX_OUTAGE_RECOVERY
 assertIntegerRange("OLX_OUTAGE_SAFETY_OVERLAP_SECONDS", env.OLX_OUTAGE_SAFETY_OVERLAP_SECONDS, 0, 3_600);
 assertIntegerRange("RST_HARVEST_TIMEOUT_MS", env.RST_HARVEST_TIMEOUT_MS, 30_000, 600_000);
 assertIntegerRange("RST_HARVEST_MIN_INTERVAL_HOURS", env.RST_HARVEST_MIN_INTERVAL_HOURS, 1, 168);
+assertIntegerRange("CHALLENGE_SOLVER_TIMEOUT_MS", env.CHALLENGE_SOLVER_TIMEOUT_MS, 30_000, 600_000);
+assertIntegerRange("CHALLENGE_SOLVER_MIN_INTERVAL_HOURS", env.CHALLENGE_SOLVER_MIN_INTERVAL_HOURS, 1, 168);
 assertIntegerRange("OLX_MIN_EXPECTED_PAGE_ITEMS", env.OLX_MIN_EXPECTED_PAGE_ITEMS, 1, 50);
 assertIntegerRange("LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS", env.LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS, 2, 3_600);
 assertIntegerRange("LIVE_AUTO_RIA_JITTER_SECONDS", env.LIVE_AUTO_RIA_JITTER_SECONDS, 0, 300);
