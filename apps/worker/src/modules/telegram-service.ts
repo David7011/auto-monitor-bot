@@ -444,9 +444,9 @@ async function sendListingCard(
 }
 
 /** Dead CDN links and invalid media payloads are safe to downgrade to text. */
-function isTelegramMediaRejected(error: unknown): boolean {
+export function isTelegramMediaRejected(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /(?:wrong file|failed to get http url content|wrong type of the web page|can't download|media (?:empty|invalid)|photo (?:invalid|dimensions)|empty url|file identifier)/iu.test(message);
+  return /(?:wrong file|failed to get http url content|wrong type of the web page|can't download|webpage_curl_failed|media[_\s]?(?:empty|invalid)|photo[_\s]?(?:invalid|dimensions)|empty url|file identifier)/iu.test(message);
 }
 
 /**
