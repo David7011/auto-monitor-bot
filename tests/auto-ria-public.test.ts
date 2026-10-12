@@ -36,7 +36,37 @@ const context = {
 describe("AUTO.RIA public search", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     env.AUTO_RIA_SAVED_SEARCH_URLS = "";
+  });
+
+  it("records actual parse and handoff boundaries before a slower saved page", async () => {
+    vi.useFakeTimers();
+    const start = new Date("2026-10-12T21:00:00Z");
+    vi.setSystemTime(start);
+    env.AUTO_RIA_SAVED_SEARCH_URLS = "https://saved.test/slow";
+    const handoff = vi.fn(async () => {});
+    vi.spyOn(sourceHttpClient, "text").mockImplementation(async (url) => {
+      if (url.includes("saved.test")) {
+        expect(handoff).toHaveBeenCalledTimes(1);
+        vi.setSystemTime(new Date(start.getTime() + 5_000));
+      }
+      return {
+        requestId: "test", status: 200, classification: "SUCCESS", contentType: "text/html",
+        body: '"advertisementCard":' + JSON.stringify({ data: { id: 123, type: "Auto", link: "/auto_test_123.html", title: { content: "Toyota Camry 2018" } } }),
+        requestStartedAt: new Date(start.getTime() - 100), firstByteAt: new Date(start.getTime() - 50),
+        bodyReceivedAt: new Date(start.getTime() - 10), bodyDecodedAt: new Date(start.getTime() - 5),
+      };
+    });
+    const result = await new AutoRiaPublicCollector().collect(context, {
+      id: "test", fingerprint: "test", knownExternalIds: new Set(),
+    }, { lane: "REALTIME", maxPages: 1, maxCandidates: 50, deadlineAt: new Date(start.getTime() + 20_000), onHotCandidates: handoff });
+    expect(handoff).toHaveBeenCalledTimes(1);
+    expect(result.listings[0]).toMatchObject({
+      firstSeenAt: start, parsedAt: start, hotCandidateAt: start,
+      bodyReceivedAt: new Date(start.getTime() - 10), bodyDecodedAt: new Date(start.getTime() - 5),
+      observationChannel: "AUTO_RIA_PUBLIC_HTML",
+    });
   });
 
   it("continues bounded backfill past known promoted cards and keeps realtime to one page", async () => {

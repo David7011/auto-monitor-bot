@@ -777,13 +777,17 @@ export class OlxCollector implements SourceCollector {
                 semanticWarnings.push("OLX saved searches truncated: realtime budget exhausted");
                 break;
               }
-              savedResults.push(await fetchOlxHtmlFeed(
+              const savedResult = await fetchOlxHtmlFeed(
                 savedUrl,
                 false,
                 "OLX_PUBLIC_HTML",
                 `saved-search/${index}`,
                 savedRequestClass,
-              ));
+              );
+              savedResults.push(savedResult);
+              // Admit this page durably before waiting for the next saved
+              // search. Origin requests remain sequential and budgeted.
+              await dispatchHotFeedResult(savedResult);
             }
             for (const result of savedResults) {
               if (result.requestCount > 0) for (const sample of result.networkSamples ?? []) networkMetrics.record(sample);
@@ -795,7 +799,6 @@ export class OlxCollector implements SourceCollector {
             }
             for (const result of savedResults.filter(isAdsResult)) {
               for (const ad of result.ads) htmlObservedIds.add(String(ad.id));
-              await dispatchHotFeedResult(result);
               const selection = selectOlxCandidates(result.ads, {
                 now,
                 categoryKey: context.categoryKey,

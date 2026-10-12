@@ -9,6 +9,7 @@ export function isBackgroundDiscoveryLane(lane: ListingDiscoveryLane): boolean {
   return lane === "BACKFILL" || lane === "COVERAGE";
 }
 export type ListingObservationChannel =
+  | "AUTO_RIA_PUBLIC_HTML"
   | "OLX_PUBLIC_API"
   | "OLX_REGIONAL_API"
   | "OLX_PRIVATE_API"
@@ -82,7 +83,7 @@ export type NormalizedListing = {
   bodyDecodedAt?: Date;
   /** Wall-clock instant after source response parsing completes. */
   parsedAt?: Date;
-  /** Instant a new OLX candidate is ready for the progressive hot handoff. */
+  /** Instant a new candidate is ready for the progressive hot handoff. */
   hotCandidateAt?: Date;
   networkTelemetry?: {
     requestId?: string;

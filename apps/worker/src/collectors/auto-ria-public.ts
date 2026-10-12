@@ -78,6 +78,7 @@ export class AutoRiaPublicCollector implements SourceCollector {
       }
       pageCount += 1;
       const parsed = parseAutoRiaPublicCards(response.body);
+      const parsedAt = new Date();
       if (parsed.cards.length === 0 || parsed.malformedCount > 0) {
         parserDegraded = true;
         semanticWarnings.push(`AUTO.RIA public card schema unverified: ${parsed.cards.length} cards, ${parsed.malformedCount} malformed`);
@@ -100,10 +101,20 @@ export class AutoRiaPublicCollector implements SourceCollector {
         classifiedIds.add(id);
         listing.requestStartedAt = response.requestStartedAt;
         listing.firstByteAt = response.firstByteAt;
+        listing.bodyReceivedAt = response.bodyReceivedAt;
+        listing.bodyDecodedAt = response.bodyDecodedAt;
+        listing.parsedAt = parsedAt;
+        listing.networkTelemetry = response.network;
+        listing.observationChannel = "AUTO_RIA_PUBLIC_HTML";
+        listing.observationTarget = url;
         listings.push(listing);
         candidates.push(listing);
       }
-      if (candidates.length > 0 && scan.onHotCandidates) await scan.onHotCandidates(candidates);
+      if (candidates.length > 0 && scan.onHotCandidates) {
+        const hotCandidateAt = new Date();
+        for (const listing of candidates) listing.hotCandidateAt = hotCandidateAt;
+        await scan.onHotCandidates(candidates);
+      }
       return { kind: "ok", empty: parsed.cards.length === 0 };
     };
 
