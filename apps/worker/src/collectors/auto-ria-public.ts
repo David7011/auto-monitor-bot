@@ -116,14 +116,24 @@ export class AutoRiaPublicCollector implements SourceCollector {
       if (outcome.kind === "blocked") return outcome.result;
       if (outcome.empty || listings.length >= maxCandidates) break;
     }
-    for (const savedUrl of savedAutoRiaSearchUrls()) {
-      if (scanDeadlineReached(scan)) {
+    const savedUrls = savedAutoRiaSearchUrls();
+    if (savedUrls.length > 0) {
+      // The first saved URL is the protection sentinel: fetched alone so a
+      // blocked origin stops the scan exactly like the sequential scan did.
+      // The rest run concurrently (no shared coordinator on this source),
+      // each capped by its own deadline slice. Outcomes are applied in URL
+      // order, so the first block still wins with partial listings.
+      const [sentinel, ...rest] = savedUrls;
+      const sentinelOutcome = await ingestSearchPage(sentinel!);
+      if (sentinelOutcome.kind === "blocked") return sentinelOutcome.result;
+      if (rest.length > 0 && listings.length < maxCandidates && !scanDeadlineReached(scan)) {
+        const restOutcomes = await Promise.all(rest.map((savedUrl) => ingestSearchPage(savedUrl)));
+        for (const outcome of restOutcomes) {
+          if (outcome.kind === "blocked") return outcome.result;
+        }
+      } else if (scanDeadlineReached(scan)) {
         semanticWarnings.push("AUTO.RIA public scan deadline reached");
-        break;
       }
-      if (listings.length >= maxCandidates) break;
-      const outcome = await ingestSearchPage(savedUrl);
-      if (outcome.kind === "blocked") return outcome.result;
     }
     return {
       listings,

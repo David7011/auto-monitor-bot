@@ -117,8 +117,7 @@ describe("AUTO.RIA public search", () => {
     expect(result.requestCount).toBe(3);
   });
 
-  it("stops saved pages once the candidate budget is spent", async () => {
-    env.AUTO_RIA_SAVED_SEARCH_URLS = "https://saved.test/sedan,https://saved.test/wagon";
+  it("stops saved pages once the candidate budget is spent", async () => {    env.AUTO_RIA_SAVED_SEARCH_URLS = "https://saved.test/sedan,https://saved.test/wagon";
     const card = (id: number) => '"advertisementCard":' + JSON.stringify({ data: {
       id, type: "Auto", link: `/auto_test_${id}.html`, title: { content: `Car ${id} 2010` },
     } });
@@ -133,5 +132,26 @@ describe("AUTO.RIA public search", () => {
     });
     expect(result.listings.map((listing) => listing.externalId)).toEqual(["111", "222"]);
     expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats the first saved URL as a protection sentinel and skips the rest when blocked", async () => {
+    env.AUTO_RIA_SAVED_SEARCH_URLS = "https://saved.test/blocked,https://saved.test/ok";
+    const card = (id: number) => '"advertisementCard":' + JSON.stringify({ data: {
+      id, type: "Auto", link: `/auto_test_${id}.html`, title: { content: `Car ${id} 2010` },
+    } });
+    const request = vi.spyOn(sourceHttpClient, "text").mockImplementation(async (url) => {
+      if (url.includes("saved.test/blocked")) {
+        return { requestId: "test", status: 429, classification: "RATE_LIMITED", contentType: "text/html", body: "" };
+      }
+      return { requestId: "test", status: 200, classification: "SUCCESS", contentType: "text/html", body: card(111) };
+    });
+    const state = { id: "test", fingerprint: "test", knownExternalIds: new Set<string>() };
+    const collector = new AutoRiaPublicCollector();
+    const result = await collector.collect(context, state, {
+      lane: "REALTIME", maxPages: 1, maxCandidates: 50, deadlineAt: new Date(Date.now() + 20_000),
+    });
+    expect(result.listings.map((listing) => listing.externalId)).toEqual(["111"]);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.map((call) => String(call[0]))).not.toContain("https://saved.test/ok");
   });
 });

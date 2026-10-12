@@ -426,13 +426,26 @@ export function setOlxRequestLeadershipGuard(guard: () => Promise<void>): void {
 }
 
 export function createOlxOriginPolicy(guard: () => Promise<void>): (requestClass: OlxRequestClass) => Promise<void> {
+  // The OLX source row changes on minute granularity (pauses last minutes);
+  // refetching it on every origin request burns 15-60ms of PG time per HTTP.
+  // A 2s memo is invisible to protection semantics and saves ~0.2s per tick.
+  let cached: { enabled: boolean; status: string; pausedUntilMs: number; expiresAt: number } | null = null;
   return async (requestClass) => {
     await guard();
-    const source = await prisma.source.findUnique({
-      where: { source: "OLX" }, select: { enabled: true, status: true, pausedUntil: true },
-    });
-    if (!source?.enabled || (source.pausedUntil && source.pausedUntil.getTime() > Date.now())
-      || (requestClass !== "REALTIME" && !["ACTIVE", "LIMITED"].includes(source.status))) {
+    const nowMs = Date.now();
+    if (!cached || cached.expiresAt <= nowMs) {
+      const source = await prisma.source.findUnique({
+        where: { source: "OLX" }, select: { enabled: true, status: true, pausedUntil: true },
+      });
+      cached = {
+        enabled: source?.enabled ?? false,
+        status: source?.status ?? "",
+        pausedUntilMs: source?.pausedUntil?.getTime() ?? 0,
+        expiresAt: nowMs + 2_000,
+      };
+    }
+    if (!cached.enabled || (cached.pausedUntilMs > nowMs)
+      || (requestClass !== "REALTIME" && !["ACTIVE", "LIMITED"].includes(cached.status))) {
       throw new OlxOriginDeferredError();
     }
   };

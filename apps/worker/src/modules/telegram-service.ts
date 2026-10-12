@@ -41,6 +41,8 @@ const TELEGRAM_GATE_PRIORITY = {
 } as const;
 
 export const TELEGRAM_FLASH_SEND_LEASE_MS = 60_000;
+/** Gate waits above this are worth a warning (burst pressure signal). */
+export const TELEGRAM_GATE_SLOW_WAIT_MS = 3_000;
 const TELEGRAM_DELIVERY_BACKOFF_BASE_MS = 5_000;
 const TELEGRAM_DELIVERY_BACKOFF_CAP_MS = 30 * 60 * 1_000;
 
@@ -306,10 +308,18 @@ async function sendListingLinkToChat(
       });
       return renewed.count === 1;
     }, async (assertOwned) => {
-      await listingSendGate.waitForSlot(
+      const gateWaitMs = await listingSendGate.waitForSlot(
         listingTelegramPriority(listing.discoveryLane),
         listingTelegramFreshnessRank(listing),
       );
+      // Observability for the single global throttle on the send path: a
+      // binding gate shows up here before anyone tunes the interval.
+      if (gateWaitMs > TELEGRAM_GATE_SLOW_WAIT_MS) {
+        await log.warn(
+          "telegram",
+          `send gate wait ${gateWaitMs}ms for listing ${listingId}`,
+        ).catch(() => undefined);
+      }
       await prisma.sourceSeenListing.updateMany({
         where: { listingId, telegramRequestedAt: null },
         data: { telegramRequestedAt: new Date() },
@@ -733,7 +743,13 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
       });
       return renewed.count === 1;
     }, async (assertOwned) => {
-      await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.FLASH, Number.NEGATIVE_INFINITY);
+      const gateWaitMs = await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.FLASH, Number.NEGATIVE_INFINITY);
+      if (gateWaitMs > TELEGRAM_GATE_SLOW_WAIT_MS) {
+        await log.warn(
+          "telegram",
+          `send gate wait ${gateWaitMs}ms for flash bundle ${flashBundleId}`,
+        ).catch(() => undefined);
+      }
       await assertOwned();
       requestStarted = true;
       const telegramRequestedAt = new Date();

@@ -77,7 +77,9 @@ export class TelegramSendGate {
       ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
-  async waitForSlot(priority = 0, rank = 0): Promise<void> {
+  async waitForSlot(priority = 0, rank = 0): Promise<number> {
+    const clock = this.dependencies.now ?? Date.now;
+    const startedAt = clock();
     const member = telegramWaiterMember(priority, rank, this.instanceId, this.sequence++);
     const waiterLeaseMs = Math.max(5_000, Math.trunc(this.minimumIntervalMs) * 10);
     while (true) {
@@ -92,7 +94,7 @@ export class TelegramSendGate {
         waiterLeaseMs,
       );
       const delay = redisInteger(rawDelay, "Telegram global priority gate returned an invalid delay");
-      if (delay === 0) return;
+      if (delay === 0) return clock() - startedAt;
       // Renew before expiry even across a long retry_after cooldown.
       await this.sleep(Math.min(delay, Math.max(25, Math.floor(waiterLeaseMs / 2))));
     }

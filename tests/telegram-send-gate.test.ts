@@ -199,6 +199,19 @@ describe("Telegram send gate", () => {
     await first.waitForSlot();
     expect(now).toBe(7_100);
   });
+
+  it("reports how long a waiter queued for its slot", async () => {
+    let now = 1_000;
+    const gate = new TelegramSendGate(1_100, {
+      redis: fakeTelegramRedis(() => now),
+      key: "telegram:wait-report",
+      now: () => now,
+      sleep: async (milliseconds: number) => { now += milliseconds; },
+    });
+
+    await expect(gate.waitForSlot()).resolves.toBe(0);
+    await expect(gate.waitForSlot()).resolves.toBe(1_100);
+  });
 });
 
 function fakeTelegramRedis(now: () => number): TelegramRateGateRedis {
