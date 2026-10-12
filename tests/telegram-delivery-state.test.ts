@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  albumExtraGateDelayMs,
   classifyTelegramDeliveryFailure,
   isPermanentTelegramEditError,
   isTelegramMessageGoneError,
@@ -72,5 +73,15 @@ describe("Telegram durable delivery state machine", () => {
     expect(isPermanentTelegramEditError("Bad Request: message cannot be edited")).toBe(true);
     expect(isPermanentTelegramEditError("Bad Request: message to edit not found")).toBe(false);
     expect(isPermanentTelegramEditError("Too Many Requests: retry after 5")).toBe(false);
+  });
+
+  it("charges one gate slot per album photo beyond the first", () => {
+    // Telegram paces every album photo, not every message: an uncharged
+    // 10-photo album trips 429s even at 1.1s message spacing.
+    expect(albumExtraGateDelayMs(0)).toBe(0);
+    expect(albumExtraGateDelayMs(1)).toBe(0);
+    expect(albumExtraGateDelayMs(2)).toBe(1_100);
+    expect(albumExtraGateDelayMs(10)).toBe(9_900);
+    expect(albumExtraGateDelayMs(25)).toBe(9_900);
   });
 });

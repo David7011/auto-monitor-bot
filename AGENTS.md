@@ -80,3 +80,12 @@ DB-code changes need a worker rebuild; API changes need an API rebuild.
   Monitoring probes must build time windows from the app clock
   (`new Date(Date.now() - ...)`) and pass them as parameters, never
   `NOW() - interval`.
+- **No backup mirror disk**: `BACKUP_MIRROR_PATH` (D:) does not exist and
+  C:/D: would be one physical disk anyway. Local backups + restore drills
+  are healthy; mirror health stays red until real external storage appears.
+  Do not "fix" by mirroring onto C: (adds no independence).
+- **Watchdog vs lifecycle race**: the minute-watchdog restarts the supervisor
+  task when it looks inactive — including DURING a controlled `local:restart`
+  (both were seen acting within the same minute). The task is a singleton so
+  this is benign, but if duplicate worker sets ever appear, check this
+  interleaving first (compare worker PIDs against the latest restart time).

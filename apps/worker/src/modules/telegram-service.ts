@@ -43,6 +43,16 @@ const TELEGRAM_GATE_PRIORITY = {
 export const TELEGRAM_FLASH_SEND_LEASE_MS = 60_000;
 /** Gate waits above this are worth a warning (burst pressure signal). */
 export const TELEGRAM_GATE_SLOW_WAIT_MS = 3_000;
+
+/**
+ * Extra gate spacing owed by a photo album. Telegram paces every album photo
+ * against the per-chat budget (bursts of ~6+ photos trip 429s even when whole
+ * messages are 1.1s apart), while one waitForSlot grants a single unit. The
+ * charge is applied with deferFor (followers space out; this send fires now).
+ */
+export function albumExtraGateDelayMs(photoCount: number, slotMs = 1_100): number {
+  return Math.max(0, Math.min(Math.trunc(photoCount), 10) - 1) * Math.max(0, slotMs);
+}
 const TELEGRAM_DELIVERY_BACKOFF_BASE_MS = 5_000;
 const TELEGRAM_DELIVERY_BACKOFF_CAP_MS = 30 * 60 * 1_000;
 
@@ -460,6 +470,11 @@ async function sendListingCard(
     }
   }
   try {
+    // Charge the remaining album photos against the gate without waiting:
+    // this send keeps its granted slot, followers space out behind it.
+    // Best-effort accounting only — a missed charge risks a 429 (already
+    // handled with retry_after), never a failed card.
+    await listingSendGate.deferFor(albumExtraGateDelayMs(photos.length)).catch(() => undefined);
     const sent = await telegramBot.api.sendMediaGroup(chatId, [
       { type: "photo" as const, media: photos[0]!, caption },
       ...photos.slice(1).map((media) => ({ type: "photo" as const, media })),
