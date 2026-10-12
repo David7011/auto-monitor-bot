@@ -8,11 +8,12 @@ export async function reconcileOrphanDeliveryIntents(chatId: string, limit: numb
     // production sessions globally. A failure leaves the orphan eligible.
     await tx.$executeRaw`SET LOCAL statement_timeout = '3s'`;
     await tx.$executeRaw`SET LOCAL lock_timeout = '500ms'`;
+    const now = new Date();
     const inserted = await tx.$queryRaw<Array<{ id: string }>>`
       INSERT INTO telegram_notifications
         (id, "listingId", "chatId", status, "createdAt", "updatedAt")
       SELECT gen_random_uuid()::text, listing.id, ${chatId || "not-configured"},
-             'PENDING'::"TelegramNotificationStatus", CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+              'PENDING'::"TelegramNotificationStatus", ${now}, ${now}
       FROM listings listing
       WHERE listing."notificationMode" = 'LIVE' AND listing.status = 'MATCHED'
         AND NOT EXISTS (SELECT 1 FROM telegram_notifications notification

@@ -57,3 +57,13 @@ DB-code changes need a worker rebuild; API changes need an API rebuild.
   new failures need a reason check (`failedReason` in `bull:<queue>:<id>`).
 - `AUTO_RIA LIMITED` with the novelty-caveat `lastError` is by design.
 - Full suite must stay at 100% green; any stderr noise is a bug.
+
+## Known environment quirks
+
+- **PostgreSQL clock runs +3h ahead of real UTC** (`SELECT NOW()` =
+  OS time + 3h). App logic is unaffected (every timestamp the code compares
+  is app-clock-set; the offset is uniform so orderings hold), but NEVER use
+  bare `NOW()`/`CURRENT_TIMESTAMP` in SQL — pass app `Date` params instead.
+  Monitoring probes must build time windows from the app clock
+  (`new Date(Date.now() - ...)`) and pass them as parameters, never
+  `NOW() - interval`.

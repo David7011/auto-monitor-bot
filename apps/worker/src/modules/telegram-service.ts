@@ -649,7 +649,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
         nextAttemptAt: null,
         leaseExpiresAt: null,
         lastErrorCode: "TELEGRAM_FLASH_QUARANTINED",
-        lastErrorMessage: `Parked after ${existing.attemptCount} attempts. Re-arm: UPDATE telegram_flash_bundles SET status='RETRY_PENDING', "nextAttemptAt"=NOW() WHERE id='${flashBundleId}'.`,
+        lastErrorMessage: `Parked after ${existing.attemptCount} attempts. Re-arm: UPDATE telegram_flash_bundles SET status='RETRY_PENDING', "nextAttemptAt"=NULL WHERE id='${flashBundleId}'.`,
       },
     });
     if (parked.count === 1) {
@@ -1102,7 +1102,7 @@ async function quarantineTelegramNotification(
       nextAttemptAt: null,
       leaseExpiresAt: null,
       lastErrorCode: "TELEGRAM_QUARANTINED",
-      lastErrorMessage: `Parked after ${attemptCount} attempts (${context.lastError}). Re-arm: UPDATE telegram_notifications SET status='RETRY_PENDING', "nextAttemptAt"=NOW() WHERE id='${notificationId}'.`,
+      lastErrorMessage: `Parked after ${attemptCount} attempts (${context.lastError}). Re-arm: UPDATE telegram_notifications SET status='RETRY_PENDING', "nextAttemptAt"=NULL WHERE id='${notificationId}'.`,
     },
   });
   if (parked.count !== 1) return;
