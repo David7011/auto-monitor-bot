@@ -23,13 +23,18 @@ export function decideRecoveryProgress(input: {
     : Math.max(0, Math.trunc(input.currentConsecutiveNoProgress)) + 1;
   const base = Math.max(1_000, Math.trunc(input.baseBackoffMs ?? 5_000));
   const cap = Math.max(base, Math.trunc(input.maxBackoffMs ?? 300_000));
+  const noProgressReason = progressed ? null : input.noProgressReason?.trim() || "NO_PROGRESS_UNSPECIFIED";
   return {
     progressPage,
     progressed,
     consecutiveNoProgress,
-    noProgressReason: progressed ? null : input.noProgressReason?.trim() || "NO_PROGRESS_UNSPECIFIED",
+    noProgressReason,
     retryDelayMs: progressed
       ? 1_000
-      : Math.min(cap, base * (2 ** Math.min(10, consecutiveNoProgress - 1))),
+      // Slot contention makes no origin request. Exponential delays can stay
+      // aligned with realtime scans indefinitely and starve the recovery lane.
+      : noProgressReason === "BACKGROUND_SLOT_UNAVAILABLE"
+        ? base
+        : Math.min(cap, base * (2 ** Math.min(10, consecutiveNoProgress - 1))),
   };
 }
