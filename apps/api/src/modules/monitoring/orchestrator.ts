@@ -130,7 +130,23 @@ export class MonitoringOrchestrator {
     await prisma.monitoringState.update({ where: { id: STATE_ID }, data: { status: "STARTING" } });
     await this.ensureSources();
     const now = new Date();
-    await prisma.source.updateMany({ where: { enabled: true }, data: { nextCheckAt: now } });
+    // Thundering-herd guard: after a (re)start every enabled source is due at
+    // once and the burst coalesces realtime ticks into SKIPPED holes (+20-40s
+    // each). Spread only the past-due first deadlines over ~15s; legitimate
+    // future deadlines (pauses, steady-state cadence) are never pulled forward.
+    // Steady-state jitter takes over from the second tick on.
+    const STARTUP_STAGGER_MS = 3_000;
+    const dueSources = await prisma.source.findMany({
+      where: { enabled: true, OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: now } }] },
+      select: { source: true },
+      orderBy: { source: "asc" },
+    });
+    for (const [index, row] of dueSources.entries()) {
+      await prisma.source.update({
+        where: { source: row.source },
+        data: { nextCheckAt: new Date(now.getTime() + index * STARTUP_STAGGER_MS) },
+      });
+    }
 
     this.running = true;
     const state = await prisma.monitoringState.update({
@@ -175,10 +191,20 @@ export class MonitoringOrchestrator {
     this.running = true;
     await this.ensureSources();
     const resumedAt = new Date();
-    await prisma.source.updateMany({
-      where: { source: "OLX", enabled: true },
-      data: { nextCheckAt: resumedAt },
+    // Same thundering-herd guard as start(), but scoped to sources that are
+    // actually overdue (an API reboot must not pull future deadlines forward).
+    const RESUME_STAGGER_MS = 3_000;
+    const overdueSources = await prisma.source.findMany({
+      where: { enabled: true, OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: resumedAt } }] },
+      select: { source: true },
+      orderBy: { source: "asc" },
     });
+    for (const [index, row] of overdueSources.entries()) {
+      await prisma.source.update({
+        where: { source: row.source },
+        data: { nextCheckAt: new Date(resumedAt.getTime() + index * RESUME_STAGGER_MS) },
+      });
+    }
     const nextBackfillTickAt = startupBackfillDeadline(
       resumedAt,
       state.nextBackfillTickAt,

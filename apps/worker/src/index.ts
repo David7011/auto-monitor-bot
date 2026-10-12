@@ -83,7 +83,11 @@ let recoveryRunning = false;
 let hotLeadership: HotWorkerLeadership | null = null;
 let shutdownRunning = false;
 
-const HOT_JOB_LOCK_DURATION_MS = 10_000;
+// Job locks must outlive legitimate slow ticks (OLX realtime p50 ~9s, p95
+// ~15s; coverage runs take minutes). A 10s lock stalled every slow tick into
+// a duplicate requeue. Dead workers are still caught fast via leadership
+// leases and heartbeats; the lock only gates BullMQ requeue timing.
+const HOT_JOB_LOCK_DURATION_MS = 60_000;
 const HOT_JOB_STALLED_INTERVAL_MS = 2_000;
 
 // Fail-fast control commands must not be issued before connection readiness.

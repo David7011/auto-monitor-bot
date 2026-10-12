@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyTelegramDeliveryFailure,
+  isPermanentTelegramEditError,
   isTelegramMessageGoneError,
   shouldQuarantineDelivery,
   TELEGRAM_MAX_DELIVERY_ATTEMPTS,
@@ -64,5 +65,12 @@ describe("Telegram durable delivery state machine", () => {
     expect(isTelegramMessageGoneError("Bad Request: message not found")).toBe(true);
     expect(isTelegramMessageGoneError("Too Many Requests: retry after 5")).toBe(false);
     expect(isTelegramMessageGoneError("Bad Request: message is not modified")).toBe(false);
+  });
+
+  it("treats permanently uneditable cards as terminal for updates", () => {
+    expect(isPermanentTelegramEditError("Bad Request: message can't be edited")).toBe(true);
+    expect(isPermanentTelegramEditError("Bad Request: message cannot be edited")).toBe(true);
+    expect(isPermanentTelegramEditError("Bad Request: message to edit not found")).toBe(false);
+    expect(isPermanentTelegramEditError("Too Many Requests: retry after 5")).toBe(false);
   });
 });

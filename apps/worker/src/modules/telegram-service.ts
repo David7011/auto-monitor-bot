@@ -938,7 +938,20 @@ export async function updateListingMessage(listingId: string): Promise<void> {
       await log.error("telegram", "editMessageText failed", message);
       // A ghost message (deleted by retention cleanup or by the user) will
       // never come back: parking it as terminal beats retrying forever.
+      // Same for permanently uneditable cards (e.g. too old to edit).
       if (isPermanentTelegramChatError(message) || isTelegramMessageGoneError(message)) return;
+      if (isPermanentTelegramEditError(message)) {
+        await prisma.telegramNotification.update({
+          where: { id: notification.id },
+          data: {
+            status: "UPDATED",
+            lastText: text,
+            lastErrorCode: "TELEGRAM_UPDATE_UNEDITABLE",
+            lastErrorMessage: message,
+          },
+        });
+        return;
+      }
       const retryAfterSeconds = telegramRetryAfterSeconds(err);
       if (retryAfterSeconds) throw new TelegramRateLimitError(message, retryAfterSeconds);
       throw err;
@@ -1062,7 +1075,7 @@ export function isTelegramMessageGoneError(message: string): boolean {
   return /(?:message to (?:delete|edit) not found|message not found|message identifier is not specified)/iu.test(message);
 }
 
-function isPermanentTelegramEditError(message: string): boolean {
+export function isPermanentTelegramEditError(message: string): boolean {
   return /(?:message (?:can'?t|cannot|can not) be edited|message is not editable)/iu.test(message);
 }
 
