@@ -72,7 +72,16 @@ describe("durable collector.coverage queue", () => {
 
     expect(duplicateSignalForA).toBe(recoveryA);
     expect(recoveryB).not.toBe(recoveryA);
-    expect(recoveryB).toBe("coverage-recovery-OLX-7-window-1-attempt-1");
+    expect(recoveryB).toMatch(/^coverage-recovery-OLX-7-window-1-capability-[a-f\d]{12}-attempt-1$/u);
     expect(recoveryB).not.toContain(":");
+  });
+
+  it("does not reuse a completed continuation when capability changes at the same attempt number", () => {
+    const input = { source: "OLX" as const, monitoringGeneration: 3, recoveryWindowId: "same-window", recoveryAttemptCount: 6 };
+    const old = recoveryContinuationJobId({ ...input, recoveryAttemptGeneration: "olx-v1:page=50" });
+    const current = recoveryContinuationJobId({ ...input, recoveryAttemptGeneration: "olx-v2:page=50" });
+    expect(current).not.toBe(old);
+    expect(current).not.toContain(":");
+    expect(current).toBe(recoveryContinuationJobId({ ...input, recoveryAttemptGeneration: "olx-v2:page=50" }));
   });
 });

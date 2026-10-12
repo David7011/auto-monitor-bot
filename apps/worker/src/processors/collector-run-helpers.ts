@@ -1,11 +1,12 @@
 import { prisma, type ListingSource } from "@amb/db";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   BACKFILL_TELEGRAM_PRIORITY,
   QUEUE_NAMES,
   REALTIME_LISTING_PRIORITY,
   TELEGRAM_SEND_PRIORITY,
   isBackgroundDiscoveryLane,
+  olxRecoveryAttemptGeneration,
   sortListingsNewestFirst,
   type ListingDiscoveryLane,
   type EffectiveCadenceMode,
@@ -506,7 +507,15 @@ export async function retryLockCollision(job: CollectorRunJob, lane: ListingDisc
   }
 
   const queue = collectorQueueForJob(job, lane);
-  const delay = env.COLLECTOR_LOCK_RETRY_DELAY_MS * (retryCount + 1);
+  let delay = env.COLLECTOR_LOCK_RETRY_DELAY_MS * (retryCount + 1);
+  if (job.source === "OLX" && job.trigger === "RECOVERY" && lane === "BACKFILL") {
+    // A killed process leaves its lease until TTL expiry. One short retry
+    // cannot recover that case and then completed-job dedupe swallows future
+    // signals. Wait for the actual lease once; do not delete another owner's
+    // lock or spin through many short attempts.
+    const ttl = await redisConnection.pttl(`collector-lock:${job.source}:${collectorLockScope(job, lane)}`);
+    if (ttl > 0) delay = Math.max(delay, ttl + 250);
+  }
   await enqueue(
     queue,
     "collect",
@@ -630,12 +639,18 @@ export function recoveryContinuationJobId(input: {
   monitoringGeneration?: number;
   recoveryWindowId: string | null;
   recoveryAttemptCount: number;
+  recoveryAttemptGeneration?: string;
 }): string {
+  const capability = input.recoveryAttemptGeneration ?? (input.source === "OLX"
+    ? olxRecoveryAttemptGeneration({ pageSize: env.OLX_API_PAGE_SIZE, maxOffset: env.OLX_API_MAX_OFFSET })
+    : "native");
+  const capabilityId = createHash("sha256").update(capability).digest("hex").slice(0, 12);
   return [
     "coverage-recovery",
     input.source,
     input.monitoringGeneration ?? "unknown-generation",
     input.recoveryWindowId ?? "legacy-window",
+    `capability-${capabilityId}`,
     `attempt-${Math.max(0, Math.trunc(input.recoveryAttemptCount))}`,
   ].join("-");
 }
