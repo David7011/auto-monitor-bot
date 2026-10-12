@@ -58,6 +58,19 @@ DB-code changes need a worker rebuild; API changes need an API rebuild.
 - `AUTO_RIA LIMITED` with the novelty-caveat `lastError` is by design.
 - Full suite must stay at 100% green; any stderr noise is a bug.
 
+## Latency budget (do not regress)
+
+- OLX realtime tick p50 ~9s on a 20s cadence; ARIA p50 ~0.7s on 60s.
+  firstSeen→Telegram p50 ~5-9s (OLX), ~1s (ARIA).
+- OLX HTTP is serialized by its coordinator (`maxInFlight=1`, origin
+  protection) — NEVER parallelize OLX origin requests; ARIA has no
+  coordinator and tolerates bounded parallelism with a protection sentinel.
+- Telegram gate stays 1100ms (Bot API anti-ban); bursts are handled by flash
+  bundles, not by shrinking the interval. `send gate wait >3s` warnings mean
+  the gate binds — investigate before touching the interval.
+- publication→detection p50 ~16min is SOURCE-side lag (site indexing +
+  backfill tail), not collector slowness. Do not chase it with cadence.
+
 ## Known environment quirks
 
 - **PostgreSQL clock runs +3h ahead of real UTC** (`SELECT NOW()` =
