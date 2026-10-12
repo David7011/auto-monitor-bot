@@ -36,7 +36,7 @@ try {
       totals.legacyLocalOnly += result.legacyLocalOnly;
       totals.deferred += result.deferred;
       totals.skipped += result.skipped;
-      if (result.selected === 0 || result.deletedListings + result.deferred + result.skipped === 0) break;
+      if (result.selected === 0 || result.deletedListings + result.telegramCleared + result.legacyLocalOnly + result.deferred + result.skipped === 0) break;
     }
     const after = await previewListingRetention();
     console.log(JSON.stringify({ totals, after }, null, 2));

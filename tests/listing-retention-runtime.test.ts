@@ -48,7 +48,7 @@ function candidate(overrides: Record<string, unknown> = {}) {
     id: "notification-1",
     chatId: "chat-1",
     messageId: "42",
-    status: "SENT",
+    status: "DELIVERED",
     sentAt: old,
     deleteAfter: old,
     favoritedAt: null,
@@ -74,7 +74,7 @@ function claimed(overrides: Record<string, unknown> = {}) {
     id: "notification-1",
     chatId: "chat-1",
     messageId: "42",
-    status: "SENT",
+    status: "DELIVERED",
     sentAt: old,
     deleteAfter: old,
     favoritedAt: null,
@@ -89,7 +89,7 @@ function claimed(overrides: Record<string, unknown> = {}) {
 function finalized(overrides: Record<string, unknown> = {}) {
   return {
     id: "notification-1",
-    status: "SENT",
+    status: "DELIVERED",
     messageId: "42",
     sentAt: old,
     deleteAfter: old,
@@ -103,11 +103,12 @@ function finalized(overrides: Record<string, unknown> = {}) {
 
 describe("listing retention runtime", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     const tx = {
       telegramNotification: {
         findUnique: mocks.notificationFindUnique,
         update: mocks.notificationUpdate,
+        updateMany: mocks.notificationUpdateMany,
       },
       listing: { deleteMany: mocks.listingDeleteMany },
       sourceSeenListing: { upsert: mocks.seenUpsert },
@@ -217,7 +218,6 @@ describe("listing retention runtime", () => {
     [null, 0],
     [finalized({ cleanupAttemptedAt: new Date(now.getTime() - 1) }), 0],
     [finalized({ messageId: null }), 0],
-    [finalized(), 0],
   ])("preserves a row when finalization loses its invariant %#", async (refreshed, deleteCount) => {
     mocks.notificationFindMany.mockResolvedValue([candidate()]);
     mocks.notificationFindUnique.mockResolvedValueOnce(claimed()).mockResolvedValueOnce(refreshed);
@@ -225,6 +225,91 @@ describe("listing retention runtime", () => {
     await expect(runListingRetentionMaintenance(now, 1)).resolves.toMatchObject({ deletedListings: 0, skipped: 1 });
     expect(mocks.seenUpsert).not.toHaveBeenCalled();
   });
+
+  it("does not repeat cleanup after a delivered receipt has been cleared", async () => {
+    let row = claimed();
+    mocks.notificationFindMany.mockImplementation(async () => row.messageId ? [candidate()] : []);
+    mocks.notificationFindUnique.mockImplementation(async () => row);
+    mocks.notificationUpdate.mockImplementation(async ({ data }) => {
+      row = { ...row, ...data };
+      return row;
+    });
+    mocks.notificationUpdateMany.mockImplementation(async ({ data }) => {
+      row = { ...row, ...data };
+      return { count: 1 };
+    });
+    await expect(runListingRetentionMaintenance(now, 1)).resolves.toMatchObject({ deletedListings: 1 });
+    await expect(runListingRetentionMaintenance(new Date(now.getTime() + 30 * 60_000), 1))
+      .resolves.toMatchObject({ selected: 0, deletedListings: 0 });
+    expect(mocks.cleanupMessage).toHaveBeenCalledOnce();
+    expect(row.status).toBe("DELIVERED");
+    expect(row.messageId).toBeNull();
+    expect(row.retentionPolicyAppliedAt).toBeNull();
+    expect(row.favoritedAt).toBeNull();
+  });
+
+  it("preserves the listing and accepted receipt while another recipient still needs it", async () => {
+    mocks.notificationFindMany.mockResolvedValue([candidate()]);
+    mocks.notificationFindUnique.mockResolvedValueOnce(claimed()).mockResolvedValueOnce(finalized());
+    mocks.listingDeleteMany.mockResolvedValueOnce({ count: 0 });
+    await expect(runListingRetentionMaintenance(now, 1)).resolves.toMatchObject({
+      telegramCleared: 1, deletedListings: 0, skipped: 0,
+    });
+    expect(mocks.notificationUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ messageId: null, deleteAfter: null }),
+    }));
+    expect(mocks.listingDeleteMany).toHaveBeenCalledWith({ where: {
+      id: "listing-1",
+      telegramNotifications: { every: {
+        status: { in: ["SENT", "UPDATED", "DELIVERED"] },
+        messageId: null, deleteAfter: null, cleanupAttemptedAt: { not: null },
+      } },
+    } });
+    expect(mocks.seenUpsert).not.toHaveBeenCalled();
+  });
+
+  it("clears an expired favorite without violating database policy constraints", async () => {
+    mocks.notificationFindMany.mockResolvedValue([candidate({ favoritedAt: old, retainUntil: old, deleteAfter: null })]);
+    mocks.notificationFindUnique
+      .mockResolvedValueOnce(claimed({ favoritedAt: old, retainUntil: old, deleteAfter: null }))
+      .mockResolvedValueOnce(finalized({ favoritedAt: old, retainUntil: old, deleteAfter: null }));
+    mocks.listingDeleteMany.mockResolvedValueOnce({ count: 0 });
+    await expect(runListingRetentionMaintenance(now, 1)).resolves.toMatchObject({ telegramCleared: 1, deletedListings: 0 });
+    expect(mocks.notificationUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        messageId: null, deleteAfter: null, retainUntil: null,
+        favoritedAt: null, retentionPolicyAppliedAt: null,
+      }),
+    }));
+  });
+
+  it("preserves data when the conditional receipt finalization loses its claim", async () => {
+    mocks.notificationFindMany.mockResolvedValue([candidate()]);
+    mocks.notificationFindUnique.mockResolvedValueOnce(claimed()).mockResolvedValueOnce(finalized());
+    mocks.notificationUpdateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(runListingRetentionMaintenance(now, 1)).resolves.toMatchObject({ deletedListings: 0, skipped: 1 });
+    expect(mocks.listingDeleteMany).not.toHaveBeenCalled();
+  });
+
+  it.each(["SENT", "UPDATED", "DELIVERED"])("cleans legacy %s receipts using the same status contract", async (status) => {
+    mocks.notificationFindMany.mockResolvedValue([candidate({ status, retentionPolicyAppliedAt: null })]);
+    mocks.notificationFindUnique
+      .mockResolvedValueOnce(claimed({ status, retentionPolicyAppliedAt: null }))
+      .mockResolvedValueOnce(finalized({ status, retentionPolicyAppliedAt: null }));
+    await expect(runListingRetentionMaintenance(now, 1)).resolves.toMatchObject({ deletedListings: 1 });
+    expect(mocks.notificationFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { AND: [expect.anything(), expect.objectContaining({ status: { in: ["SENT", "UPDATED", "DELIVERED"] } })] },
+    }));
+  });
+
+  it.each(["PENDING", "SENDING", "TRANSIENT", "AMBIGUOUS", "QUARANTINED", "FAILED"])(
+    "does not clean %s receipts even with an expired policy", async (status) => {
+      mocks.notificationFindMany.mockResolvedValue([candidate({ status })]);
+      mocks.notificationFindUnique.mockResolvedValueOnce(claimed({ status }));
+      await expect(runListingRetentionMaintenance(now, 1)).resolves.toMatchObject({ skipped: 1, deletedListings: 0 });
+      expect(mocks.cleanupMessage).not.toHaveBeenCalled();
+    },
+  );
 
   it("classifies favorite, managed and legacy due boundaries", () => {
     const regular = new Date("2026-09-15T00:00:00.000Z");

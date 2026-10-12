@@ -46,6 +46,7 @@ export async function getListingRetentionHealth(checkedAt: Date): Promise<Listin
       where: {
         favoritedAt: null,
         retentionPolicyAppliedAt: null,
+        messageId: { not: null },
         OR: [{ sentAt: { lte: regularCutoff } }, { sentAt: null, createdAt: { lte: regularCutoff } }],
       },
     }),

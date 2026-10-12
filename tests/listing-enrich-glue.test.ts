@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   enqueue: vi.fn(),
   runMarketPriceEstimate: vi.fn(),
   findPossibleDuplicate: vi.fn(),
+  ensureListingSellerPhone: vi.fn(),
   logWarn: vi.fn(),
 }));
 
@@ -20,6 +21,7 @@ vi.mock("../apps/worker/src/lib/queues.js", () => ({ enqueue: mocks.enqueue }));
 vi.mock("../apps/worker/src/lib/log.js", () => ({ log: { warn: mocks.logWarn } }));
 vi.mock("../apps/worker/src/modules/market-price.js", () => ({ runMarketPriceEstimate: mocks.runMarketPriceEstimate }));
 vi.mock("../apps/worker/src/modules/duplicate-guard.js", () => ({ findPossibleDuplicate: mocks.findPossibleDuplicate }));
+vi.mock("../apps/worker/src/modules/seller-phone.js", () => ({ ensureListingSellerPhone: mocks.ensureListingSellerPhone }));
 
 import { processListingEnrich } from "../apps/worker/src/processors/listing-enrich.js";
 
@@ -38,6 +40,7 @@ describe("listing.enrich glue isolation", () => {
     mocks.enqueue.mockResolvedValue(undefined);
     mocks.runMarketPriceEstimate.mockResolvedValue(undefined);
     mocks.findPossibleDuplicate.mockResolvedValue(null);
+    mocks.ensureListingSellerPhone.mockResolvedValue([]);
     mocks.logWarn.mockResolvedValue(undefined);
   });
 
@@ -90,6 +93,30 @@ describe("listing.enrich glue isolation", () => {
     expect(mocks.enqueue).toHaveBeenCalledTimes(1);
     expect(mocks.logWarn).toHaveBeenCalledWith("market-price", "Market price estimate failed", "pricing unavailable");
     expect(mocks.logWarn).toHaveBeenCalledWith("possible-duplicate", "Possible duplicate annotation failed", "duplicate lookup unavailable");
+    expect(mocks.observationUpdateMany).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: { enrichmentCompletedAt: expect.any(Date) },
+    }));
+  });
+
+  it("delivers a resolved phone when pricing fails", async () => {
+    mocks.runMarketPriceEstimate.mockRejectedValueOnce(new Error("pricing unavailable"));
+    mocks.ensureListingSellerPhone.mockResolvedValueOnce(["+380000000000"]);
+    await processListingEnrich({ listingId: "listing-phone" });
+    expect(mocks.enqueue).toHaveBeenLastCalledWith("telegram.update", "update", { listingId: "listing-phone" });
+    expect(mocks.observationUpdateMany).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: { enrichmentCompletedAt: expect.any(Date) },
+    }));
+  });
+
+  it("contains phone failures and a failed optional phone-only update", async () => {
+    mocks.ensureListingSellerPhone.mockRejectedValueOnce(new Error("phone unavailable"));
+    await processListingEnrich({ listingId: "listing-phone-failure" });
+    expect(mocks.logWarn).toHaveBeenCalledWith("seller-phone", "Background phone lookup failed", "phone unavailable");
+
+    mocks.runMarketPriceEstimate.mockRejectedValueOnce(new Error("pricing unavailable"));
+    mocks.ensureListingSellerPhone.mockResolvedValueOnce(["+380000000000"]);
+    mocks.enqueue.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("queue unavailable"));
+    await expect(processListingEnrich({ listingId: "listing-update-failure" })).resolves.toBeUndefined();
     expect(mocks.observationUpdateMany).toHaveBeenLastCalledWith(expect.objectContaining({
       data: { enrichmentCompletedAt: expect.any(Date) },
     }));

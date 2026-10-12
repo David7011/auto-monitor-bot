@@ -1,4 +1,5 @@
 import { acquireTelegramRetentionLock, Prisma, prisma } from "@amb/db";
+import type { TelegramNotificationStatus } from "@amb/db";
 import type { ListingDiscoveryLane } from "@amb/shared";
 import { env } from "../env.js";
 import { log } from "../lib/log.js";
@@ -11,6 +12,11 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const MINIMUM_RETRY_DELAY_MS = 15 * 60 * 1000;
 const RATE_LIMIT_RETRY_DELAY_MS = 30 * 60 * 1000;
+const RETENTION_DELIVERED_STATUSES: TelegramNotificationStatus[] = ["SENT", "UPDATED", "DELIVERED"];
+
+function hasDeliveredStatus(status: string): boolean {
+  return RETENTION_DELIVERED_STATUSES.some((delivered) => delivered === status);
+}
 
 export type ListingRetentionSummary = {
   selected: number;
@@ -101,6 +107,9 @@ function notificationCleanupEligibility(
   regular: Date,
 ): Prisma.TelegramNotificationWhereInput {
   return {
+    status: { in: RETENTION_DELIVERED_STATUSES },
+    messageId: { not: null },
+    sentAt: { not: null },
     OR: [
       { favoritedAt: { not: null }, retainUntil: { lte: now } },
       {
@@ -111,8 +120,6 @@ function notificationCleanupEligibility(
       {
         favoritedAt: null,
         retentionPolicyAppliedAt: null,
-        status: { in: ["SENT", "UPDATED"] },
-        messageId: { not: null },
         sentAt: { lte: regular },
       },
     ],
@@ -137,6 +144,7 @@ export async function previewListingRetention(now = new Date()): Promise<{
           some: {
             favoritedAt: null,
             retentionPolicyAppliedAt: null,
+            messageId: { not: null },
             OR: [{ sentAt: { lte: regular } }, { sentAt: null, createdAt: { lte: regular } }],
           },
         },
@@ -311,7 +319,7 @@ export async function runListingRetentionMaintenance(
     if (cleanup.outcome === "SKIPPED") summary.skipped += 1;
   }
 
-  if (summary.deletedListings || summary.deferred) {
+  if (summary.telegramCleared || summary.deletedListings || summary.deferred) {
     const reasonHistogram = Object.entries(summary.deferredReasons)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([code, count]) => `${code}=${count}`)
@@ -414,7 +422,7 @@ async function finalizeListingRetention(
     if (!refreshed || !notificationStillDue(refreshed, now, regular)) {
       return { outcome: "SKIPPED", telegramCleared, legacyLocalOnly: 0, tombstone: 0, deleted: 0 } as const;
     }
-    if (!refreshed.sentAt || !refreshed.messageId || !["SENT", "UPDATED"].includes(refreshed.status)) {
+    if (!refreshed.sentAt || !refreshed.messageId || !hasDeliveredStatus(refreshed.status)) {
       return {
         outcome: "SKIPPED",
         telegramCleared,
@@ -424,19 +432,25 @@ async function finalizeListingRetention(
       } as const;
     }
 
-    const deleted = await tx.listing.deleteMany({
+    // Keep the accepted receipt while another recipient still owns this listing.
+    // A cleared receipt cannot be selected again or cause a duplicate delivery.
+    const cleared = await tx.telegramNotification.updateMany({
       where: {
-        id: candidate.id,
-        telegramNotifications: {
-          some: {
-            id: refreshed.id,
-            cleanupAttemptedAt: now,
-            ...notificationCleanupEligibility(now, regular),
-          },
-        },
+        id: refreshed.id,
+        cleanupAttemptedAt: now,
+        ...notificationCleanupEligibility(now, regular),
+      },
+      data: {
+        messageId: null,
+        deleteAfter: null,
+        retainUntil: null,
+        favoritedAt: null,
+        retentionPolicyAppliedAt: null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
       },
     });
-    if (deleted.count !== 1) {
+    if (cleared.count !== 1) {
       return {
         outcome: "SKIPPED",
         telegramCleared,
@@ -444,6 +458,22 @@ async function finalizeListingRetention(
         tombstone: 0,
         deleted: 0,
       } as const;
+    }
+    const deleted = await tx.listing.deleteMany({
+      where: {
+        id: candidate.id,
+        telegramNotifications: {
+          every: {
+            status: { in: RETENTION_DELIVERED_STATUSES },
+            messageId: null,
+            deleteAfter: null,
+            cleanupAttemptedAt: { not: null },
+          },
+        },
+      },
+    });
+    if (deleted.count !== 1) {
+      return { outcome: "CLEARED", telegramCleared, legacyLocalOnly: legacyLocalOnly ? 1 : 0, tombstone: 0, deleted: 0 } as const;
     }
     await tx.sourceSeenListing.upsert({
       where: { source_externalId: { source: candidate.source, externalId: candidate.externalId } },
@@ -491,10 +521,10 @@ export function notificationCleanupDue(
   now: Date,
   regular: Date,
 ): boolean {
+  if (!hasDeliveredStatus(notification.status) || !notification.messageId || !notification.sentAt) return false;
   if (notification.favoritedAt) return Boolean(notification.retainUntil && notification.retainUntil <= now);
   if (notification.retentionPolicyAppliedAt) return Boolean(notification.deleteAfter && notification.deleteAfter <= now);
-  return ["SENT", "UPDATED"].includes(notification.status)
-    && Boolean(notification.messageId && notification.sentAt && notification.sentAt <= regular);
+  return notification.sentAt <= regular;
 }
 
 export function notificationStillDue(
