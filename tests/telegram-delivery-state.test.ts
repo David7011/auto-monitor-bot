@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyTelegramDeliveryFailure,
+  shouldQuarantineDelivery,
+  TELEGRAM_MAX_DELIVERY_ATTEMPTS,
   telegramDeliveryRetryDelayMs,
 } from "../apps/worker/src/modules/telegram-service.js";
 
@@ -33,5 +35,21 @@ describe("Telegram durable delivery state machine", () => {
       requestStarted: true,
       acceptancePersisted: false,
     })).toBe("PERMANENT");
+  });
+
+  it("parks definitively-undelivered cards after the attempt ceiling", () => {
+    expect(TELEGRAM_MAX_DELIVERY_ATTEMPTS).toBe(30);
+    for (const status of ["TRANSIENT", "FAILED", "RETRY_PENDING"]) {
+      expect(shouldQuarantineDelivery(status, 29)).toBe(false);
+      expect(shouldQuarantineDelivery(status, 30)).toBe(true);
+      expect(shouldQuarantineDelivery(status, 140)).toBe(true);
+    }
+  });
+
+  it("never quarantines uncertain (AMBIGUOUS) deliveries", () => {
+    // A duplicate card is always better than a missed listing.
+    for (const status of ["AMBIGUOUS", "SENDING", "PROCESSING", "PENDING"]) {
+      expect(shouldQuarantineDelivery(status, 1_000)).toBe(false);
+    }
   });
 });

@@ -82,6 +82,8 @@ const CLOUDFLARE_INTERSTITIAL_TEXT = /\b(?:just a moment|attention required|perf
 const CAPTCHA_WIDGET = /(?:\b(?:g-recaptcha|h-captcha)\b|\bdata-sitekey\s*=|\b(?:grecaptcha|hcaptcha)\.(?:execute|render)\b)/iu;
 const HUMAN_VERIFICATION_TEXT = /\b(?:verify (?:that )?you are human|checking your browser|complete (?:the )?(?:captcha|security check)|robot or human|unusual traffic)\b|(?:підтвердіть|подтвердите)[^<]{0,40}(?:людина|человек)|(?:перевірка|проверка)[^<]{0,40}(?:безпеки|безопасности)/iu;
 const ACCESS_DENIED_TEXT = /\b(?:access denied|request forbidden)\b|доступ (?:заборонено|запрещен)/iu;
+const CHALLENGE_PROSE_TEXT = /\b(?:just a moment|performing security verification|verifying you are (?:a )?human|press (?:&|and) hold|attention required|verify you are human|confirm you are (?:a )?human)\b|press_and_hold|трохи зачекайте/iu;
+const CHALLENGE_WIDGET_RUNTIME = /(?:px-captcha|captcha\.js|_pxappid|perimeterx|human[- ]challenge|challenges\.cloudflare\.com|turnstile|g-recaptcha|recaptcha\/api\.js)/iu;
 const RATE_LIMIT_TEXT = /\b(?:too many requests|rate limit(?:ed| exceeded)?|temporarily blocked|temporary block)\b|(?:тимчасово|временно) заблок(?:овано|ирован)/iu;
 const sourceDispatcher = new Agent({
   connections: env.SOURCE_HTTP_CONNECTIONS_PER_ORIGIN,
@@ -432,6 +434,14 @@ export function detectBodyProtection(contentType: string, body: string): BodyPro
       classification: "CHALLENGE",
       detector: CAPTCHA_WIDGET.test(sample) ? "captcha-challenge-document" : "human-verification-document",
     };
+  }
+  // Interactive widgets without challenge headings: PerimeterX press-and-hold
+  // and Turnstile live in divs/iframes/scripts, never in title/h1. Require
+  // BOTH challenge prose AND a widget/runtime marker so listing pages with an
+  // embedded contact-form captcha stay clean. Mirrors the challenge solver's
+  // detectChallengeKind (kept in sync by tests/protection-markers-sync).
+  if (CHALLENGE_PROSE_TEXT.test(sample) && CHALLENGE_WIDGET_RUNTIME.test(sample)) {
+    return { classification: "CHALLENGE", detector: "challenge-document-markers" };
   }
   if (ACCESS_DENIED_TEXT.test(headingText)) {
     return { classification: "ACCESS_DENIED", detector: "access-denied-document" };

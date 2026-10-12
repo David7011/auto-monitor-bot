@@ -40,6 +40,7 @@ vi.mock("../apps/worker/src/collectors/html-utils.js", () => ({ fetchHtml: mocks
 import {
   attemptChallengeSolve,
   detectChallengeKind,
+  extractCfClearance,
   kickOffChallengeSolve,
   pressHoldDurationMs,
   shouldAttemptChallengeSolve,
@@ -209,5 +210,68 @@ describe("solve attempt", () => {
 
   it("kickOff never throws", () => {
     expect(() => kickOffChallengeSolve("OLX", "test")).not.toThrow();
+  });
+
+  it("does not count a failed mouse grab as a solved hold", async () => {
+    const page = fakePage({
+      title: vi.fn().mockResolvedValue("Access denied"),
+      content: vi.fn().mockResolvedValue('<html><div>Press & Hold to confirm</div><script src="captcha.js"></script></html>'),
+      frameLocator: vi.fn(() => ({
+        locator: () => ({
+          count: vi.fn().mockResolvedValue(1),
+          boundingBox: vi.fn().mockResolvedValue({ x: 100, y: 100, width: 200, height: 40 }),
+        }),
+      })),
+    });
+    (page.mouse.down as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("mouse gone"));
+    const context = fakeContext(page, [{ name: "sess", value: "1" }]);
+    mocks.launchPersistentContext.mockResolvedValue(context);
+    mocks.fetchHtml.mockResolvedValue(null);
+
+    const outcome = await attemptChallengeSolve("OLX", "https://www.olx.ua/uk/");
+
+    expect(page.mouse.down).toHaveBeenCalled();
+    expect(outcome.ok).toBe(false);
+    expect(mocks.redisSet).not.toHaveBeenCalledWith("session:OLX", expect.anything());
+    expect(context.close).toHaveBeenCalled();
+  }, 25000);
+});
+
+describe("cf_clearance relay", () => {
+  it("extracts the bare clearance value from a cookie jar", () => {
+    expect(extractCfClearance("sessionid=abc; cf_clearance=deadbeef123; other=x")).toBe("deadbeef123");
+    expect(extractCfClearance("cf_clearance=only")).toBe("only");
+    expect(extractCfClearance("sessionid=abc; other=x")).toBeNull();
+    expect(extractCfClearance("")).toBeNull();
+  });
+
+  it("relays a harvested RST clearance to the RST collector key", async () => {
+    for (const mock of Object.values(mocks)) {
+      if (typeof mock === "function") mock.mockReset();
+    }
+    mocks.env.CHALLENGE_SOLVER_ENABLED = true;
+    mocks.env.CHALLENGE_SOLVER_TIMEOUT_MS = 5_000;
+    mocks.redisGet.mockResolvedValue(null);
+    mocks.redisSet.mockResolvedValue("OK");
+    mocks.sourceUpdate.mockResolvedValue({});
+    mocks.logWarn.mockResolvedValue(undefined);
+    mocks.logInfo.mockResolvedValue(undefined);
+    mocks.launchPersistentContext.mockReset();
+    const page = fakePage({
+      title: vi.fn().mockResolvedValue("rst cars"),
+      content: vi.fn().mockResolvedValue("<html>20 fresh adverts</html>"),
+    });
+    const context = fakeContext(page, [
+      { name: "sessionid", value: "abc" },
+      { name: "cf_clearance", value: "clear123" },
+    ]);
+    mocks.launchPersistentContext.mockResolvedValue(context);
+    mocks.fetchHtml.mockResolvedValue({ status: 200, body: "<html>20 fresh adverts</html>" });
+
+    const outcome = await attemptChallengeSolve("RST", "https://rst.ua/ukr/oldcars/");
+
+    expect(outcome.ok).toBe(true);
+    expect(mocks.redisSet).toHaveBeenCalledWith("session:RST", "sessionid=abc; cf_clearance=clear123");
+    expect(mocks.redisSet).toHaveBeenCalledWith("rst:cf_clearance", "clear123");
   });
 });

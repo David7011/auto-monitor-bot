@@ -1,6 +1,6 @@
 import { Bot } from "grammy";
 import type { AbortSignal } from "abort-controller";
-import { Prisma, prisma } from "@amb/db";
+import { Prisma, prisma, type TelegramNotificationStatus } from "@amb/db";
 import { telegramListingKeyboard } from "@amb/shared";
 import { env } from "../env.js";
 import { log } from "../lib/log.js";
@@ -43,6 +43,21 @@ const TELEGRAM_GATE_PRIORITY = {
 export const TELEGRAM_FLASH_SEND_LEASE_MS = 60_000;
 const TELEGRAM_DELIVERY_BACKOFF_BASE_MS = 5_000;
 const TELEGRAM_DELIVERY_BACKOFF_CAP_MS = 30 * 60 * 1_000;
+
+/**
+ * Attempt ceiling for definitively-undelivered cards. Past ~11h of capped
+ * 30-minute retries the cause is structural (dead chat, hopeless payload),
+ * not transient — parking beats burning API calls forever. AMBIGUOUS is
+ * deliberately excluded: an uncertain delivery must keep retrying, because a
+ * duplicate card is always better than a missed listing.
+ */
+export const TELEGRAM_MAX_DELIVERY_ATTEMPTS = 30;
+
+const QUARANTINABLE_STATUSES = new Set(["TRANSIENT", "FAILED", "RETRY_PENDING"]);
+
+export function shouldQuarantineDelivery(status: string, attemptCount: number): boolean {
+  return attemptCount >= TELEGRAM_MAX_DELIVERY_ATTEMPTS && QUARANTINABLE_STATUSES.has(status);
+}
 
 export type TelegramDeliveryFailureState = "TRANSIENT" | "AMBIGUOUS" | "PERMANENT";
 
@@ -368,7 +383,15 @@ async function sendListingLinkToChat(
       },
     });
     if (failureState === "PERMANENT") {
-      await verifyAndSuppressBlockedChat(chatId, message).catch(() => undefined);
+      // Verification failure must stay visible: a swallowed error leaves the
+      // chat unsuppressed and the card retrying forever (see attempt ceiling).
+      await verifyAndSuppressBlockedChat(chatId, message).catch((verifyError) => {
+        void log.warn(
+          "telegram",
+          "block verification failed, chat not suppressed",
+          verifyError instanceof Error ? verifyError.message : String(verifyError),
+        ).catch(() => undefined);
+      });
     }
     await log.error("telegram", aborted ? "send deadline exceeded" : "card send failed", message);
     if (retryAfterSeconds) throw new TelegramRateLimitError(message, retryAfterSeconds);
@@ -607,6 +630,37 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
     return existing.listingIds;
   }
   if (["PROCESSING", "SENDING"].includes(existing.status) && existing.leaseExpiresAt && existing.leaseExpiresAt > now) return [];
+
+  if (shouldQuarantineDelivery(existing.status, existing.attemptCount)) {
+    const parked = await prisma.telegramFlashBundle.updateMany({
+      where: { id: flashBundleId, attemptCount: existing.attemptCount, status: existing.status },
+      data: {
+        status: "QUARANTINED",
+        nextAttemptAt: null,
+        leaseExpiresAt: null,
+        lastErrorCode: "TELEGRAM_FLASH_QUARANTINED",
+        lastErrorMessage: `Parked after ${existing.attemptCount} attempts. Re-arm: UPDATE telegram_flash_bundles SET status='RETRY_PENDING', "nextAttemptAt"=NOW() WHERE id='${flashBundleId}'.`,
+      },
+    });
+    if (parked.count === 1) {
+      const text = [
+        "Карантин доставки: flash-дайджест не доставлен за 30 попыток и поставлен на паузу.",
+        `Бандл: ${flashBundleId}, объявлений: ${existing.listingIds.length}, попыток: ${existing.attemptCount}`,
+        "Данные целы, ретраи остановлены. Для повторной отправки переведите строку в RETRY_PENDING.",
+      ].join("\n");
+      try {
+        await sendSystemAlert(text);
+      } catch (error) {
+        await log.warn(
+          "telegram",
+          "quarantine alert failed",
+          error instanceof Error ? error.message : String(error),
+        ).catch(() => undefined);
+      }
+      await log.error("telegram", "flash bundle quarantined after attempt ceiling", flashBundleId);
+    }
+    return [];
+  }
 
   // A persisted bundle may predate the shadow guard. Never trust cached text
   // containing suppressed links; release eligible items as individual cards.
@@ -1013,6 +1067,54 @@ export function listingTelegramFreshnessRank(
   return Number.isFinite(timestamp) ? -timestamp : 0;
 }
 
+/**
+ * Parks a hopeless card after the attempt ceiling: the row stays durable
+ * (nothing is ever deleted), retries stop, and the operator gets one alert
+ * with the exact re-arm statement. The CAS guard makes the transition — and
+ * the alert — happen exactly once under concurrent reservers.
+ */
+async function quarantineTelegramNotification(
+  notificationId: string,
+  attemptCount: number,
+  status: TelegramNotificationStatus,
+  context: { listingId: string; chatId: string; attemptCount: number; lastError: string },
+): Promise<void> {
+  const parked = await prisma.telegramNotification.updateMany({
+    where: { id: notificationId, attemptCount, status },
+    data: {
+      status: "QUARANTINED",
+      nextAttemptAt: null,
+      leaseExpiresAt: null,
+      lastErrorCode: "TELEGRAM_QUARANTINED",
+      lastErrorMessage: `Parked after ${attemptCount} attempts (${context.lastError}). Re-arm: UPDATE telegram_notifications SET status='RETRY_PENDING', "nextAttemptAt"=NOW() WHERE id='${notificationId}'.`,
+    },
+  });
+  if (parked.count !== 1) return;
+  let url = context.listingId;
+  try {
+    const row = await prisma.listing.findUnique({ where: { id: context.listingId }, select: { url: true } });
+    if (row?.url) url = row.url;
+  } catch {
+    // Best-effort enrichment only.
+  }
+  const text = [
+    "Карантин доставки: карточка не доставлена за 30 попыток и поставлена на паузу.",
+    `Объявление: ${url}`,
+    `Чат: ${context.chatId}, попыток: ${context.attemptCount}, последняя ошибка: ${context.lastError}`,
+    "Данные целы, ретраи остановлены. Для повторной отправки переведите строку в RETRY_PENDING.",
+  ].join("\n");
+  try {
+    await sendSystemAlert(text);
+  } catch (error) {
+    await log.warn(
+      "telegram",
+      "quarantine alert failed",
+      error instanceof Error ? error.message : String(error),
+    ).catch(() => undefined);
+  }
+  await log.error("telegram", "card quarantined after attempt ceiling", `${context.listingId} ${context.chatId}`);
+}
+
 async function reserveTelegramNotification(
   listingId: string,
   chatId: string,
@@ -1030,6 +1132,15 @@ async function reserveTelegramNotification(
     return { kind: "already-sent", acceptedAt: existing.acceptedAt ?? existing.sentAt };
   }
   if ((existing?.status === "SENDING" || existing?.status === "PROCESSING") && existing.leaseExpiresAt && existing.leaseExpiresAt > now) {
+    return { kind: "locked" };
+  }
+  if (existing && shouldQuarantineDelivery(existing.status, existing.attemptCount)) {
+    await quarantineTelegramNotification(existing.id, existing.attemptCount, existing.status, {
+      listingId,
+      chatId,
+      attemptCount: existing.attemptCount,
+      lastError: existing.lastErrorMessage ?? existing.lastErrorCode ?? "unknown",
+    });
     return { kind: "locked" };
   }
 

@@ -68,4 +68,17 @@ describe("accepted production release policy", () => {
     expect(migration).toContain("Applied migration checksum mismatch");
     expect(migration).toContain("--single-transaction");
   });
+
+  it("excludes runtime-churn dashboard artifacts from the release snapshot", () => {
+    const release = script("accepted-release.ps1");
+
+    // .next cache/, trace and server/route-cache/ churn at runtime (ISR
+    // evictions between enumeration and snapshot) and must never be release
+    // artifacts. Both enumeration sites must agree or the candidate/accepted
+    // manifests diverge.
+    for (const needle of ["\\.next\\cache", "\"trace\"", "route-cache"]) {
+      expect(release).toContain(needle);
+    }
+    expect(release.match(/route-cache/g)?.length).toBeGreaterThanOrEqual(2);
+  });
 });

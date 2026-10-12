@@ -40,6 +40,7 @@ import {
 } from "../modules/source-protection-policy.js";
 import { kickOffRstHarvest } from "../modules/rst-clearance-harvester.js";
 import { kickOffChallengeSolve } from "../modules/challenge-solver.js";
+import { invalidateSourceSessionCache } from "../collectors/source-sessions.js";
 import { laneOwnsSourceHealth } from "../modules/source-health-ownership.js";
 import {
   createTelegramFlashBundle,
@@ -167,25 +168,33 @@ export async function handleExternalProtection(input: {
     errorMessage: reason,
   });
   await log.warn("collector", `${input.source} ${input.lane} paused: ${reason}`);
+  if ((input.source === "OLX" || input.source === "AUTO_RIA")
+    && (input.result.captchaDetected || (input.result.rateLimited && input.result.responseStatus === 403))) {
+    // A poisoned session cookie must not ride the next ticks: drop the cached
+    // jar so collectors re-read Redis/env (fresh solver output or manual pass)
+    // instead of replaying the cookie that just got challenged.
+    invalidateSourceSessionCache(input.source);
+  }
   if (input.source === "RST" && input.result.captchaDetected) {
     // Best-effort unattended recovery: the harvester warms a persistent
     // profile and stores a fresh clearance when it succeeds. Non-blocking;
     // the manual captcha flow below stays as the guaranteed fallback.
     kickOffRstHarvest("rst-protection-pause");
   }
-  if ((input.source === "OLX" || input.source === "AUTO_RIA") && input.result.captchaDetected) {
-    // Interactive challenge only (never plain rate limits): the solver
-    // behaves like a human in a persistent profile and stores the session
-    // for collectors. Non-blocking; existing pause + alert flow is the
-    // guaranteed fallback.
-    kickOffChallengeSolve(input.source, "captcha-protection-pause");
+  if ((input.source === "OLX" || input.source === "AUTO_RIA")
+    && (input.result.captchaDetected || (input.result.rateLimited && input.result.responseStatus === 403))) {
+    // Interactive challenge (proven CAPTCHA) or an access-denied 403 with no
+    // proven cause: the solver behaves like a human in a persistent profile
+    // and stores the session for collectors. Cooldown-gated and non-blocking;
+    // the existing pause + alert flow stays as the guaranteed fallback.
+    kickOffChallengeSolve(input.source, input.result.captchaDetected ? "captcha-protection-pause" : "access-denied-pause");
   }
   if (incident.manualVerificationNew) {
     const lines = [
       `Требуется ручная проверка: ${sourceDisplayName(input.source)}`,
       "Источник несколько раз подряд вернул CAPTCHA или защитную страницу.",
       `Он остаётся на паузе до ${formatKyivDate(pausedUntil)}; остальные источники продолжают работать.`,
-      "Автоматический обход защиты не выполняется. После паузы будет разрешена только одна безопасная проверка доступности.",
+      "Автоматический решатель уже пробует обойти проверку (solver/harvester); после паузы будет разрешена только одна безопасная проверка доступности.",
     ];
     if (input.source === "RST") {
       lines.push("RST открывается только через ручную капчу в Opera GX: пройдите проверку на rst.ua и пришлите новое значение cf_clearance.");
@@ -237,8 +246,15 @@ async function maybeSendManualReminderAlert(input: {
       `Напоминание: требуется ручная проверка: ${sourceDisplayName(input.source)}.`,
       `Источник на паузе до ${formatKyivDate(input.pausedUntil)}; остальные продолжают работать.`,
     ];
-  await safeSystemAlert(lines.join("\n"));
+  // Claim first: a crash between send and bookkeeping must skip one reminder,
+  // never spam. A failed send releases the claim so the next tick retries.
   await rememberManualReminderSent(input.sourceId);
+  try {
+    await safeSystemAlert(lines.join("\n"));
+  } catch (error) {
+    await redisConnection.del(key).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function dispatchListings(

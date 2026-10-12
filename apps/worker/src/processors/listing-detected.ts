@@ -102,7 +102,15 @@ export async function processListingDetected(job: ListingDetectedJob): Promise<L
     try {
       return await processClaimedListing(job, persistedState);
     } catch (error) {
-      await markObservationOutcome(job.listing.source, job.listing.externalId, { decision: "FAILED" }).catch(() => undefined);
+      // A lost FAILED outcome makes the replay treat the observation as
+      // hanging and re-drive it; keep the signal visible, then rethrow.
+      await markObservationOutcome(job.listing.source, job.listing.externalId, { decision: "FAILED" }).catch((journalError) => {
+        void log.warn(
+          "pipeline",
+          "failed to journal FAILED observation outcome",
+          journalError instanceof Error ? journalError.message : String(journalError),
+        ).catch(() => undefined);
+      });
       throw error;
     }
   }
@@ -118,7 +126,13 @@ export async function processListingDetected(job: ListingDetectedJob): Promise<L
     return result;
   } catch (error) {
     await releaseHotListingClaim(claim);
-    await markObservationOutcome(job.listing.source, job.listing.externalId, { decision: "FAILED" }).catch(() => undefined);
+    await markObservationOutcome(job.listing.source, job.listing.externalId, { decision: "FAILED" }).catch((journalError) => {
+      void log.warn(
+        "pipeline",
+        "failed to journal FAILED observation outcome",
+        journalError instanceof Error ? journalError.message : String(journalError),
+      ).catch(() => undefined);
+    });
     throw error;
   }
 }

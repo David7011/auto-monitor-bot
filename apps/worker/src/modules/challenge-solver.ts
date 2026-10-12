@@ -5,6 +5,7 @@ import { log } from "../lib/log.js";
 import { redisConnection } from "../lib/queues.js";
 import { chromium, projectRootDir, resolveBundledChromiumExecutable, type BrowserContext, type Page } from "../lib/browser.js";
 import { fetchHtml } from "../collectors/html-utils.js";
+import { RST_CLEARANCE_REDIS_KEY } from "../collectors/rst-clearance.js";
 import { storeSourceSessionCookie } from "../collectors/source-sessions.js";
 
 export type ChallengeKind =
@@ -183,22 +184,21 @@ function challengeStartUrl(source: ListingSource): string | null {
 }
 
 async function detectChallengeKindOnPage(page: Page): Promise<ChallengeKind> {
-  try {
-    const title = await page.title().catch(() => "");
-    // Raw HTML is enough: every challenge marker below also appears in markup
-    // (scripts, iframes, headings). No DOM typing needed in Node runtime.
-    const html = await page.content().catch(() => "");
-    const frameSrcs = page.frames().map((frame) => {
-      try {
-        return frame.url();
-      } catch {
-        return "";
-      }
-    });
-    return detectChallengeKind({ title, bodyExcerpt: html.slice(0, 8000), frameSrcs });
-  } catch {
-    return "CLEAN";
-  }
+  // No outer catch: title()/content() degrade to "" individually, but a dead
+  // page (frames() throwing) must abort the attempt, never masquerade as
+  // CLEAN — that would tell the collector "no protection" and skip the pause.
+  const title = await page.title().catch(() => "");
+  // Raw HTML is enough: every challenge marker below also appears in markup
+  // (scripts, iframes, headings). No DOM typing needed in Node runtime.
+  const html = await page.content().catch(() => "");
+  const frameSrcs = page.frames().map((frame) => {
+    try {
+      return frame.url();
+    } catch {
+      return "";
+    }
+  });
+  return detectChallengeKind({ title, bodyExcerpt: html.slice(0, 8000), frameSrcs });
 }
 
 async function solveChallengeKind(page: Page, kind: ChallengeKind): Promise<boolean> {
@@ -272,7 +272,11 @@ async function holdAt(page: Page, x: number, y: number): Promise<boolean> {
     await humanMove(page, x, y);
     await page.waitForTimeout(500 + Math.random() * 800).catch(() => undefined);
     await page.mouse.move(x, y).catch(() => undefined);
-    await page.mouse.down().catch(() => undefined);
+    // A failed grab is not a completed hold: counting it as solved would
+    // harvest nothing and burn the attempt cooldown for zero signal.
+    let grabbed = true;
+    await page.mouse.down().catch(() => { grabbed = false; });
+    if (!grabbed) return false;
     const holdMs = pressHoldDurationMs();
     const startedAt = Date.now();
     // Keep the hold alive: micro-moves feed the sensor VM real biomechanics
@@ -291,6 +295,12 @@ async function holdAt(page: Page, x: number, y: number): Promise<boolean> {
     }
     return false;
   }
+}
+
+/** Bare cf_clearance value out of a harvested Cookie jar (RST relay). */
+export function extractCfClearance(jar: string): string | null {
+  const value = /(?:^|;\s*)cf_clearance=([^;]+)/.exec(jar)?.[1]?.trim();
+  return value ? value : null;
 }
 
 async function harvestSessionFromContext(
@@ -315,6 +325,20 @@ async function harvestSessionFromContext(
   if (!usable) return { ok: false, reason: `harvested session rejected by origin (${via})` };
   const stored = await storeSourceSessionCookie(source, jar);
   if (!stored) return { ok: false, reason: "session store failed" };
+  if (source === "RST") {
+    // The RST collector reads ONLY rst:cf_clearance (getRstClearanceCookie),
+    // never session:RST. Relay the harvested clearance or a solver success
+    // for RST would be stored yet never used. Bare value matches the manual
+    // Opera flow format accepted by normalizeClearanceCookie.
+    const clearance = extractCfClearance(jar);
+    if (clearance) {
+      try {
+        await redisConnection.set(RST_CLEARANCE_REDIS_KEY, clearance);
+      } catch {
+        // Best-effort; the harvester and the manual flow stay as fallback.
+      }
+    }
+  }
   try {
     await redisConnection.set(challengeSuccessKey(source), new Date().toISOString());
     await prisma.source.update({
