@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyTelegramDeliveryFailure,
+  isTelegramMessageGoneError,
   shouldQuarantineDelivery,
   TELEGRAM_MAX_DELIVERY_ATTEMPTS,
   telegramDeliveryRetryDelayMs,
@@ -51,5 +52,17 @@ describe("Telegram durable delivery state machine", () => {
     for (const status of ["AMBIGUOUS", "SENDING", "PROCESSING", "PENDING"]) {
       expect(shouldQuarantineDelivery(status, 1_000)).toBe(false);
     }
+  });
+
+  it("treats ghost messages as terminal for card updates", () => {
+    // Retention cleanup or the user deleted the message: retrying the edit
+    // forever only burns API calls and fills the failed queue.
+    expect(isTelegramMessageGoneError(
+      "Call to 'editMessageCaption' failed! (400: Bad Request: message to edit not found)",
+    )).toBe(true);
+    expect(isTelegramMessageGoneError("Bad Request: message to delete not found")).toBe(true);
+    expect(isTelegramMessageGoneError("Bad Request: message not found")).toBe(true);
+    expect(isTelegramMessageGoneError("Too Many Requests: retry after 5")).toBe(false);
+    expect(isTelegramMessageGoneError("Bad Request: message is not modified")).toBe(false);
   });
 });

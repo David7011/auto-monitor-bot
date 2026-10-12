@@ -936,7 +936,9 @@ export async function updateListingMessage(listingId: string): Promise<void> {
         },
       });
       await log.error("telegram", "editMessageText failed", message);
-      if (isPermanentTelegramChatError(message)) return;
+      // A ghost message (deleted by retention cleanup or by the user) will
+      // never come back: parking it as terminal beats retrying forever.
+      if (isPermanentTelegramChatError(message) || isTelegramMessageGoneError(message)) return;
       const retryAfterSeconds = telegramRetryAfterSeconds(err);
       if (retryAfterSeconds) throw new TelegramRateLimitError(message, retryAfterSeconds);
       throw err;
@@ -1057,7 +1059,7 @@ export function isTelegramDeleteTooOldError(message: string): boolean {
 }
 
 export function isTelegramMessageGoneError(message: string): boolean {
-  return /(?:message to delete not found|message not found|message identifier is not specified)/iu.test(message);
+  return /(?:message to (?:delete|edit) not found|message not found|message identifier is not specified)/iu.test(message);
 }
 
 function isPermanentTelegramEditError(message: string): boolean {
