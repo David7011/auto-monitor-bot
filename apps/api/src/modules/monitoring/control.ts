@@ -163,6 +163,9 @@ export function configuredScheduledSources(): ListingSource[] {
 }
 
 function autoRiaLiveIntervalSeconds(): number {
+  // Public HTML polling has no official API quota. Persist its configured
+  // cadence so the scheduler does not inherit API pacing from LIVE startup.
+  if (env.AUTO_RIA_ACCESS_MODE === "public") return env.LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS;
   const hourlyLimit = Math.max(1, env.AUTO_RIA_HOURLY_REQUEST_LIMIT);
   const quotaInterval = Math.ceil(3600 / hourlyLimit);
   return Math.max(env.LIVE_AUTO_RIA_MIN_INTERVAL_SECONDS, quotaInterval);

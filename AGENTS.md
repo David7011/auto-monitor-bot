@@ -4,6 +4,17 @@ Production goal (highest priority): instant monitoring. New matching listings
 must fly to Telegram in seconds, with zero misses and zero errors. Every
 change is judged against latency, reliability and silence (no Telegram spam).
 
+User-confirmed standing priority (2026-10-12): prioritize the earliest useful
+matching-listing notification, source freshness, and monitoring responsiveness.
+Assess every safeguard and abstraction by measured latency and availability
+impact; propose a faster design when it adds avoidable waiting. Describe the
+consequences of each tradeoff in terms of source uptime, missed listings,
+duplicate delivery, and recovery. Preserve the existing Chromium sandbox
+settings and challenge automation unless the user explicitly requests a change.
+Keep source polling delay, candidate-to-Telegram acceptance, and dashboard
+display delay separate. Audit proposals are not permission to deploy unrelated
+changes. Use docs/FULL_PERFORMANCE_AUDIT_2026-10-12.md as the current work map.
+
 ## Production layout (do not improvise paths)
 
 - Production repo: `C:\Projects\auto-monitor-bot` (runs as SYSTEM via the
