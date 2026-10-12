@@ -135,17 +135,20 @@ export function olxEmptyRecoveryUnresolvedReason(input: {
     : undefined;
 }
 
-const OLX_OFFSET_EVIDENCE_VERSION = "olx-offset-evidence-v1";
+const OLX_OFFSET_EVIDENCE_VERSION = "olx-offset-evidence-v2";
 const OLX_OFFSET_EVIDENCE_CHANNELS = new Set<ListingObservationChannel>([
   "OLX_PUBLIC_API",
   "OLX_REGIONAL_API",
+  "OLX_PRIVATE_API",
   "OLX_PUBLIC_HTML",
   "OLX_REGIONAL_HTML",
   "OLX_HTML_FALLBACK",
 ]);
 
 /**
- * A compact, ordered snapshot of every pageable feed used by recovery.
+ * A compact snapshot of every pageable feed used by recovery. Ordering within
+ * an already ingested page is immaterial, but its complete membership and
+ * transport channel must remain identical before the cursor can advance.
  * Each target occupies one string so the existing bounded String[] storage
  * retains the full page rather than silently truncating after 100 adverts.
  * Optional HTML/private coverage lanes are deliberately excluded because
@@ -155,10 +158,13 @@ export function olxRecoveryPageEvidence(feeds: readonly OlxFeedResult[]): string
   const targets = new Map<string, string[]>();
   for (const feed of feeds) {
     if (!isAdsResult(feed) || !OLX_OFFSET_EVIDENCE_CHANNELS.has(feed.channel)) continue;
-    if (targets.has(feed.observationTarget)) continue;
+    const key = `${feed.observationTarget};channel:${feed.channel}`;
+    if (targets.has(key)) return [];
+    const ids = feed.ads.map((ad) => String(ad.id ?? ""));
+    if (ids.some((id) => !id)) return [];
     targets.set(
-      feed.observationTarget,
-      feed.ads.map((ad) => String(ad.id ?? "")).filter(Boolean),
+      key,
+      ids.sort(),
     );
   }
   return [
@@ -173,7 +179,9 @@ export function olxRecoveryPageEvidenceMatches(
   expected: readonly string[],
   actual: readonly string[],
 ): boolean {
-  return expected.length === actual.length
+  return expected.length > 1
+    && expected[0] === OLX_OFFSET_EVIDENCE_VERSION
+    && expected.length === actual.length
     && expected.every((value, index) => value === actual[index]);
 }
 
@@ -385,11 +393,13 @@ export class OlxCollector implements SourceCollector {
         )
       ) {
         degradedReason = `OLX backfill yielded to realtime after ${pageCount} page(s)`;
+        recoveryNoProgressReason = "BACKGROUND_SLOT_UNAVAILABLE";
         semanticWarnings.push(degradedReason);
         break;
       }
       if (scanDeadlineReached(scan)) {
         degradedReason = `OLX scan deadline reached after ${pageCount} page(s)`;
+        recoveryNoProgressReason = "SCAN_DEADLINE_REACHED";
         semanticWarnings.push(degradedReason);
         break;
       }
@@ -838,11 +848,12 @@ export class OlxCollector implements SourceCollector {
       let pageCandidateLimitReached = false;
       let pageAnchored = true;
       let pageCutoff = Boolean(context.publishedAfter);
-      const feedErrors = feedResults.filter(isErrorResult);
-      const pageEvidence = olxRecoveryPageEvidence(successfulFeeds);
+      const feedErrors = feedResults.filter((feed) => isErrorResult(feed) || isBlockedResult(feed));
+      const pageEvidence = olxRecoveryPageEvidence([...directResults, ...regionalResults]);
       const isOverlapValidationPage = recoveringMutableOffsets
         && hasUsableOverlapEvidence
         && page === state.recoveryOverlapPage;
+      let overlapChanged = false;
       if (isOverlapValidationPage) {
         if (
           feedErrors.length > 0
@@ -852,20 +863,26 @@ export class OlxCollector implements SourceCollector {
         ) {
           degradedReason = `OLX mutable offset evidence changed on overlap page ${page}; continuity cannot be proven`;
           semanticWarnings.push(degradedReason);
-          coverageUnresolvedReason = "UNSTABLE_PAGINATION";
+          // Incomplete transport evidence is retryable. It does not prove a
+          // source limitation and must not permanently disable recovery.
+          const completeAttempt = feedErrors.length === 0 && pendingRecoveryPage === pageWindow.startPage
+            && Boolean(pendingRecoveryEvidence);
+          coverageUnresolvedReason = completeAttempt ? "UNSTABLE_PAGINATION" : undefined;
+          if (!completeAttempt) recoveryNoProgressReason = "INCOMPLETE_OVERLAP_FEEDS";
+          overlapChanged = true;
+        } else {
+          recoveryProgressPage = nextOlxRecoveryResumePage(pageWindow.startPage, pendingRecoveryPage);
+          recoveryOverlapPage = pendingRecoveryPage;
+          recoveryOverlapExternalIds = pendingRecoveryEvidence;
+          if (pendingRecoveryCutoff) {
+            cutoffReached = true;
+            coverageVerificationMethod = "CUTOFF";
+          } else if (pendingRecoveryAnchored) {
+            anchored = true;
+            coverageVerificationMethod = "KNOWN_TAIL";
+          }
           break;
         }
-        recoveryProgressPage = nextOlxRecoveryResumePage(pageWindow.startPage, pendingRecoveryPage);
-        recoveryOverlapPage = pendingRecoveryPage;
-        recoveryOverlapExternalIds = pendingRecoveryEvidence;
-        if (pendingRecoveryCutoff) {
-          cutoffReached = true;
-          coverageVerificationMethod = "CUTOFF";
-        } else if (pendingRecoveryAnchored) {
-          anchored = true;
-          coverageVerificationMethod = "KNOWN_TAIL";
-        }
-        break;
       }
       const continuityIgnoredExternalIds = isBackfill && Boolean(scan.recovery)
         ? new Set([
@@ -915,16 +932,36 @@ export class OlxCollector implements SourceCollector {
         if (!(exhausted || selection.fullyBeforeCutoff) || selection.candidateLimitReached) pageCutoff = false;
       }
 
+      // A shifted overlap can contain adverts absent from the new page (e.g.
+      // after a head deletion). Journal them even though coverage is unproved.
+      if (overlapChanged) {
+        if (pageCandidateLimitReached) {
+          // The journal budget must not strand new overlap candidates behind
+          // a terminal status. Replay this cursor after its admitted subset is
+          // durable, then record UNRESOLVED once the fetched page is ingested.
+          coverageUnresolvedReason = undefined;
+          recoveryNoProgressReason = "CANDIDATE_BUDGET_EXHAUSTED";
+        }
+        break;
+      }
+
       if (feedErrors.length > 0) {
         pageAnchored = false;
         pageCutoff = false;
         degradedReason = `${feedErrors.length} OLX feed(s) failed on page ${page}`;
+        if (recoveringMutableOffsets) recoveryNoProgressReason = "INCOMPLETE_PAGE_FEEDS";
         semanticWarnings.push(degradedReason);
+      }
+      if (recoveringMutableOffsets && pageEvidence.length < 2) {
+        pageAnchored = false;
+        pageCutoff = false;
+        recoveryNoProgressReason = "INCOMPLETE_PAGE_EVIDENCE";
       }
       if (
         recoveringMutableOffsets
         && observedOnPage > 0
         && feedErrors.length === 0
+        && pageEvidence.length > 1
         && !pageCandidateLimitReached
       ) {
         if (hasUsableOverlapEvidence) {
@@ -962,6 +999,18 @@ export class OlxCollector implements SourceCollector {
       if (recoveringMutableOffsets && hasUsableOverlapEvidence && pendingRecoveryPage === page) {
         continue;
       }
+      // A fully classified boundary page is proof even if it uses the last
+      // candidate slot exactly; do not fetch another page just for that case.
+      if (isBackfill && pageCutoff) {
+        cutoffReached = true;
+        coverageVerificationMethod = "CUTOFF";
+        break;
+      }
+      if (isBackfill && state.coverageRecoveryPending && pageAnchored) {
+        anchored = true;
+        coverageVerificationMethod = "KNOWN_TAIL";
+        break;
+      }
       if (listings.length >= maxCandidates) {
         anchored = !recoveringMutableOffsets && pageAnchored;
         break;
@@ -974,18 +1023,6 @@ export class OlxCollector implements SourceCollector {
         } else {
           coverageVerificationMethod = "KNOWN_TAIL";
         }
-        break;
-      }
-      // Newest-first order means one page fully past the freshness cutoff ends
-      // the useful backfill depth as well.
-      if (isBackfill && pageCutoff) {
-        cutoffReached = true;
-        coverageVerificationMethod = "CUTOFF";
-        break;
-      }
-      if (isBackfill && state.coverageRecoveryPending && pageAnchored) {
-        anchored = true;
-        coverageVerificationMethod = "KNOWN_TAIL";
         break;
       }
       if (isBackfill && pageIndex < recoveryPages.length - 1) {
@@ -1038,7 +1075,7 @@ export class OlxCollector implements SourceCollector {
         ? coverageVerificationMethod ?? (cutoffReached ? "CUTOFF" : "KNOWN_TAIL")
         : undefined,
       coverageUnresolvedReason,
-      coverageAttemptGeneration: coverageUnresolvedReason ? recoveryAttemptGeneration : undefined,
+      coverageAttemptGeneration: recoveringMutableOffsets || coverageUnresolvedReason ? recoveryAttemptGeneration : undefined,
       backfillResumePage: isBackfill && !anchored && !cutoffReached
         ? recoveryProgressPage
         : undefined,
@@ -1086,6 +1123,8 @@ export class OlxCollector implements SourceCollector {
         freshnessHedgeOutcome,
         freshnessHedgePrimaryAgeSeconds,
         recoveryTermination: coverageUnresolvedReason ?? null,
+        recoveryProgressPage: recoveringMutableOffsets ? recoveryProgressPage : null,
+        recoveryNoProgressReason: recoveryNoProgressReason ?? null,
         recoveryAttemptGeneration: coverageUnresolvedReason ? recoveryAttemptGeneration : null,
         effectiveOffsetCap: env.OLX_API_MAX_OFFSET,
         ...networkMetrics.coverageMetrics(),

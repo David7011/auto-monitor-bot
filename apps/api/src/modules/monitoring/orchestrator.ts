@@ -837,69 +837,87 @@ function currentOlxRecoveryGeneration(): string {
   });
 }
 
-async function rearmOlxRecoveryForChangedCapability(now: Date): Promise<number> {
+export async function rearmOlxRecoveryForChangedCapability(now: Date): Promise<number> {
   const currentGeneration = currentOlxRecoveryGeneration();
   const unresolved = await prisma.coverageRecoveryWindow.findMany({
-    where: { source: "OLX", status: "UNRESOLVED" },
+    // Retired planner shards retain their evidence but must not occupy the
+    // active recovery lane. A returning shard becomes eligible after realtime
+    // has observed it again; a restart alone does not activate old scopes.
+    where: { source: "OLX", status: { in: ["UNRESOLVED", "PENDING"] },
+      state: { lastSuccessfulScanAt: { gte: new Date(now.getTime() - 15 * 60_000) } } },
     select: {
       id: true,
       sourceSearchStateId: true,
       requiredCutoffAt: true,
       attemptGeneration: true,
+      status: true,
+      overlapExternalIds: true,
     },
   });
   let rearmed = 0;
-  for (const window of unresolved) {
-    if (!olxRecoveryRetryEligible({
-      attemptedGeneration: window.attemptGeneration,
-      currentGeneration,
-    })) continue;
-
+  const stateIds = new Set(unresolved.filter((window) => window.status === "UNRESOLVED"
+    ? olxRecoveryRetryEligible({ attemptedGeneration: window.attemptGeneration, currentGeneration })
+    : window.overlapExternalIds[0] === "olx-offset-evidence-v1")
+    .map((window) => window.sourceSearchStateId));
+  for (const stateId of stateIds) {
     const changed = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "source_search_states" WHERE "id" = ${stateId} FOR UPDATE`;
+      const state = await tx.sourceSearchState.findUnique({ where: { id: stateId } });
+      if (!state) return 0;
+      const windows = await tx.coverageRecoveryWindow.findMany({
+        where: { sourceSearchStateId: stateId, status: { in: ["PENDING", "UNRESOLVED"] } },
+      });
+      const eligible = windows.filter((window) => window.status === "PENDING"
+        || olxRecoveryRetryEligible({ attemptedGeneration: window.attemptGeneration, currentGeneration }));
+      if (!eligible.some((window) => window.status === "UNRESOLVED"
+        || window.overlapExternalIds[0] === "olx-offset-evidence-v1")) return 0;
+      const cutoff = eligible.reduce((oldest, window) => window.requiredCutoffAt < oldest
+        ? window.requiredCutoffAt : oldest, state.coverageRecoveryCutoffAt ?? eligible[0]!.requiredCutoffAt);
       const transition = await tx.coverageRecoveryWindow.updateMany({
-        where: { id: window.id, status: "UNRESOLVED" },
+        where: { id: { in: eligible.map((window) => window.id) }, status: { in: ["UNRESOLVED", "PENDING"] } },
         data: {
           status: "PENDING",
           unresolvedReason: null,
           unresolvedAt: null,
-          attemptGeneration: null,
+          attemptGeneration: currentGeneration,
           acknowledgedAt: null,
           acknowledgedBy: null,
           acknowledgementNote: null,
+          progressPage: 1,
+          overlapPage: null,
+          overlapExternalIds: [],
+          consecutiveNoProgress: 0,
+          lastNoProgressReason: null,
+          nextAttemptAt: now,
         },
       });
-      if (transition.count === 0) return false;
-      const state = await tx.sourceSearchState.findUnique({
-        where: { id: window.sourceSearchStateId },
-        select: { coverageRecoveryCutoffAt: true },
-      });
-      const cutoff = state?.coverageRecoveryCutoffAt
-        && state.coverageRecoveryCutoffAt < window.requiredCutoffAt
-        ? state.coverageRecoveryCutoffAt
-        : window.requiredCutoffAt;
+      if (transition.count === 0) return 0;
       await tx.sourceSearchState.update({
-        where: { id: window.sourceSearchStateId },
+        where: { id: stateId },
         data: {
           coverageRecoveryPending: true,
           coverageRecoveryCutoffAt: cutoff,
+          // Reopened historical windows no longer share one frozen ID tail.
+          // Only observed timestamp coverage of the oldest cutoff closes them.
+          coverageAnchorExternalIds: [],
           lastPage: 1,
           recoveryProgressPage: 1,
           recoveryOverlapPage: null,
           recoveryOverlapExternalIds: [],
           recoveryConsecutiveNoProgress: 0,
           recoveryLastNoProgressReason: null,
-          recoveryNextAttemptAt: new Date(),
+          recoveryNextAttemptAt: now,
         },
       });
-      return true;
+      return transition.count;
     });
-    if (changed) rearmed += 1;
+    rearmed += changed;
   }
   if (rearmed > 0) {
     await logInfo(
       "orchestrator",
       `OLX recovery capability changed; re-armed ${rearmed} unresolved window(s)`,
-      `generation=${currentGeneration}; at=${now.toISOString()}`,
+      `generation=${currentGeneration}; shards=${stateIds.size}; at=${now.toISOString()}`,
     );
   }
   return rearmed;

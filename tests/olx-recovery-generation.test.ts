@@ -7,7 +7,7 @@ import {
 describe("OLX recovery capability generation", () => {
   it("is stable across ordinary runtime events", () => {
     expect(olxRecoveryAttemptGeneration({ pageSize: 50, maxOffset: 1_000 }))
-      .toBe("olx-public-depth-v1:page=50:offset=1000");
+      .toBe("olx-public-depth-v2:page=50:offset=1000");
   });
 
   it("retries only after a meaningful capability change or an explicit force", () => {

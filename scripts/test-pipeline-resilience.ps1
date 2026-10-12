@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$RecoveryOnly)
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -174,12 +174,15 @@ try {
     # Exercise the same dependency-aware migration path used by production.
     # This catches empty-database bootstrap defects that `db push` cannot see.
     Invoke-Amb @("db:migrate:deploy")
-    Invoke-Amb @("--filter", "@amb/worker", "exec", "tsx", "../../tests/integration/pipeline-resilience.ts")
+    $pipelineArguments = @("--filter", "@amb/worker", "exec", "tsx", "../../tests/integration/pipeline-resilience.ts")
+    if ($RecoveryOnly) { $pipelineArguments += "--recovery-only" }
+    Invoke-Amb $pipelineArguments
     Invoke-Amb @("db:verify:olx-reset")
   } finally {
     Pop-Location
   }
-  Write-Host "Extended pipeline acceptance passed with isolated PostgreSQL:$PgPort and Redis:$RedisPort."
+  $scope = if ($RecoveryOnly) { "Recovery acceptance" } else { "Extended pipeline acceptance" }
+  Write-Host "$scope passed with isolated PostgreSQL:$PgPort and Redis:$RedisPort."
 } finally {
   # Preserve synthetic test evidence before deleting the isolated data cluster.
   # Never export dotenv, live pgdata, production dump or Redis state.

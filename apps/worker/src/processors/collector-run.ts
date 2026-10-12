@@ -211,6 +211,10 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
       // capability retry for one context from deep-scanning other contexts
       // that are already VERIFIED or UNRESOLVED.
       if (job.trigger === "RECOVERY" && !state.coverageRecoveryPending) continue;
+      // A queued continuation or another context must not bypass the durable
+      // no-progress backoff established by a more recent attempt.
+      if (lane === "BACKFILL" && state.coverageRecoveryPending
+        && state.recoveryNextAttemptAt && state.recoveryNextAttemptAt > new Date()) continue;
       const scanContext = job.trigger === "COVERAGE"
         ? context
         : contextForCoverageRecovery(context, state, lane);
@@ -219,9 +223,12 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         result: ListingProcessingResult | undefined;
       }> = [];
       const earlyDispatchedExternalIds = new Set<string>();
+      const recoveryScan = source === "OLX" && lane === "BACKFILL" && state.coverageRecoveryPending
+        ? { ...scan, recovery: true }
+        : scan;
       const contextScan = realtimeHotHandoffEnabled(lane, state.initialSyncCompletedAt)
         ? {
-            ...scan,
+            ...recoveryScan,
             onHotCandidates: async (candidates: readonly NormalizedListing[]) => {
               const freshCandidates = (context.freshnessMode === "ALL_TIME"
                 ? [...candidates]
@@ -250,7 +257,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
               }
             },
           }
-        : scan;
+        : recoveryScan;
       const result = source === "OLX" && lane === "REALTIME"
         ? await olxLaneArbiter.runRealtime(() => collector.collect(scanContext, state, contextScan))
         : await collector.collect(scanContext, state, contextScan);

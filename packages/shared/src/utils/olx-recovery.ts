@@ -1,4 +1,4 @@
-export const OLX_RECOVERY_CAPABILITY_VERSION = 1;
+export const OLX_RECOVERY_CAPABILITY_VERSION = 2;
 
 export type OlxRecoveryUnresolvedReason =
   | "PUBLIC_OFFSET_CAP"

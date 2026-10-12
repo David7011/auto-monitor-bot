@@ -22,7 +22,7 @@ export function decideRecoveryProgress(input: {
     ? 0
     : Math.max(0, Math.trunc(input.currentConsecutiveNoProgress)) + 1;
   const base = Math.max(1_000, Math.trunc(input.baseBackoffMs ?? 5_000));
-  const cap = Math.max(base, Math.trunc(input.maxBackoffMs ?? 60_000));
+  const cap = Math.max(base, Math.trunc(input.maxBackoffMs ?? 300_000));
   return {
     progressPage,
     progressed,

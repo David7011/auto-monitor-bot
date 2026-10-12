@@ -112,6 +112,10 @@ async function main(): Promise<void> {
     await assertConcurrentRecoveryWritersSerialize();
     checks.push("two stale worker snapshots serialize through PostgreSQL row locking without losing anchors, cutoff or attempt evidence");
 
+    progress("coalesced recovery proof and stale overlap");
+    await assertCoalescedRecoveryProof();
+    checks.push("one PostgreSQL-backed cutoff proof closes all pending ranges; recent anchor cannot close older gaps; stale replay preserves the newer overlap");
+
     await assertLegacyShardRekey();
     checks.push("legacy car re-key preserves state identity, cutoff, anchors and UNRESOLVED foreign key");
 
@@ -287,6 +291,32 @@ async function main(): Promise<void> {
   }
 }
 
+async function mainRecoveryOnly(): Promise<void> {
+  try {
+    await redisConnection.connect();
+    await resetDatabase();
+    await seedCatchAllFilter();
+    await assertDurableUnresolvedRecoveryWindow();
+    await assertCategoryRecoveryIsolation();
+    await assertConcurrentRecoveryWritersSerialize();
+    await assertCoalescedRecoveryProof();
+    await assertLegacyShardRekey();
+    const report = { result: "PASS", scope: "OLX durable recovery", checks: [
+      "unreachable boundary remains UNRESOLVED after reconnect and ACK",
+      "foreign category isolation and degraded parser cannot verify coverage",
+      "concurrent PostgreSQL row-locked attempts preserve cursor, counters and cutoff",
+      "one oldest-cutoff proof closes all pending ranges and preserves original reasons",
+      "recent anchor cannot verify an older range; stale replay cannot replace newer overlap",
+      "legacy planner re-key preserves recovery history",
+    ] };
+    const serialized = JSON.stringify(report, null, 2);
+    if (process.env.AMB_TEST_REPORT_PATH) writeFileSync(process.env.AMB_TEST_REPORT_PATH, serialized + "\n", { flag: "wx" });
+    console.log(serialized);
+  } finally {
+    await Promise.allSettled([closeQueues(), closeSourceHttpClient(), prisma.$disconnect()]);
+  }
+}
+
 async function benchmarkDbHotPath(iterations = 40) {
   const legacyMs: number[] = [];
   const optimizedMs: number[] = [];
@@ -418,7 +448,7 @@ async function assertCategoryShadowIsolation(): Promise<void> {
   await delay(2100); // Deliberately expire the production filter cache.
   await processListingDetected({ listing, filterIds: [filter.id], bypassHotClaim: true });
   await sendListingLink(result.listingId);
-  const notification = await prisma.telegramNotification.findUniqueOrThrow({ where: { listingId: result.listingId } });
+  const notification = await prisma.telegramNotification.findUniqueOrThrow({ where: { listingId_chatId: { listingId: result.listingId, chatId: "1" } } });
   assert(telegramDeliveries.get("100007") === 1, "Promotion/replay must deliver exactly once on a successful API response");
   assert(notification.lastText?.includes("не подтверждена"), "UNKNOWN notification lost its provisional warning");
   await prisma.filter.update({ where: { id: filter.id }, data: { enabled: false } });
@@ -554,6 +584,40 @@ async function assertConcurrentRecoveryWritersSerialize(): Promise<void> {
     "Concurrent attempt evidence was overwritten instead of accumulated");
 }
 
+async function assertCoalescedRecoveryProof(): Promise<void> {
+  const filter = await prisma.filter.findFirstOrThrow({ where: { categoryKey: "vehicle.car" } });
+  const context = buildSearchContextFromFilter("OLX", { ...filter, regions: ["coalesced-test-region"], cities: [] });
+  const state = await loadSourceSearchState(context);
+  const cutoff = new Date(Date.now() - 3_600_000);
+  await prisma.sourceSearchState.update({ where: { id: state.id }, data: {
+    coverageRecoveryPending: true, coverageRecoveryCutoffAt: cutoff,
+    recoveryProgressPage: 5, recoveryOverlapPage: 4, recoveryOverlapExternalIds: ["newer-proof"],
+    coverageAnchorExternalIds: ["recent-anchor"], lastSuccessfulScanAt: new Date(),
+  } });
+  const oldest = await prisma.coverageRecoveryWindow.create({ data: { source: "OLX", sourceSearchStateId: state.id,
+    reason: "OFFLINE_WINDOW", persistedBoundaryAt: new Date(), requiredCutoffAt: cutoff } });
+  const recent = await prisma.coverageRecoveryWindow.create({ data: { source: "OLX", sourceSearchStateId: state.id,
+    reason: "REALTIME_OVERFLOW", persistedBoundaryAt: new Date(), requiredCutoffAt: new Date(cutoff.getTime() + 600_000) } });
+  const snapshot = await loadSourceSearchState(context);
+  const refused = await markSourceSearchSuccess(context, snapshot, [], { lane: "BACKFILL",
+    coverageVerified: true, coverageVerificationMethod: "KNOWN_TAIL", recoveryProgressPage: 2,
+    recoveryOverlapPage: 1, recoveryOverlapExternalIds: ["stale-proof"] });
+  assert(!refused.recoveryVerified, "Recent anchor verified multiple historical ranges");
+  const persisted = await prisma.sourceSearchState.findUniqueOrThrow({ where: { id: state.id } });
+  assert(persisted.recoveryProgressPage === 5 && persisted.recoveryOverlapPage === 4
+    && persisted.recoveryOverlapExternalIds.includes("newer-proof"), "Stale replay replaced the newer overlap");
+  const proved = await markSourceSearchSuccess(context, await loadSourceSearchState(context), [], { lane: "BACKFILL",
+    coverageVerified: true, coverageVerificationMethod: "CUTOFF", cutoffReached: true, cutoff,
+    oldestObservedAt: new Date(cutoff.getTime() - 1_000), recoveryProgressPage: 6,
+    recoveryOverlapPage: 5, recoveryOverlapExternalIds: ["cutoff-proof"], runId: "coalesced-proof", pageCount: 2, requestCount: 2 });
+  assert(proved.recoveryVerified, "Oldest cutoff did not verify coalesced ranges");
+  const windows = await prisma.coverageRecoveryWindow.findMany({ where: { id: { in: [oldest.id, recent.id] } } });
+  assert(windows.length === 2 && windows.every((window) => window.status === "VERIFIED"
+    && window.verifiedRunId === "coalesced-proof" && window.verificationMethod === "CUTOFF"), "Coalesced proof lost or failed to close a historical row");
+  assert(windows.find((window) => window.id === oldest.id)?.reason === "OFFLINE_WINDOW"
+    && windows.find((window) => window.id === recent.id)?.reason === "REALTIME_OVERFLOW", "Coalescing lost original recovery reasons");
+}
+
 async function assertLegacyShardRekey(): Promise<void> {
   const filter = await prisma.filter.findFirstOrThrow({ where: { categoryKey: "vehicle.car" } });
   const context = buildSearchContextFromFilter("OLX", { ...filter, regions: ["legacy-test-region"], cities: [] });
@@ -577,7 +641,7 @@ async function assertLegacyShardRekey(): Promise<void> {
 }
 
 const probeMode = process.argv[2];
-const entrypoint = probeMode ? runProbe(probeMode) : main();
+const entrypoint = probeMode === "--recovery-only" ? mainRecoveryOnly() : probeMode ? runProbe(probeMode) : main();
 void entrypoint.then(
   () => process.exit(0),
   (error: unknown) => {

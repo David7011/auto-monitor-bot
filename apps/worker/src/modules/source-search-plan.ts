@@ -651,10 +651,11 @@ export async function markSourceSearchSuccess(
       new Set(current.knownExternalIds),
       env.OLX_KNOWN_IDS_RESET_THRESHOLD,
     );
-    let recoveryWindow = await tx.coverageRecoveryWindow.findFirst({
+    const pendingRecoveryWindows = await tx.coverageRecoveryWindow.findMany({
       where: { sourceSearchStateId: state.id, status: "PENDING" },
-      orderBy: { detectedAt: "desc" },
+      orderBy: [{ requiredCutoffAt: "asc" }, { detectedAt: "asc" }],
     });
+    let recoveryWindow = pendingRecoveryWindows[0] ?? null;
     const recoveryPlan = planCoverageRecovery({
       source: context.source,
       lane,
@@ -674,7 +675,11 @@ export async function markSourceSearchSuccess(
     const recoveryWasRequested = recoveryPlan.requested;
     const verificationMethod = options.coverageVerificationMethod
       ?? (options.coverageVerified ? (options.cutoffReached ? "CUTOFF" : "KNOWN_TAIL") : undefined);
-    const verificationHasEvidence = coverageVerificationHasDurableEvidence(
+    const frozenAnchorsMatch = current.coverageAnchorExternalIds.length === (state.coverageAnchorExternalIds?.size ?? 0)
+      && current.coverageAnchorExternalIds.every((id) => state.coverageAnchorExternalIds?.has(id));
+    const verificationHasEvidence = !(verificationMethod === "KNOWN_TAIL"
+      && (pendingRecoveryWindows.length > 1 || (current.coverageRecoveryPending && !frozenAnchorsMatch)))
+      && coverageVerificationHasDurableEvidence(
       verificationMethod,
       options.oldestObservedAt,
       requestedCutoff,
@@ -705,15 +710,19 @@ export async function markSourceSearchSuccess(
           noProgressReason: options.recoveryNoProgressReason,
         })
       : null;
-    const recoveryNextAttemptAt = recoveryRequired && progress
-      ? new Date(now.getTime() + progress.retryDelayMs)
+    const recoveryNextAttemptAt = recoveryRequired
+      ? progress ? new Date(now.getTime() + progress.retryDelayMs) : current.recoveryNextAttemptAt
       : null;
+    // A late replay must not replace the overlap attached to a newer cursor.
+    const canUpdateOverlap = Boolean(progress
+      && (options.recoveryProgressPage ?? options.backfillResumePage ?? 0) >= progress.progressPage);
     const progressEvidenceUpdate = progress ? {
       progressPage: progress.progressPage,
-      overlapPage: options.recoveryOverlapPage ?? recoveryWindow?.overlapPage ?? null,
-      overlapExternalIds: options.recoveryOverlapExternalIds?.slice(0, 100)
-        ?? recoveryWindow?.overlapExternalIds
-        ?? [],
+      overlapPage: canUpdateOverlap ? options.recoveryOverlapPage ?? recoveryWindow?.overlapPage ?? null
+        : current.recoveryOverlapPage,
+      overlapExternalIds: canUpdateOverlap
+        ? options.recoveryOverlapExternalIds?.slice(0, 100) ?? recoveryWindow?.overlapExternalIds ?? []
+        : current.recoveryOverlapExternalIds,
       consecutiveNoProgress: progress.consecutiveNoProgress,
       lastNoProgressReason: progress.noProgressReason,
       nextAttemptAt: recoveryNextAttemptAt,
@@ -816,6 +825,31 @@ export async function markSourceSearchSuccess(
               ...progressEvidenceUpdate,
             },
       });
+      // One shard pass covers all its pending requirements. Keep every row
+      // and original reason, and close siblings only with the same proof that
+      // reached the oldest required cutoff (a recent anchor cannot do this).
+      if (pendingRecoveryWindows.length > 1) {
+        await tx.coverageRecoveryWindow.updateMany({
+          where: { id: { in: pendingRecoveryWindows.slice(1).map((window) => window.id) }, status: "PENDING" },
+          data: {
+            status: recoveryWindow.status,
+            lastAttemptAt: now,
+            lastAttemptRunId: options.runId ?? null,
+            verifiedAt: recoveryWindow.verifiedAt,
+            verifiedRunId: recoveryWindow.verifiedRunId,
+            verificationMethod: recoveryWindow.verificationMethod,
+            unresolvedReason: recoveryWindow.unresolvedReason,
+            unresolvedAt: recoveryWindow.unresolvedAt,
+            attemptGeneration: options.coverageAttemptGeneration ?? recoveryWindow.attemptGeneration,
+            oldestObservedAt: cumulativeOldestObservedAt,
+            attemptCount: { increment: lane === "BACKFILL" ? 1 : 0 },
+            pageCount: { increment: attemptPageCount },
+            requestCount: { increment: attemptRequestCount },
+            observedCount: { increment: attemptObservedCount },
+            ...progressEvidenceUpdate,
+          },
+        });
+      }
     }
 
     await tx.sourceSearchState.update({
@@ -829,7 +863,7 @@ export async function markSourceSearchSuccess(
           ...(options.parserHealth === "HEALTHY" ? { lastParserHealthyAt: now } : {}),
         } : {}),
         knownExternalIds: knownIdRotation.knownExternalIds,
-        coverageAnchorExternalIds: recoveryRequired || recoveryUnresolved
+        coverageAnchorExternalIds: pendingRecoveryWindows.length > 1 ? [] : recoveryRequired || recoveryUnresolved
           ? frozenRecoveryAnchors.length > 0
             ? frozenRecoveryAnchors
             : knownIdRotation.coverageAnchorExternalIds
@@ -838,8 +872,9 @@ export async function markSourceSearchSuccess(
         coverageRecoveryCutoffAt: recoveryRequired ? durableCutoff : null,
         ...(progress ? {
           recoveryProgressPage: progress.progressPage,
-          recoveryOverlapPage: options.recoveryOverlapPage ?? current.recoveryOverlapPage,
-          recoveryOverlapExternalIds: options.recoveryOverlapExternalIds?.slice(0, 100)
+          recoveryOverlapPage: canUpdateOverlap ? options.recoveryOverlapPage ?? current.recoveryOverlapPage
+            : current.recoveryOverlapPage,
+          recoveryOverlapExternalIds: (canUpdateOverlap ? options.recoveryOverlapExternalIds?.slice(0, 100) : undefined)
             ?? current.recoveryOverlapExternalIds,
           recoveryConsecutiveNoProgress: progress.consecutiveNoProgress,
           recoveryLastNoProgressReason: progress.noProgressReason,

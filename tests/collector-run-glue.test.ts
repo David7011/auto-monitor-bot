@@ -514,6 +514,28 @@ describe("collector.run glue preflight invariants", () => {
     expect(mocks.finishRun).toHaveBeenCalledWith("run-1", expect.objectContaining({ status: "SUCCESS" }));
   });
 
+  it("skips a queued recovery while the durable no-progress deadline is still in the future", async () => {
+    mocks.loadSourceSearchState.mockResolvedValue({ ...state, coverageRecoveryPending: true,
+      recoveryNextAttemptAt: new Date(Date.now() + 300_000) });
+    await processCollectorRun({ sourceId: "source-olx", source: "OLX", trigger: "RECOVERY", lane: "BACKFILL" });
+    expect(mocks.getCollector.mock.results[0]?.value.collect).not.toHaveBeenCalled();
+    expect(mocks.markSourceSearchSuccess).not.toHaveBeenCalled();
+    expect(mocks.dispatchListings).not.toHaveBeenCalled();
+  });
+
+  it("allows queued recovery after its durable deadline expires", async () => {
+    mocks.loadSourceSearchState.mockResolvedValue({ ...state, coverageRecoveryPending: true,
+      recoveryNextAttemptAt: new Date(Date.now() - 1_000) });
+    await processCollectorRun({ sourceId: "source-olx", source: "OLX", trigger: "RECOVERY", lane: "BACKFILL" });
+    expect(mocks.getCollector.mock.results[0]?.value.collect).toHaveBeenCalledOnce();
+  });
+
+  it("uses the durable recovery cursor even for an older regular BACKFILL job", async () => {
+    mocks.loadSourceSearchState.mockResolvedValue({ ...state, coverageRecoveryPending: true });
+    await processCollectorRun({ sourceId: "source-olx", source: "OLX", trigger: "BACKFILL", lane: "BACKFILL" });
+    expect(mocks.getCollector.mock.results[0]?.value.collect).toHaveBeenCalledWith(context, expect.any(Object), { recovery: true });
+  });
+
   it("enqueues a stable follow-up when realtime opens a recovery window", async () => {
     mocks.markSourceSearchSuccess.mockResolvedValueOnce({
       recoveryRequired: true,

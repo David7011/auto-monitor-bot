@@ -150,7 +150,7 @@ describe("OLX realtime isolation from historical recovery", () => {
     expect(second.recoveryOverlapExternalIds).toHaveLength(3);
   });
 
-  it("keeps continuity UNRESOLVED when mutable offsets would omit upstream ID 101", async () => {
+  it.each([49, 1_000])("preserves shifted overlap candidates before UNRESOLVED (budget %i)", async (changedPageBudget) => {
     let upstreamIds = Array.from({ length: 151 }, (_, index) => String(index + 1));
     const processed = new Set<string>();
     vi.spyOn(olxLaneArbiter, "waitForBackfillWindow").mockResolvedValue(true);
@@ -166,7 +166,7 @@ describe("OLX realtime isolation from historical recovery", () => {
         })),
       };
     });
-    const run = (progress: number, overlapPage?: number, overlap?: string[]) => new OlxCollector().collect(context, {
+    const run = (progress: number, overlapPage?: number, overlap?: string[], maxCandidates = 1_000) => new OlxCollector().collect(context, {
       id: "state", fingerprint: context.fingerprint,
       coverageRecoveryPending: true,
       coverageRecoveryCutoffAt: new Date("2026-09-01T00:00:00Z"),
@@ -176,7 +176,7 @@ describe("OLX realtime isolation from historical recovery", () => {
       knownExternalIds: new Set(processed),
       coverageAnchorExternalIds: new Set(["151"]),
     }, {
-      lane: "BACKFILL" as const, recovery: true, maxPages: 1, maxCandidates: 1_000,
+      lane: "BACKFILL" as const, recovery: true, maxPages: 1, maxCandidates,
       deadlineAt: new Date(Date.now() + 90_000),
     });
 
@@ -189,9 +189,16 @@ describe("OLX realtime isolation from historical recovery", () => {
     // A naive page-3 continuation would miss it and could encounter anchor
     // 151. Revalidating page 2 must reject that false proof.
     upstreamIds = upstreamIds.filter((id) => id !== "1");
-    const third = await run(second.recoveryProgressPage!, second.recoveryOverlapPage, second.recoveryOverlapExternalIds);
+    let third = await run(second.recoveryProgressPage!, second.recoveryOverlapPage, second.recoveryOverlapExternalIds, changedPageBudget);
     expect(processed.has("101")).toBe(false);
     expect(upstreamIds).toContain("101");
+    if (changedPageBudget === 49) {
+      expect(third.coverageUnresolvedReason).toBeUndefined();
+      expect(third.recoveryNoProgressReason).toBe("CANDIDATE_BUDGET_EXHAUSTED");
+      third.listings.forEach((item) => processed.add(item.externalId));
+      third = await run(second.recoveryProgressPage!, second.recoveryOverlapPage, second.recoveryOverlapExternalIds, changedPageBudget);
+    }
+    expect(third.listings.map((item) => item.externalId)).toContain("101");
     expect(third.coverageVerified).toBe(false);
     expect(third.coverageUnresolvedReason).toBe("UNSTABLE_PAGINATION");
   });
@@ -199,11 +206,6 @@ describe("OLX realtime isolation from historical recovery", () => {
   it.each([
     ["insertion", (ids: string[]) => ["new-head", ...ids]],
     ["deletion", (ids: string[]) => ids.filter((id) => id !== "1")],
-    ["reorder", (ids: string[]) => {
-      const changed = [...ids];
-      [changed[50], changed[51]] = [changed[51]!, changed[50]!];
-      return changed;
-    }],
     ["promoted relocation", (ids: string[]) => ["150", ...ids.filter((id) => id !== "150")]],
   ] as const)("refuses VERIFIED when a %s changes mutable offset continuity", async (_case, mutate) => {
     let upstreamIds = Array.from({ length: 151 }, (_, index) => String(index + 1));
@@ -302,6 +304,73 @@ describe("OLX realtime isolation from historical recovery", () => {
       slotSpy.mockRestore();
     }
     expect(requestedPages).toEqual([1, 2, 1, 3, 2]);
+  });
+
+  it("finishes without a restart when promotions only reorder the same overlap page", async () => {
+    let ids = Array.from({ length: 100 }, (_, index) => String(index + 1));
+    const known = new Set<string>();
+    vi.spyOn(olxLaneArbiter, "waitForBackfillWindow").mockResolvedValue(true);
+    vi.spyOn(feed, "fetchOlxFeed").mockImplementation(async (_api, url, primary, _channel, observationTarget) => {
+      const offset = (Number(new URL(url).searchParams.get("page") ?? "1") - 1) * 50;
+      return { primary, url, observationTarget, requestCount: 1, channel: "OLX_PUBLIC_HTML" as const,
+        ads: ids.slice(offset, offset + 50).map((id) => ({ id, url: `https://www.olx.ua/d/test-ID${id}.html`, createdTime: "2026-09-20T10:00:00Z" })) };
+    });
+    const run = (progress: number, overlapPage?: number, overlap?: string[]) => new OlxCollector().collect(context, {
+      id: "state", fingerprint: context.fingerprint, coverageRecoveryPending: true,
+      recoveryProgressPage: progress, recoveryOverlapPage: overlapPage,
+      recoveryOverlapExternalIds: new Set(overlap ?? []), knownExternalIds: known,
+      coverageAnchorExternalIds: new Set(ids.slice(50)),
+    }, { lane: "BACKFILL", recovery: true, maxPages: 1, maxCandidates: 1_000, deadlineAt: new Date(Date.now() + 90_000) });
+    const first = await run(1);
+    first.listings.forEach((listing) => known.add(listing.externalId));
+    ids = [ids[1]!, ids[0]!, ...ids.slice(2)];
+    const second = await run(first.recoveryProgressPage!, first.recoveryOverlapPage, first.recoveryOverlapExternalIds);
+    expect(second.coverageVerified).toBe(true);
+    expect(second.coverageVerificationMethod).toBe("KNOWN_TAIL");
+    expect(second.recoveryProgressPage).toBe(3);
+    expect(second.requestCount).toBe(2);
+  });
+
+  it("retries an incomplete secondary overlap feed without falsely declaring pagination unstable", async () => {
+    const multiContext = { ...context, regions: ["dnipropetrovska", "kyivska"] };
+    let failSecondary = false;
+    vi.spyOn(olxLaneArbiter, "waitForBackfillWindow").mockResolvedValue(true);
+    vi.spyOn(feed, "fetchOlxFeed").mockImplementation(async (_api, url, primary, _channel, observationTarget) => {
+      const page = Number(new URL(url).searchParams.get("page") ?? "1");
+      if (failSecondary && page === 1 && !primary) {
+        return { primary, url, observationTarget, requestCount: 1, channel: "OLX_PUBLIC_HTML" as const, error: new Error("temporary secondary timeout") };
+      }
+      return { primary, url, observationTarget, requestCount: 1, channel: "OLX_PUBLIC_HTML" as const,
+        ads: Array.from({ length: 50 }, (_, index) => ({ id: `${observationTarget}-${index}`, url: `https://www.olx.ua/d/test-ID${index}.html`, createdTime: "2026-09-20T10:00:00Z" })) };
+    });
+    const baseState = { id: "state", fingerprint: multiContext.fingerprint, coverageRecoveryPending: true,
+      knownExternalIds: new Set<string>(), coverageAnchorExternalIds: new Set<string>() };
+    const scan = { lane: "BACKFILL" as const, recovery: true, maxPages: 1, maxCandidates: 1_000,
+      deadlineAt: new Date(Date.now() + 90_000) };
+    const first = await new OlxCollector().collect(multiContext, { ...baseState, recoveryProgressPage: 1 }, scan);
+    failSecondary = true;
+    const second = await new OlxCollector().collect(multiContext, { ...baseState,
+      recoveryProgressPage: first.recoveryProgressPage, recoveryOverlapPage: first.recoveryOverlapPage,
+      recoveryOverlapExternalIds: new Set(first.recoveryOverlapExternalIds) }, scan);
+    expect(second.coverageVerified).toBe(false);
+    expect(second.coverageUnresolvedReason).toBeUndefined();
+    expect(second.recoveryProgressPage).toBe(2);
+    expect(second.recoveryNoProgressReason).toBe("INCOMPLETE_OVERLAP_FEEDS");
+  });
+
+  it("finishes on a fully classified cutoff page that fills the candidate budget exactly", async () => {
+    vi.spyOn(olxLaneArbiter, "waitForBackfillWindow").mockResolvedValue(true);
+    vi.spyOn(feed, "fetchOlxFeed").mockImplementation(async (_api, url, primary, _channel, observationTarget) => ({
+      primary, url, observationTarget, requestCount: 1, channel: "OLX_PUBLIC_HTML" as const,
+      ads: Array.from({ length: 50 }, (_, index) => ({ id: `cutoff-${index}`, url: `https://www.olx.ua/d/test-ID${index}.html`, createdTime: "2026-09-01T10:00:00Z" })),
+    }));
+    const result = await new OlxCollector().collect({ ...context, publishedAfter: new Date("2026-09-20T10:00:00Z") }, {
+      id: "state", fingerprint: context.fingerprint, coverageRecoveryPending: true, recoveryProgressPage: 1,
+      knownExternalIds: new Set(), coverageAnchorExternalIds: new Set(),
+    }, { lane: "BACKFILL", recovery: true, maxPages: 1, maxCandidates: 50, deadlineAt: new Date(Date.now() + 90_000) });
+    expect(result.coverageVerified).toBe(true);
+    expect(result.coverageVerificationMethod).toBe("CUTOFF");
+    expect(result.requestCount).toBe(1);
   });
 
   it("stops realtime at the current known tail while historical anchors remain outside the current page", async () => {

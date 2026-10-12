@@ -318,6 +318,7 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
     const rearmed = await prisma.$transaction(async (tx) => {
       const window = await tx.coverageRecoveryWindow.findUnique({ where: { id: req.params.id } });
       if (!window || window.status !== "UNRESOLVED") return null;
+      await tx.$queryRaw`SELECT "id" FROM "source_search_states" WHERE "id" = ${window.sourceSearchStateId} FOR UPDATE`;
       const transition = await tx.coverageRecoveryWindow.updateMany({
         where: { id: window.id, status: "UNRESOLVED" },
         data: {
@@ -344,6 +345,7 @@ export async function searchPlanRoutes(app: FastifyInstance): Promise<void> {
         data: {
           coverageRecoveryPending: true,
           coverageRecoveryCutoffAt: cutoff,
+          coverageAnchorExternalIds: [],
           lastPage: 1,
           recoveryProgressPage: 1,
           recoveryOverlapPage: null,
