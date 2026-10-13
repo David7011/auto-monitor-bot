@@ -9,6 +9,9 @@ import { queueTelegramFirstSignals } from "../../apps/worker/src/modules/telegra
 import { configureTelegramApiRootForIntegrationTest } from "../../apps/worker/src/modules/telegram-service.js";
 import { processTelegramFlash, processTelegramSend } from "../../apps/worker/src/processors/telegram.js";
 import { bullConnection, closeQueues, redisConnection } from "../../apps/worker/src/lib/queues.js";
+import { activateTelegramSubscriber } from "../../apps/api/src/modules/telegram-subscription.js";
+import { closeQueues as closeApiQueues } from "../../apps/api/src/lib/queues.js";
+import { assertAutoRiaPublicRecovery } from "./auto-ria-public-recovery.js";
 
 const db = new URL(process.env.DATABASE_URL ?? "http://invalid");
 const redis = new URL(process.env.REDIS_URL ?? "http://invalid");
@@ -53,6 +56,7 @@ async function listing(externalId: string) {
 async function main() {
 try {
   await redisConnection.connect();
+  await assertAutoRiaPublicRecovery();
   await new Promise<void>(resolveListen => fake.listen(0, "127.0.0.1", resolveListen));
   const address = fake.address();
   assert(address && typeof address !== "string");
@@ -81,12 +85,24 @@ try {
   await queueTelegramFirstSignals([second.id], "blocked");
   await until(async () => await prisma.telegramNotification.count({ where: { listingId: second.id, chatId: "2", status: "DELIVERED" } }) === 1, "subscriber survives blocked owner");
   await until(async () => await prisma.telegramFlashBundle.count({ where: { chatId: "1", status: "PERMANENT" } }) === 1, "owner permanent outcome");
-  const summary = { passed: true, checks: ["concurrent durable fan-out", "slow owner does not block subscriber (>5s)", "per-recipient details", "idempotent admission", "permanent owner failure isolated"], events };
+  await until(async () => await prisma.telegramNotification.count({ where: { listingId: second.id, chatId: "1", status: "PERMANENT" } }) === 1, "owner receipt permanent outcome");
+  blockOwner = false;
+  const subscriberSignals = events.filter(e => e.chat === "2" && e.phase === "signal").length;
+  await activateTelegramSubscriber("1");
+  await until(async () => await prisma.telegramNotification.count({ where: { listingId: second.id, status: "DELIVERED" } }) === 2, "start restores undelivered receipt");
+  assert.equal(events.filter(e => e.chat === "2" && e.phase === "signal").length, subscriberSignals, "Recovery resent another recipient's accepted signal");
+  await activateTelegramSubscriber("3");
+  const third = await listing("new-subscriber");
+  await queueTelegramFirstSignals([third.id], "new-subscriber");
+  await until(async () => await prisma.telegramNotification.count({ where: { listingId: third.id, status: "DELIVERED" } }) === 3, "new subscriber receives next listing");
+  assert.equal(await prisma.telegramNotification.count({ where: { chatId: "3", listingId: { in: [first.id, second.id] } } }), 0, "New subscriber received unsolicited history");
+  const summary = { passed: true, checks: ["concurrent durable fan-out", "slow owner does not block subscriber (>5s)", "per-recipient details", "idempotent admission", "permanent owner failure isolated", "start recovers failed recipient without resending accepted signals", "new subscriber receives next listing"], events };
   appendFileSync(resolve(pgData, "../progress.log"), JSON.stringify(summary) + "\n");
   console.log(JSON.stringify(summary));
 } finally {
   for (const worker of workers) await worker.close();
   await closeQueues();
+  await closeApiQueues();
   await closeDatabase();
   await new Promise<void>(done => fake.close(() => done()));
 }

@@ -13,6 +13,7 @@ import {
 import { logError, logInfo, logWarn } from "../lib/error-log.js";
 import { telegramPollingFailurePolicy } from "../lib/telegram-polling-policy.js";
 import { env } from "../env.js";
+import { activateTelegramSubscriber } from "./telegram-subscription.js";
 import { checkActiveSourcesNow, disableBulkRealSources, enableBulkRealSources } from "./sources/control.js";
 import {
   startLiveMonitoring,
@@ -151,7 +152,6 @@ async function pollingLoop(): Promise<void> {
 
   try {
     await telegramApi<boolean>("deleteWebhook", { drop_pending_updates: false });
-    offset = await latestOffset();
   } catch (err) {
     await logError("telegram-control", "Telegram control initialization failed", errorMessage(err));
   }
@@ -174,8 +174,8 @@ async function pollingLoop(): Promise<void> {
       }
 
       for (const update of updates) {
-        offset = update.update_id + 1;
         await handleUpdate(update);
+        offset = update.update_id + 1;
       }
     } catch (err) {
       if (stopRequested) break;
@@ -208,19 +208,6 @@ async function pollingLoop(): Promise<void> {
   await logInfo("telegram-control", "Telegram control bot stopped");
 }
 
-async function latestOffset(): Promise<number> {
-  const updates = await telegramApi<TelegramUpdate[]>(
-    "getUpdates",
-    {
-      timeout: 0,
-      limit: 100,
-      allowed_updates: ["message", "callback_query"],
-    },
-    10000,
-  );
-  return updates.reduce((max, update) => Math.max(max, update.update_id + 1), 0);
-}
-
 async function handleUpdate(update: TelegramUpdate): Promise<void> {
   if (update.callback_query) {
     await handleCallback(update.callback_query);
@@ -244,15 +231,13 @@ async function handleMessage(message: TelegramMessage): Promise<void> {
       await sendTelegramMessageToChat(chatId, "Подписка доступна только в личном чате с ботом.");
       return;
     }
-    await prisma.telegramSubscriber.upsert({
-      where: { chatId: String(chatId) },
-      create: { chatId: String(chatId), active: true },
-      update: { active: true, blockedAt: null, lastSeenAt: new Date() },
-    });
-    await sendTelegramMessageToChat(
+    await activateTelegramSubscriber(String(chatId));
+    // Subscription is durable; a slow welcome must not delay the next /start.
+    void sendTelegramMessageToChat(
       chatId,
       "Готово — вы подписаны на новые объявления. Фильтры настраивает владелец через локальную панель проекта.",
-    );
+    ).catch(err => logWarn("telegram-control", "Subscriber activated, welcome delivery failed", errorMessage(err)))
+      .catch(() => undefined);
     return;
   }
 
