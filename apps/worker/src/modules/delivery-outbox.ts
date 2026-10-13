@@ -1,4 +1,5 @@
 import { prisma } from "@amb/db";
+import { RETRYABLE_DELIVERY_STATUSES, telegramRetryDueWhere } from "./telegram-delivery-policy.js";
 
 /** Repair legacy orphans without reviving shadow, ignored or retained receipts. */
 export async function reconcileOrphanDeliveryIntents(chatId: string, limit: number): Promise<number> {
@@ -35,14 +36,14 @@ export async function reconcileOrphanDeliveryIntents(chatId: string, limit: numb
 export async function selectPendingCardDeliveryIntents(
   limit: number,
   now = new Date(),
-): Promise<Array<{ listingId: string }>> {
+): Promise<Array<{ listingId: string; chatId: string; acceptedAt: Date | null }>> {
   return prisma.telegramNotification.findMany({
     where: {
-      status: { in: ["PENDING", "TRANSIENT", "AMBIGUOUS", "RETRY_PENDING", "FAILED"] },
-      OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+      status: { in: [...RETRYABLE_DELIVERY_STATUSES] },
+      ...telegramRetryDueWhere(now),
       listing: { notificationMode: "LIVE", status: { notIn: ["IGNORED", "DUPLICATE"] } },
     },
-    select: { listingId: true },
+    select: { listingId: true, chatId: true, acceptedAt: true },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     take: limit,
   });
@@ -55,8 +56,8 @@ export async function selectPendingFlashDeliveryIntents(
 ): Promise<Array<{ id: string; attemptCount: number }>> {
   return prisma.telegramFlashBundle.findMany({
     where: {
-      status: { in: ["PENDING", "TRANSIENT", "AMBIGUOUS", "RETRY_PENDING", "FAILED"] },
-      OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+      status: { in: [...RETRYABLE_DELIVERY_STATUSES] },
+      ...telegramRetryDueWhere(now),
     },
     select: { id: true, attemptCount: true },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],

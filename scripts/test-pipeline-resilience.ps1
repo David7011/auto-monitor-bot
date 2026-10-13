@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$RecoveryOnly)
+param([switch]$RecoveryOnly, [switch]$TelegramOnly)
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -174,14 +174,15 @@ try {
     # Exercise the same dependency-aware migration path used by production.
     # This catches empty-database bootstrap defects that `db push` cannot see.
     Invoke-Amb @("db:migrate:deploy")
-    $pipelineArguments = @("--filter", "@amb/worker", "exec", "tsx", "../../tests/integration/pipeline-resilience.ts")
+    $entryPoint = if ($TelegramOnly) { "../../tests/integration/telegram-first-signals.ts" } else { "../../tests/integration/pipeline-resilience.ts" }
+    $pipelineArguments = @("--filter", "@amb/worker", "exec", "tsx", $entryPoint)
     if ($RecoveryOnly) { $pipelineArguments += "--recovery-only" }
     Invoke-Amb $pipelineArguments
     Invoke-Amb @("db:verify:olx-reset")
   } finally {
     Pop-Location
   }
-  $scope = if ($RecoveryOnly) { "Recovery acceptance" } else { "Extended pipeline acceptance" }
+  $scope = if ($TelegramOnly) { "Telegram recipient acceptance" } elseif ($RecoveryOnly) { "Recovery acceptance" } else { "Extended pipeline acceptance" }
   Write-Host "$scope passed with isolated PostgreSQL:$PgPort and Redis:$RedisPort."
 } finally {
   # Preserve synthetic test evidence before deleting the isolated data cluster.

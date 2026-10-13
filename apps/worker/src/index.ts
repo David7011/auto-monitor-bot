@@ -27,7 +27,6 @@ import {
 import {
   createTelegramFlashBundle,
   isTelegramConfigured,
-  releaseFlashListingsToCards,
 } from "./modules/telegram-service.js";
 import { env } from "./env.js";
 import {
@@ -255,7 +254,8 @@ function createQueueWorkers(): void {
     createWorker<TelegramFlashJob>(
       QUEUE_NAMES.TELEGRAM_FLASH,
       processTelegramFlash,
-      env.WORKER_CONCURRENCY_TELEGRAM_FLASH,
+      // Two independent recipient sends may wait on network, but share the unchanged global gate.
+      Math.max(2, env.WORKER_CONCURRENCY_TELEGRAM_FLASH),
     );
   }
   if (workerRoleConsumesQueue(workerRole, QUEUE_NAMES.TELEGRAM_SEND)) {
@@ -443,11 +443,7 @@ async function recoverInterruptedPipeline(closeStaleRuns = true): Promise<void> 
     stagedByBundle.set(notification.flashBundleId, listingIds);
   }
   for (const [flashBundleId, listingIds] of stagedByBundle) {
-    if (listingIds.length >= env.TELEGRAM_FLASH_BUNDLE_MIN_ITEMS) {
-      await createTelegramFlashBundle(flashBundleId, listingIds);
-    } else {
-      await releaseFlashListingsToCards(flashBundleId, listingIds);
-    }
+    await createTelegramFlashBundle(flashBundleId, listingIds);
   }
 
   const pendingFlashBundles = await selectPendingFlashDeliveryIntents(env.STARTUP_RECOVERY_LIMIT, now);
@@ -465,8 +461,8 @@ async function recoverInterruptedPipeline(closeStaleRuns = true): Promise<void> 
     await enqueue(
       QUEUE_NAMES.TELEGRAM_SEND,
       "send",
-      { listingId: notification.listingId },
-      { jobId: `telegram-recovery-${notification.listingId}-${Date.now()}` },
+      { listingId: notification.listingId, ...(notification.acceptedAt ? { chatId: notification.chatId } : {}) },
+      { priority: notification.acceptedAt ? 12 : 1, jobId: `telegram-recovery-${notification.listingId}-${notification.chatId}-${Date.now()}` },
     );
   }
 
@@ -475,7 +471,7 @@ async function recoverInterruptedPipeline(closeStaleRuns = true): Promise<void> 
       categoryKey: "vehicle.car",
       telegramNotifications: {
         some: {
-          status: { in: ["SENT", "UPDATED"] },
+          status: { in: ["SENT", "UPDATED", "DELIVERED"] },
           chatId: env.TELEGRAM_CHAT_ID,
         },
       },

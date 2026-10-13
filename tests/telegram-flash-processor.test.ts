@@ -18,6 +18,9 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../apps/worker/src/modules/telegram-service.js", () => ({
   sendListingLink: vi.fn(),
+  queueListingFirstSignal: vi.fn(),
+  telegramFlashRecipient: vi.fn(async () => "recipient-other"),
+  TelegramDeliveryDeferredError: class extends Error {},
   sendTelegramFlashBundle: mocks.sendTelegramFlashBundle,
   TelegramRateLimitError: class TelegramRateLimitError extends Error {
     constructor(message: string, public readonly retryAfterSeconds: number) {
@@ -45,9 +48,11 @@ describe("telegram.flash processor", () => {
     expect(mocks.events).toEqual([
       "send:flash",
       `enqueue:${QUEUE_NAMES.TELEGRAM_SEND}:listing-new`,
+      `enqueue:${QUEUE_NAMES.LISTING_ENRICH}:listing-new`,
       `enqueue:${QUEUE_NAMES.TELEGRAM_SEND}:listing-old`,
+      `enqueue:${QUEUE_NAMES.LISTING_ENRICH}:listing-old`,
     ]);
-    expect(mocks.enqueue.mock.calls.map((call) => call[3]?.jobId)).toEqual([
+    expect(mocks.enqueue.mock.calls.filter(call => call[0] === QUEUE_NAMES.TELEGRAM_SEND).map((call) => call[3]?.jobId)).toEqual([
       "telegram-flash-card-flash-1-listing-new",
       "telegram-flash-card-flash-1-listing-old",
     ]);

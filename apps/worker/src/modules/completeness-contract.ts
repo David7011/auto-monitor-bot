@@ -1,3 +1,6 @@
+import type { TelegramNotificationStatus } from "@amb/db";
+import { ACCEPTED_NOTIFICATION_STATUSES } from "./telegram-delivery-policy.js";
+
 export type CompletenessSeverity = "IMPOSSIBLE" | "RECOVERABLE";
 
 export type CompletenessIssueCode =
@@ -36,7 +39,7 @@ export type ObservationContractInput = {
   hasNormalizedSnapshot: boolean;
   hasListing: boolean;
   listingMode?: "LIVE" | "SHADOW" | string | null;
-  notificationStatus?: "PENDING" | "FLASH_PENDING" | "PROCESSING" | "RETRY_PENDING" | "SENT" | "UPDATED" | "FAILED" | null;
+  notificationStatus?: TelegramNotificationStatus | null;
   notificationAccepted: boolean;
   observationAccepted?: boolean;
 };
@@ -55,7 +58,7 @@ export function classifyObservationContract(input: ObservationContractInput): Ob
     return input.observationAccepted
       || (input.hasListing
         && input.notificationAccepted
-        && (input.notificationStatus === "SENT" || input.notificationStatus === "UPDATED"))
+        && input.notificationStatus != null && ACCEPTED_NOTIFICATION_STATUSES.includes(input.notificationStatus))
       ? "NOTIFIED"
       : "IMPOSSIBLE";
   }

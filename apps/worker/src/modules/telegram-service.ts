@@ -1,7 +1,7 @@
 import { Bot } from "grammy";
 import type { AbortSignal } from "abort-controller";
 import { Prisma, prisma, type TelegramNotificationStatus } from "@amb/db";
-import { telegramListingKeyboard } from "@amb/shared";
+import { isBackgroundDiscoveryLane, telegramListingKeyboard } from "@amb/shared";
 import { env } from "../env.js";
 import { log } from "../lib/log.js";
 import { redisConnection } from "../lib/queues.js";
@@ -18,8 +18,9 @@ import {
   splitTelegramMessageIds,
   type TelegramListingSnapshot,
 } from "./telegram-listing-format.js";
-import { telegramFlashBundleText } from "./telegram-flash-format.js";
 import { ensureListingSellerPhone } from "./seller-phone.js";
+import { queueTelegramFirstSignals } from "./telegram-first-signal.js";
+import { ACCEPTED_NOTIFICATION_STATUSES, RETRYABLE_DELIVERY_STATUSES, telegramRetryDueWhere } from "./telegram-delivery-policy.js";
 
 export type { TelegramListingSnapshot } from "./telegram-listing-format.js";
 
@@ -36,6 +37,7 @@ const TELEGRAM_GATE_PRIORITY = {
   MANUAL: 1,
   SYSTEM: 2,
   BACKFILL: 10,
+  DETAIL: 15,
   UPDATE: 20,
   RETENTION: 30,
 } as const;
@@ -136,46 +138,6 @@ export function isTelegramConfigured(): boolean {
   return Boolean(env.TELEGRAM_BOT_TOKEN);
 }
 
-/**
- * The configured chat remains the owner's backward-compatible recipient.
- * Every active /start subscriber is then added independently, so one blocked
- * chat cannot suppress delivery or acknowledgement for the others.
- */
-async function activeRecipientChatIds(): Promise<string[]> {
-  // Isolated legacy test stands deliberately expose only the old delegate set.
-  // Runtime uses generated Prisma with telegramSubscriber after the migration.
-  const subscriberStore = (prisma as typeof prisma & {
-    telegramSubscriber?: typeof prisma.telegramSubscriber;
-  }).telegramSubscriber;
-  if (!subscriberStore) return env.TELEGRAM_CHAT_ID ? [env.TELEGRAM_CHAT_ID] : [];
-  const subscribers = await subscriberStore.findMany({
-    where: { active: true },
-    select: { chatId: true },
-  });
-  return [...new Set([
-    ...(env.TELEGRAM_CHAT_ID ? [env.TELEGRAM_CHAT_ID] : []),
-    ...subscribers.map((subscriber) => subscriber.chatId),
-  ])];
-}
-
-async function ensureRecipientReceipts(listingId: string): Promise<string[]> {
-  const chatIds = await activeRecipientChatIds();
-  if (chatIds.length === 0) return [];
-  const subscriberStore = (prisma as typeof prisma & {
-    telegramSubscriber?: typeof prisma.telegramSubscriber;
-  }).telegramSubscriber;
-  // The legacy owner receipt is written atomically with the listing. Only
-  // extra public subscribers need receipts created here.
-  if (!subscriberStore) return chatIds;
-  const subscribers = await subscriberStore.findMany({ where: { active: true }, select: { chatId: true } });
-  if (subscribers.length === 0) return chatIds;
-  await prisma.telegramNotification.createMany({
-    data: subscribers.map((subscriber) => ({ listingId, chatId: subscriber.chatId, status: "PENDING" as const })),
-    skipDuplicates: true,
-  });
-  return chatIds;
-}
-
 export async function sendSystemAlert(text: string): Promise<void> {
   const telegramBot = getBot();
   const chatId = env.TELEGRAM_CHAT_ID;
@@ -249,19 +211,20 @@ export async function applyListingRetentionKeyboard(input: {
 }
 
 /**
- * Sends the first Telegram message with a compact lead card.
- * A short DB lease prevents duplicate sends when several workers touch the
- * same listing at the same time.
+ * Without a recipient, durably fan out first signals. A recipient-scoped job
+ * delivers its detail card under a separate receipt lease.
  */
 export async function sendListingLink(
   listingId: string,
   snapshot?: TelegramListingSnapshot,
   options: { signal?: AbortSignal; chatId?: string } = {},
 ): Promise<void> {
-  const chatIds = options.chatId ? [options.chatId] : await ensureRecipientReceipts(listingId);
-  for (const chatId of chatIds) {
-    await sendListingLinkToChat(listingId, snapshot, { ...options, chatId });
-  }
+  if (!options.chatId) return queueListingFirstSignal(listingId);
+  await sendListingLinkToChat(listingId, snapshot, { ...options, chatId: options.chatId });
+}
+
+export async function queueListingFirstSignal(listingId: string): Promise<void> {
+  await queueTelegramFirstSignals([listingId], `first-${listingId}`);
 }
 
 async function sendListingLinkToChat(
@@ -319,7 +282,7 @@ async function sendListingLinkToChat(
       return renewed.count === 1;
     }, async (assertOwned) => {
       const gateWaitMs = await listingSendGate.waitForSlot(
-        listingTelegramPriority(listing.discoveryLane),
+        reservation.acceptedAt ? TELEGRAM_GATE_PRIORITY.DETAIL : listingTelegramPriority(listing.discoveryLane),
         listingTelegramFreshnessRank(listing),
       );
       // Observability for the single global throttle on the send path: a
@@ -553,14 +516,17 @@ export async function stageListingForFlash(
   const text = initialMessageText(listing);
   const now = new Date();
   const existing = await prisma.telegramNotification.findFirst({ where: { listingId, chatId } });
-  if ((existing?.status === "SENT" || existing?.status === "UPDATED") && existing.messageId) return false;
-  if (existing?.status === "PROCESSING" && existing.leaseExpiresAt && existing.leaseExpiresAt > now) return false;
+  if (existing && (existing.messageId || ACCEPTED_NOTIFICATION_STATUSES.includes(existing.status))) return false;
+  if (existing && ["PROCESSING", "SENDING", "PERMANENT", "QUARANTINED"].includes(existing.status)) return false;
 
   try {
     if (existing) {
       const updated = await prisma.telegramNotification.updateMany({
         where: {
           id: existing.id,
+          messageId: null,
+          acceptedAt: null,
+          status: { notIn: [...ACCEPTED_NOTIFICATION_STATUSES, "SENDING", "PERMANENT", "QUARANTINED"] },
           OR: [
             { status: { not: "PROCESSING" } },
             { leaseExpiresAt: null },
@@ -599,27 +565,12 @@ export async function createTelegramFlashBundle(
   flashBundleId: string,
   listingIds: readonly string[],
 ): Promise<boolean> {
-  const uniqueIds = [...new Set(listingIds)];
-  if (uniqueIds.length < 2) return false;
-  const rows = await prisma.listing.findMany({
-    where: { id: { in: uniqueIds }, notificationMode: "LIVE" },
-    include: { matches: { include: { filter: { select: { name: true } } } } },
-  });
-  const byId = new Map(rows.map((row) => [row.id, row]));
-  const ordered = uniqueIds.map((id) => byId.get(id)).filter((row): row is NonNullable<typeof row> => Boolean(row));
-  if (ordered.length < 2) return false;
-  const text = telegramFlashBundleText(ordered);
-  await prisma.telegramFlashBundle.upsert({
-    where: { id: flashBundleId },
-    create: {
-      id: flashBundleId,
-      chatId: env.TELEGRAM_CHAT_ID || "not-configured",
-      listingIds: ordered.map((row) => row.id),
-      lastText: text,
-    },
-    update: {},
-  });
-  return true;
+  return queueTelegramFirstSignals(listingIds, flashBundleId);
+}
+
+export async function telegramFlashRecipient(flashBundleId: string): Promise<string> {
+  const bundle = await prisma.telegramFlashBundle.findUniqueOrThrow({ where: { id: flashBundleId }, select: { chatId: true } });
+  return bundle.chatId;
 }
 
 export async function releaseFlashListingsToCards(
@@ -655,6 +606,8 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
     return existing.listingIds;
   }
   if (["PROCESSING", "SENDING"].includes(existing.status) && existing.leaseExpiresAt && existing.leaseExpiresAt > now) return [];
+  if (["PERMANENT", "QUARANTINED"].includes(existing.status)) return [];
+  if (existing.nextAttemptAt && existing.nextAttemptAt > now) throw new TelegramDeliveryDeferredError(existing.nextAttemptAt);
 
   if (shouldQuarantineDelivery(existing.status, existing.attemptCount)) {
     const parked = await prisma.telegramFlashBundle.updateMany({
@@ -690,7 +643,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
   // A persisted bundle may predate the shadow guard. Never trust cached text
   // containing suppressed links; release eligible items as individual cards.
   const eligibleRows = await prisma.listing.findMany({
-    where: { id: { in: existing.listingIds }, notificationMode: "LIVE" }, select: { id: true },
+    where: { id: { in: existing.listingIds }, notificationMode: "LIVE" }, select: { id: true, discoveryLane: true },
   });
   const eligibleIds = new Set(eligibleRows.map((row) => row.id));
   if (eligibleIds.size !== existing.listingIds.length) {
@@ -700,7 +653,9 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
       lastErrorCode: "SHADOW_SUPPRESSED", lastErrorMessage: "Suppressed entries removed; live items released to individual cards",
     } });
     await releaseFlashListingsToCards(flashBundleId, liveIds);
-    return liveIds;
+    await prisma.telegramNotification.updateMany({ where: { flashBundleId, listingId: { in: liveIds }, acceptedAt: null }, data: { flashBundleId: null } });
+    await queueTelegramFirstSignals(liveIds, `filtered-${flashBundleId}`);
+    return [];
   }
 
   const reserved = await prisma.telegramFlashBundle.updateMany({
@@ -709,6 +664,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
       attemptCount: existing.attemptCount,
       messageId: null,
       status: { notIn: ["SENT", "DELIVERED", "PERMANENT", "QUARANTINED"] },
+      AND: [telegramRetryDueWhere(now)],
       OR: [
         { status: { notIn: ["PROCESSING", "SENDING"] } },
         { leaseExpiresAt: null },
@@ -729,7 +685,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
   if (reserved.count !== 1) return [];
 
   const telegramBot = getBot();
-  const chatId = env.TELEGRAM_CHAT_ID;
+  const chatId = existing.chatId;
   if (!telegramBot || !chatId) {
     await prisma.telegramFlashBundle.update({
       where: { id: flashBundleId },
@@ -758,7 +714,9 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
       });
       return renewed.count === 1;
     }, async (assertOwned) => {
-      const gateWaitMs = await listingSendGate.waitForSlot(TELEGRAM_GATE_PRIORITY.FLASH, Number.NEGATIVE_INFINITY);
+      const priority = eligibleRows.every(row => isBackgroundDiscoveryLane(row.discoveryLane))
+        ? TELEGRAM_GATE_PRIORITY.BACKFILL : TELEGRAM_GATE_PRIORITY.FLASH;
+      const gateWaitMs = await listingSendGate.waitForSlot(priority, Number.NEGATIVE_INFINITY);
       if (gateWaitMs > TELEGRAM_GATE_SLOW_WAIT_MS) {
         await log.warn(
           "telegram",
@@ -807,7 +765,7 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
     const nextAttemptAt = failureState === "PERMANENT"
       ? null
       : new Date(Date.now() + telegramDeliveryRetryDelayMs(existing.attemptCount + 1, retryAfterSeconds));
-    await prisma.telegramFlashBundle.updateMany({
+    const failedReservation = await prisma.telegramFlashBundle.updateMany({
       where: { id: flashBundleId, attemptCount: existing.attemptCount + 1, status: "SENDING", messageId: null },
       data: {
         status: failureState,
@@ -823,6 +781,12 @@ export async function sendTelegramFlashBundle(flashBundleId: string): Promise<st
         lastErrorMessage: message,
       },
     });
+    if (failureState === "PERMANENT" && failedReservation.count === 1) {
+      await prisma.telegramNotification.updateMany({
+        where: { flashBundleId, acceptedAt: null, messageId: null, status: "FLASH_PENDING" },
+        data: { status: "PERMANENT", nextAttemptAt: null, lastErrorCode: "TELEGRAM_FLASH_PERMANENT", lastErrorMessage: message },
+      });
+    }
     if (retryAfterSeconds) throw new TelegramRateLimitError(message, retryAfterSeconds);
     throw error;
   }
@@ -1177,9 +1141,17 @@ async function reserveTelegramNotification(
   if (existing?.messageId) {
     return { kind: "already-sent", acceptedAt: existing.acceptedAt ?? existing.sentAt };
   }
+  if (existing && ["FLASH_PENDING", "PERMANENT", "QUARANTINED"].includes(existing.status)) return { kind: "locked" };
+  // Due first signals waiting for a worker must precede costly detail albums.
+  // Active sends already compete in the gate; future retries cannot starve details.
+  if (existing?.acceptedAt && await prisma.telegramFlashBundle.findFirst({
+    where: { status: { in: [...RETRYABLE_DELIVERY_STATUSES] }, ...telegramRetryDueWhere(now) },
+    select: { id: true },
+  })) throw new TelegramDeliveryDeferredError(new Date(now.getTime() + 1_100));
   if ((existing?.status === "SENDING" || existing?.status === "PROCESSING") && existing.leaseExpiresAt && existing.leaseExpiresAt > now) {
     return { kind: "locked" };
   }
+  if (existing?.nextAttemptAt && existing.nextAttemptAt > now) throw new TelegramDeliveryDeferredError(existing.nextAttemptAt);
   if (existing && shouldQuarantineDelivery(existing.status, existing.attemptCount)) {
     await quarantineTelegramNotification(existing.id, existing.attemptCount, existing.status, {
       listingId,
@@ -1198,6 +1170,7 @@ async function reserveTelegramNotification(
           attemptCount: existing.attemptCount,
           messageId: null,
           status: { notIn: ["SENT", "UPDATED", "DELIVERED", "PERMANENT", "QUARANTINED"] },
+          AND: [telegramRetryDueWhere(now)],
           OR: [
             { status: { notIn: ["SENDING", "PROCESSING"] } },
             { leaseExpiresAt: null },
@@ -1259,7 +1232,7 @@ async function syncAcceptedFlashBundle(
   requestedAt: Date,
 ): Promise<void> {
   await prisma.$transaction([
-    prisma.telegramNotification.updateMany({ where: { flashBundleId, status: "FLASH_PENDING" }, data: { status: "PENDING", acceptedAt } }),
+    prisma.telegramNotification.updateMany({ where: { flashBundleId, status: { in: ["FLASH_PENDING", "PENDING"] }, acceptedAt: null }, data: { status: "PENDING", acceptedAt } }),
     prisma.listing.updateMany({
       where: { id: { in: listingIds }, status: { in: ["NEW", "MATCHED"] } },
       data: { status: "SENT" },
@@ -1282,6 +1255,12 @@ export class TelegramRateLimitError extends Error {
   constructor(message: string, readonly retryAfterSeconds: number) {
     super(message);
     this.name = "TelegramRateLimitError";
+  }
+}
+
+export class TelegramDeliveryDeferredError extends Error {
+  constructor(readonly retryAt: Date) {
+    super(`Telegram delivery deferred until ${retryAt.toISOString()}`);
   }
 }
 

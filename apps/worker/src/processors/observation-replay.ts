@@ -73,7 +73,9 @@ export async function processObservationReplay(job: ObservationReplayJob): Promi
       await ownedLease.assertOwnership();
       const state = await prisma.monitoringState.findUnique({ where: { id: "singleton" }, select: { status: true } });
       if (state?.status !== "RUNNING") break;
-      await enqueue(QUEUE_NAMES.TELEGRAM_SEND, "replay-delivery", { listingId: intent.listingId }, { deduplicationId: `pending-delivery-${intent.listingId}` });
+      await enqueue(QUEUE_NAMES.TELEGRAM_SEND, "replay-delivery",
+        { listingId: intent.listingId, ...(intent.acceptedAt ? { chatId: intent.chatId } : {}) },
+        { priority: intent.acceptedAt ? 12 : 1, deduplicationId: `pending-delivery-${intent.listingId}-${intent.chatId}` });
     }
     const cutoff = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
     const hydrated = await hydrateIncompleteObservations(cutoff, ownedLease);

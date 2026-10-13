@@ -11,7 +11,7 @@ import { log } from "../lib/log.js";
 import { env } from "../env.js";
 import { fetchOlxDetailListing } from "../collectors/olx.js";
 import {
-  sendListingLink,
+  queueListingFirstSignal,
   stageListingForFlash,
   TELEGRAM_SEND_LEASE_MS,
   type TelegramListingSnapshot,
@@ -379,8 +379,9 @@ async function ensureFirstNotification(
       ambiguousRetryDelayMs: TELEGRAM_SEND_LEASE_MS + 250,
     },
     {
-      sendInline: (signal) => sendListingLink(listingId, snapshot, { signal }),
-      enqueueEnrichment: () => enqueue(QUEUE_NAMES.LISTING_ENRICH, "enrich", { listingId }),
+      sendInline: () => queueListingFirstSignal(listingId),
+      // Admission is durable, not Telegram acceptance. Enrichment follows the flash processor.
+      enqueueEnrichment: async () => {},
       enqueueTelegram: (priority, delayMs) => enqueue(
         QUEUE_NAMES.TELEGRAM_SEND,
         "send",

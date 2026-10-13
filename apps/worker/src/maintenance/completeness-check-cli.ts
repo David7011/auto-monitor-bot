@@ -114,7 +114,11 @@ async function collectFacts(
       WHERE seen.decision = 'NOTIFIED'::"ObservationDecision"
         AND seen."telegramAcceptedAt" IS NULL
         AND seen."notifiedAt" IS NULL
-        AND (seen."listingId" IS NULL OR notification."acceptedAt" IS NULL OR notification.status NOT IN ('SENT', 'UPDATED'))
+        AND NOT EXISTS (
+          SELECT 1 FROM telegram_notifications accepted
+          WHERE accepted."listingId" = seen."listingId" AND accepted."acceptedAt" IS NOT NULL
+            AND accepted.status IN ('SENT', 'UPDATED', 'DELIVERED')
+        )
       ORDER BY seen."lastSeenAt" DESC
       LIMIT ${limit}
     `),

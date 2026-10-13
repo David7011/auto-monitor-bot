@@ -1,5 +1,6 @@
 import { acquireTelegramRetentionLock, Prisma, prisma } from "@amb/db";
 import type { TelegramNotificationStatus } from "@amb/db";
+import { ACCEPTED_NOTIFICATION_STATUSES } from "./telegram-delivery-policy.js";
 import type { ListingDiscoveryLane } from "@amb/shared";
 import { env } from "../env.js";
 import { log } from "../lib/log.js";
@@ -12,7 +13,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const MINIMUM_RETRY_DELAY_MS = 15 * 60 * 1000;
 const RATE_LIMIT_RETRY_DELAY_MS = 30 * 60 * 1000;
-const RETENTION_DELIVERED_STATUSES: TelegramNotificationStatus[] = ["SENT", "UPDATED", "DELIVERED"];
+const RETENTION_DELIVERED_STATUSES: TelegramNotificationStatus[] = ACCEPTED_NOTIFICATION_STATUSES;
 
 function hasDeliveredStatus(status: string): boolean {
   return RETENTION_DELIVERED_STATUSES.some((delivered) => delivered === status);

@@ -277,26 +277,12 @@ export async function dispatchListings(
   });
   if (flashPlan.enabled) {
     inlineBudget.used = Math.max(inlineBudget.used, env.FAST_INLINE_LISTING_LIMIT_PER_RUN);
-    const flashResults = await dispatchFlashListings(flashPlan.flash, filterIds, persistedStates);
-    const remainderResults = await mapWithConcurrency(
-      flashPlan.remainder,
-      env.FAST_INLINE_LISTING_CONCURRENCY,
-      async (listing) => ({
-        listing,
-        // Keep an oversized burst's tail behind the durable flash header. The
-        // configured flash cap protects Telegram's 4096-character limit; this
-        // delay prevents tail cards from taking an earlier global send slot.
-        result: await dispatchListing(
-          listing,
-          filterIds,
-          lane,
-          false,
-          5_000,
-          persistedStates.get(observationIdentity(listing)),
-        ),
-      }),
-    );
-    return [...flashResults, ...remainderResults];
+    const results: Array<{ listing: NormalizedListing; result: ListingProcessingResult | undefined }> = [];
+    const chunkSize = flashPlan.flash.length;
+    for (let offset = 0; offset < listings.length; offset += chunkSize) {
+      results.push(...await dispatchFlashListings(listings.slice(offset, offset + chunkSize), filterIds, persistedStates));
+    }
+    return results;
   }
 
   const availableInlineSlots = isBackgroundDiscoveryLane(lane)
@@ -392,18 +378,6 @@ async function dispatchFlashListings(
   if (stagedIds.length >= env.TELEGRAM_FLASH_BUNDLE_MIN_ITEMS) {
     const created = await createTelegramFlashBundle(flashBundleId, stagedIds);
     if (created) {
-      await enqueue(
-        QUEUE_NAMES.TELEGRAM_FLASH,
-        "flash",
-        { flashBundleId },
-        { priority: TELEGRAM_SEND_PRIORITY, jobId: `telegram-flash-${flashBundleId}` },
-      ).catch((error) => {
-        void log.warn(
-          "telegram-flash",
-          "Flash bundle persisted but Redis enqueue failed; pipeline recovery will retry",
-          error instanceof Error ? error.message : String(error),
-        ).catch(() => undefined);
-      });
       return results;
     }
   }

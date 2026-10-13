@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => {
     id: "notification-1", listingId: "listing-1", status: "PENDING", messageId: null as string | null,
     acceptedAt: null as Date | null, sentAt: null as Date | null, leaseExpiresAt: null as Date | null, attemptCount: 0,
   };
-  const flash = { ...receipt, id: "flash-1", listingIds: ["listing-1"], lastText: "a listing" };
+  const flash = { ...receipt, id: "flash-1", chatId: "recipient-other", listingIds: ["listing-1"], lastText: "a listing" };
   const notificationFind = vi.fn(async () => ({ ...receipt }));
   const flashFind = vi.fn(async () => ({ ...flash }));
   const updateReceipt = vi.fn(async (args: { data: object }) => Object.assign(receipt, args.data));
@@ -21,7 +21,7 @@ const mocks = vi.hoisted(() => {
     return { count: 1 };
   }
   return {
-    receipt, flash, notificationFind, flashFind, updateReceipt, updateFlash, waitGate: vi.fn(async () => {}),
+    receipt, flash, notificationFind, flashFind, updateReceipt, updateFlash, pendingFlash: vi.fn(async (): Promise<{ id: string } | null> => null), waitGate: vi.fn(async () => {}),
     send: vi.fn(async () => ({ message_id: 123 })),
     transaction: vi.fn(async (operations: unknown[]) => Promise.all(operations)),
     notificationUpdateMany: vi.fn(async (args: Parameters<typeof updateMatching>[1]) => updateMatching(receipt, args)),
@@ -36,7 +36,7 @@ vi.mock("../packages/db/src/index.js", () => ({
   Prisma: { PrismaClientKnownRequestError: class extends Error {} },
   prisma: {
     telegramNotification: { findUnique: mocks.notificationFind, update: mocks.updateReceipt, updateMany: mocks.notificationUpdateMany },
-    telegramFlashBundle: { findUnique: mocks.flashFind, update: mocks.updateFlash, updateMany: mocks.flashUpdateMany },
+    telegramFlashBundle: { findUnique: mocks.flashFind, findFirst: mocks.pendingFlash, update: mocks.updateFlash, updateMany: mocks.flashUpdateMany },
     listing: { update: mocks.listingUpdate, updateMany: mocks.listingUpdateMany, findMany: vi.fn(async () => [{ id: "listing-1" }]) },
     sourceSeenListing: { updateMany: mocks.observationUpdate },
     $transaction: mocks.transaction,
@@ -69,25 +69,59 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.waitGate.mockReset().mockResolvedValue(undefined);
+    mocks.pendingFlash.mockReset().mockResolvedValue(null);
     mocks.notificationFind.mockImplementation(async () => ({ ...mocks.receipt }));
     mocks.flashFind.mockImplementation(async () => ({ ...mocks.flash }));
     mocks.transaction.mockReset().mockImplementation(async (operations) => Promise.all(operations));
     for (const row of [mocks.receipt, mocks.flash]) Object.assign(row, {
-      status: "PENDING", messageId: null, acceptedAt: null, sentAt: null, leaseExpiresAt: null, attemptCount: 0,
+      status: "PENDING", messageId: null, acceptedAt: null, sentAt: null, leaseExpiresAt: null, nextAttemptAt: null, attemptCount: 0,
     });
   });
 
   it("retries the journal after a confirmed card without sending it again", async () => {
     mocks.transaction.mockRejectedValueOnce(new Error("journal connection failed"));
-    await expect(sendListingLink("listing-1", snapshot)).rejects.toThrow("journal connection failed");
+    await expect(sendListingLink("listing-1", snapshot, { chatId: "test" })).rejects.toThrow("journal connection failed");
     expect(mocks.receipt.status).toBe("DELIVERED");
     expect(mocks.receipt.messageId).toBe("123");
-    await sendListingLink("listing-1", snapshot);
+    await sendListingLink("listing-1", snapshot, { chatId: "test" });
     expect(mocks.send).toHaveBeenCalledOnce();
     expect(mocks.transaction).toHaveBeenCalledTimes(2);
     expect(mocks.listingUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ status: { in: ["NEW", "MATCHED"] } }),
     }));
+  });
+
+  it.each(["card", "flash"])("honors durable nextAttemptAt for a direct %s retry", async kind => {
+    const row = kind === "card" ? mocks.receipt : mocks.flash;
+    Object.assign(row, { status: "TRANSIENT", nextAttemptAt: new Date(Date.now() + 60_000) });
+    await expect(kind === "card" ? sendListingLink("listing-1", snapshot, { chatId: "test" }) : sendTelegramFlashBundle("flash-1"))
+      .rejects.toThrow("deferred until");
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(row.attemptCount).toBe(0);
+  });
+
+  it("defers details without consuming an attempt while a first signal is queued", async () => {
+    mocks.receipt.acceptedAt = new Date();
+    mocks.pendingFlash.mockResolvedValueOnce({ id: "pending-first-signal" });
+    await expect(sendListingLink("listing-1", snapshot, { chatId: "test" })).rejects.toThrow("deferred until");
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.receipt.attemptCount).toBe(0);
+  });
+
+  it("uses detail gate priority after first acceptance and keeps the original acceptance timestamp", async () => {
+    const acceptedAt = new Date(Date.now() - 1_000);
+    mocks.receipt.acceptedAt = acceptedAt;
+    await sendListingLink("listing-1", snapshot, { chatId: "test" });
+    expect(mocks.waitGate).toHaveBeenCalledWith(15, expect.any(Number));
+    expect(mocks.receipt.acceptedAt).toEqual(acceptedAt);
+    expect(mocks.notificationUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ AND: [expect.objectContaining({ OR: expect.any(Array) })] }),
+    }));
+  });
+
+  it("sends a flash to its durable recipient instead of the configured owner", async () => {
+    await sendTelegramFlashBundle("flash-1");
+    expect(mocks.send).toHaveBeenCalledWith("recipient-other", expect.any(String), expect.any(Object));
   });
 
   it("cannot reclaim a card that another attempt sent between read and CAS", async () => {
@@ -96,7 +130,7 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
       Object.assign(mocks.receipt, { status: "SENT", messageId: "concurrent", acceptedAt: new Date() });
       return stale;
     });
-    await sendListingLink("listing-1", snapshot);
+    await sendListingLink("listing-1", snapshot, { chatId: "test" });
     expect(mocks.send).not.toHaveBeenCalled();
     expect(mocks.receipt.messageId).toBe("concurrent");
   });
@@ -107,7 +141,7 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
       leaseExpiresAt: new Date(Date.now() + 60_000),
     });
 
-    await sendListingLink("listing-1", snapshot);
+    await sendListingLink("listing-1", snapshot, { chatId: "test" });
 
     expect(mocks.send).not.toHaveBeenCalled();
     expect(mocks.notificationUpdateMany).not.toHaveBeenCalled();
@@ -119,7 +153,7 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
       leaseExpiresAt: new Date(Date.now() - 1),
     });
 
-    await sendListingLink("listing-1", snapshot);
+    await sendListingLink("listing-1", snapshot, { chatId: "test" });
 
     expect(mocks.notificationUpdateMany).toHaveBeenCalled();
     expect(mocks.send).toHaveBeenCalledOnce();
@@ -133,7 +167,7 @@ describe("Telegram acceptance receipt survives local DB projection failures", ()
       row.status = "PROCESSING";
       row.leaseExpiresAt = new Date(Date.now() + 60_000);
     });
-    const send = kind === "card" ? sendListingLink("listing-1", snapshot) : sendTelegramFlashBundle("flash-1");
+    const send = kind === "card" ? sendListingLink("listing-1", snapshot, { chatId: "test" }) : sendTelegramFlashBundle("flash-1");
     await expect(send).rejects.toThrow(/lease/i);
     expect(mocks.send).not.toHaveBeenCalled();
     expect(row.status).toBe("PROCESSING");

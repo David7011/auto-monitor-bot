@@ -57,6 +57,7 @@ vi.mock("../apps/worker/src/env.js", () => ({
 }));
 vi.mock("../apps/worker/src/modules/telegram-service.js", () => ({
   sendListingLink: mocks.sendListingLink,
+  queueListingFirstSignal: mocks.sendListingLink,
   stageListingForFlash: mocks.stageListingForFlash,
   TELEGRAM_SEND_LEASE_MS: 60_000,
 }));
@@ -246,7 +247,7 @@ describe("listing.detected glue invariants", () => {
         telegramNotifications: { create: expect.objectContaining({ status: "PENDING" }) },
       }),
     }));
-    expect(mocks.enqueue).toHaveBeenCalledWith("listing.enrich", "enrich", { listingId: "listing-1" });
+    expect(mocks.enqueue).not.toHaveBeenCalledWith("listing.enrich", "enrich", { listingId: "listing-1" });
   });
 
   it("suppresses Telegram for shadow-only matches while keeping durable evidence", async () => {
@@ -270,7 +271,7 @@ describe("listing.detected glue invariants", () => {
       listingId: "listing-existing",
     });
     expect(mocks.listingUpdate).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "listing-existing" } }));
-    expect(mocks.sendListingLink).toHaveBeenCalledWith("listing-existing", undefined, expect.objectContaining({ signal: expect.anything() }));
+    expect(mocks.sendListingLink).toHaveBeenCalledWith("listing-existing");
     expect(mocks.listingCreate).not.toHaveBeenCalled();
   });
 

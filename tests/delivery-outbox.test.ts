@@ -60,7 +60,7 @@ describe("durable delivery outbox", () => {
         OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
         listing: { notificationMode: "LIVE", status: { notIn: ["IGNORED", "DUPLICATE"] } },
       },
-      select: { listingId: true },
+      select: { listingId: true, chatId: true, acceptedAt: true },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       take: 17,
     });
