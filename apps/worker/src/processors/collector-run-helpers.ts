@@ -482,7 +482,7 @@ export async function retryLockCollision(job: CollectorRunJob, lane: ListingDisc
 
   const queue = collectorQueueForJob(job, lane);
   let delay = env.COLLECTOR_LOCK_RETRY_DELAY_MS * (retryCount + 1);
-  if (job.source === "OLX" && job.trigger === "RECOVERY" && lane === "BACKFILL") {
+  if ((job.source === "OLX" || job.source === "AUTO_RIA") && job.trigger === "RECOVERY" && lane === "BACKFILL") {
     // A killed process leaves its lease until TTL expiry. One short retry
     // cannot recover that case and then completed-job dedupe swallows future
     // signals. Wait for the actual lease once; do not delete another owner's
@@ -526,15 +526,15 @@ export async function scheduledJobState(
     };
   }
   if (
-    job.source === "OLX"
+    (job.source === "OLX" || job.source === "AUTO_RIA")
     && trigger === "RECOVERY"
     && options.checkRecoveryPending !== false
   ) {
     const pendingRecoveryCount = await prisma.sourceSearchState.count({
-      where: { source: "OLX", coverageRecoveryPending: true },
+      where: { source: job.source, coverageRecoveryPending: true },
     });
     if (pendingRecoveryCount === 0) {
-      return { stale: true, reason: "OLX coverage recovery is no longer pending" };
+      return { stale: true, reason: `${job.source} coverage recovery is no longer pending` };
     }
   }
   return { stale: false, reason: null };
@@ -580,7 +580,9 @@ export function scanOptions(
       : scanDurationMs(lane);
   return {
     lane,
-    maxPages: coverageOnly ? 1 : lane === "BACKFILL" ? budget.maxPages : 1,
+    maxPages: coverageOnly ? 1 : lane === "BACKFILL"
+      ? job.source === "AUTO_RIA" && env.AUTO_RIA_ACCESS_MODE === "public" ? Math.max(2, Math.min(3, budget.maxPages)) : budget.maxPages
+      : 1,
     maxCandidates: coverageOnly
       ? env.REALTIME_MAX_CANDIDATES
       : lane === "BACKFILL"
