@@ -502,6 +502,18 @@ export class MonitoringOrchestrator {
       return { deferred: true };
     }
     for (const source of sources) {
+      if (source.source === "AUTO_RIA" && env.AUTO_RIA_ACCESS_MODE === "public") {
+        // Retry durable catch-up after crash/restart even if realtime already moved its boundary.
+        const due = await prisma.sourceSearchState.count({ where: { source: "AUTO_RIA",
+          coverageRecoveryPending: true, OR: [{ recoveryNextAttemptAt: null }, { recoveryNextAttemptAt: { lte: now } }] } });
+        if (due && !(source.pausedUntil && source.pausedUntil > now)
+          && await this.backgroundGenerationCurrent(generation)) {
+          await enqueue(QUEUE_NAMES.COLLECTOR_BACKFILL, "collect", {
+            sourceId: source.id, source: source.source, trigger: "RECOVERY", lane: "BACKFILL",
+            monitoringGeneration: generation, scheduledAt: now.toISOString(),
+          }, { jobId: `collector-recovery-AUTO_RIA-${generation}-${now.getTime()}` });
+        }
+      }
       if (!BACKFILL_SOURCES.has(source.source)) continue;
       if (source.pausedUntil && source.pausedUntil > now) continue;
       if (source.source === "OLX") await rearmOlxRecoveryForChangedCapability(now);

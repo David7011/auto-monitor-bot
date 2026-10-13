@@ -94,6 +94,7 @@ export type SourceSearchContext = {
 };
 
 export type SourceSearchState = {
+  autoRiaPublicRecoveryCursor?: unknown;
   id: string;
   fingerprint: string;
   categoryKey?: MarketplaceCategoryKey;
@@ -135,6 +136,7 @@ export type CollectorCoverageStateUpdate = {
 };
 
 export type CollectorResult = {
+  autoRiaPublicRecoveryCursor?: import("./auto-ria-public-recovery.js").AutoRiaPublicRecoveryCursor;
   listings: NormalizedListing[];
   /** IDs safely classified during this scan; incomplete/overflow candidates must not be included. */
   scannedExternalIds?: string[];

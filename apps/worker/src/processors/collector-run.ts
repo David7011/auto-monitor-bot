@@ -1,4 +1,5 @@
 import { prisma } from "@amb/db";
+import { autoRiaPublicOutage } from "../collectors/auto-ria-public-recovery.js";
 import {
   QUEUE_NAMES,
   backoffDelayMs,
@@ -453,6 +454,11 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         recoveryOverlapPage: result.recoveryOverlapPage,
         recoveryOverlapExternalIds: result.recoveryOverlapExternalIds,
         recoveryNoProgressReason: result.recoveryNoProgressReason,
+        autoRiaPublicRecoveryCursor: result.autoRiaPublicRecoveryCursor,
+        autoRiaPublicOutage: source === "AUTO_RIA" && env.AUTO_RIA_ACCESS_MODE === "public"
+          && lane === "REALTIME" && autoRiaPublicOutage({ startedAt,
+            lastSuccessfulScanAt: state.lastSuccessfulScanAt,
+            intervalSeconds: sourceRecord.intervalSeconds, jitterSeconds: sourceRecord.jitterSeconds }),
         advanceSuccessBoundary: !(
           source === "OLX"
           && (result.parserHealth === "DEGRADED" || (result.limited && (result.observedCount ?? 0) === 0))
@@ -487,7 +493,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         });
         if (shouldAlert) {
           await safeSystemAlert([
-            "OLX: историческое окно не может быть доказано публичным источником.",
+            `${source}: историческое окно не может быть доказано публичным источником.`,
             `Причина: ${stateUpdate.recoveryUnresolvedReason ?? "UNKNOWN"}.`,
             `Граница: ${stateUpdate.requiredCutoffAt?.toISOString() ?? "unknown"}.`,
             "Realtime продолжает работать; повторный глубокий проход отключён до изменения возможностей источника или ручного retry.",

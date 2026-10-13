@@ -41,6 +41,7 @@ export function planCoverageRecovery(options: {
   contextCutoffAt?: Date;
   coverageGap: boolean;
   knownIdsReset: boolean;
+  autoRiaPublicOutage?: boolean;
   outageSchedule?: OlxOutageSchedule;
   lookbackHours: number;
   safetyOverlapSeconds: number;
@@ -51,7 +52,7 @@ export function planCoverageRecovery(options: {
   persistedBoundaryAt: Date | null;
   requiredCutoffAt: Date | null;
 } {
-  const outageDetected = detectOlxScheduledOutage({
+  const outageDetected = (options.source === "AUTO_RIA" && options.lane === "REALTIME" && Boolean(options.autoRiaPublicOutage)) || detectOlxScheduledOutage({
     source: options.source,
     lane: options.lane,
     lastSuccessfulScanAt: options.lastSuccessfulScanAt,
@@ -336,6 +337,7 @@ export async function loadSourceSearchState(context: SourceSearchContext): Promi
 
   return {
     id: record.id,
+    autoRiaPublicRecoveryCursor: record.backfillCursor,
     fingerprint: record.fingerprint,
     categoryKey: marketplaceCategoryKey(record.categoryKey),
     initialSyncCompletedAt: record.initialSyncCompletedAt ?? undefined,
@@ -568,6 +570,8 @@ export async function markSourceSearchSuccess(
     recoveryOverlapPage?: number;
     recoveryOverlapExternalIds?: string[];
     recoveryNoProgressReason?: string;
+    autoRiaPublicRecoveryCursor?: import("../collectors/auto-ria-public-recovery.js").AutoRiaPublicRecoveryCursor;
+    autoRiaPublicOutage?: boolean;
     /** Do not move the durable success boundary on semantically suspicious responses. */
     advanceSuccessBoundary?: boolean;
     parserHealth?: "HEALTHY" | "DEGRADED" | "UNKNOWN";
@@ -604,7 +608,7 @@ export async function markSourceSearchSuccess(
   if (options.parserHealth === "DEGRADED" || options.advanceSuccessBoundary === false) {
     options = { ...options, advanceSuccessBoundary: false, coverageVerified: false,
       cutoffReached: false, newestFirstVerified: false, initialSyncCompleted: false,
-      coverageUnresolvedReason: undefined };
+      coverageUnresolvedReason: context.source === "AUTO_RIA" ? options.coverageUnresolvedReason : undefined };
   }
   const now = new Date();
   const sorted = sortListingsNewestFirst(listings);
@@ -665,6 +669,7 @@ export async function markSourceSearchSuccess(
       contextCutoffAt: context.publishedAfter,
       coverageGap: Boolean(options.coverageGap),
       knownIdsReset: knownIdRotation.reset,
+      autoRiaPublicOutage: options.autoRiaPublicOutage,
       outageSchedule: options.outageSchedule,
       lookbackHours: env.OLX_OUTAGE_RECOVERY_LOOKBACK_HOURS,
       safetyOverlapSeconds: env.OLX_OUTAGE_SAFETY_OVERLAP_SECONDS,
@@ -698,7 +703,7 @@ export async function markSourceSearchSuccess(
     const frozenRecoveryAnchors = openingRecoveryWindow
       ? current.knownExternalIds.slice(0, MAX_COVERAGE_ANCHOR_IDS)
       : current.coverageAnchorExternalIds;
-    const newestFirstVerifiedAt = options.newestFirstVerified
+    const newestFirstVerifiedAt = context.source === "AUTO_RIA" && env.AUTO_RIA_ACCESS_MODE === "public" ? null : options.newestFirstVerified
       ? current.newestFirstVerifiedAt ?? now
       : current.newestFirstVerifiedAt;
     const progress = lane === "BACKFILL" && recoveryWasRequested
@@ -710,7 +715,7 @@ export async function markSourceSearchSuccess(
         })
       : null;
     const recoveryNextAttemptAt = recoveryRequired
-      ? progress ? new Date(now.getTime() + progress.retryDelayMs) : current.recoveryNextAttemptAt
+      ? progress ? new Date(now.getTime() + Math.max(context.source === "AUTO_RIA" ? 5_000 : 0, progress.retryDelayMs)) : current.recoveryNextAttemptAt
       : null;
     // A late replay must not replace the overlap attached to a newer cursor.
     const canUpdateOverlap = Boolean(progress
@@ -900,7 +905,7 @@ export async function markSourceSearchSuccess(
               lastPage: recoveryRequired || recoveryUnresolved
                 ? Math.max(1, progress?.progressPage ?? current.recoveryProgressPage ?? current.lastPage ?? 1)
                 : 0,
-              backfillCursor: cursorJson(
+              backfillCursor: options.autoRiaPublicRecoveryCursor ? cleanJson(options.autoRiaPublicRecoveryCursor) : cursorJson(
                 "backfill",
                 now,
                 batchOldestAt,
@@ -915,8 +920,8 @@ export async function markSourceSearchSuccess(
             }),
         newestFirstVerifiedAt,
         ...options.coverageStateUpdate,
-        ...(openingRecoveryWindow ? { lastPage: 1 } : {}),
-        ...(lane === "COVERAGE" || (context.source === "OLX" && lane !== "REALTIME") || options.advanceSuccessBoundary === false
+        ...(openingRecoveryWindow ? { lastPage: 1, ...(context.source === "AUTO_RIA" ? { backfillCursor: Prisma.JsonNull } : {}) } : {}),
+        ...(lane === "COVERAGE" || ((context.source === "OLX" || context.source === "AUTO_RIA") && lane !== "REALTIME") || options.advanceSuccessBoundary === false
           ? {}
           : { lastSuccessfulScanAt: now }),
         initialSyncCompletedAt: options.initialSyncCompleted && options.advanceSuccessBoundary !== false
@@ -954,8 +959,8 @@ export async function markSourceSearchSuccess(
   }
   if (result.outageDetected) {
     await log.warn(
-      "olx-coverage",
-      "OLX monitoring resumed after an outage; a bounded continuity recovery was requested",
+      "source-coverage",
+      `${context.source} monitoring resumed after an outage; a bounded continuity recovery was requested`,
     );
   }
   return result;

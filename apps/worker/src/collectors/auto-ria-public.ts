@@ -20,6 +20,7 @@ import { inferBargainPossible, inferCustomsCleared, isBlockedHtml, parseEnginePo
 import { sourceHttpClient } from "./source-http-client.js";
 import { getSourceSessionCookie } from "./source-sessions.js";
 import { env } from "../env.js";
+import { collectPublicRecovery } from "./auto-ria-public-recovery.js";
 
 const PUBLIC_BASE = "https://auto.ria.com";
 const PUBLIC_LIMITATION = "AUTO.RIA public: новизна определяется первым появлением; точное время публикации и полнота исторического окна не доказаны";
@@ -56,9 +57,11 @@ export class AutoRiaPublicCollector implements SourceCollector {
     let requestCount = 0;
     let pageCount = 0;
     let parserDegraded = false;
+    let coverageGap = false;
+    let recoveryResult: Awaited<ReturnType<typeof collectPublicRecovery>> | undefined;
 
     type IngestOutcome =
-      | { kind: "ok"; empty: boolean }
+      | { kind: "ok"; empty: boolean; ids: string[]; complete: boolean }
       | { kind: "blocked"; result: CollectorResult };
     const ingestSearchPage = async (url: string): Promise<IngestOutcome> => {
       const sessionCookie = await getSourceSessionCookie("AUTO_RIA");
@@ -78,12 +81,21 @@ export class AutoRiaPublicCollector implements SourceCollector {
       }
       pageCount += 1;
       const parsed = parseAutoRiaPublicCards(response.body);
+      if (scan.lane === "REALTIME" && state.initialSyncCompletedAt && parsed.cards.length >= 20
+        && parsed.cards.filter(card => state.knownExternalIds.has(String(card.id))).length < 3) coverageGap = true;
       const parsedAt = new Date();
       if (parsed.cards.length === 0 || parsed.malformedCount > 0) {
         parserDegraded = true;
         semanticWarnings.push(`AUTO.RIA public card schema unverified: ${parsed.cards.length} cards, ${parsed.malformedCount} malformed`);
       }
       const candidates: NormalizedListing[] = [];
+      // Recovery catch-up must not starve shifted ads behind a per-pass
+      // budget: an overlap re-read page can carry an ad that moved in after an
+      // upstream deletion, and the loop budget (canContinue) already bounds
+      // requests. Normalize everything fetched here; VERIFIED still requires
+      // the window-level proof paths, so a fully classified page is progress,
+      // never proof.
+      const recoveryCatchUp = scan.lane === "BACKFILL" && state.coverageRecoveryPending;
       for (const card of parsed.cards) {
         const id = String(card.id);
         if (observedIds.has(id)) continue;
@@ -92,8 +104,8 @@ export class AutoRiaPublicCollector implements SourceCollector {
           classifiedIds.add(id);
           continue;
         }
-        if (listings.length >= maxCandidates) continue;
-        const listing = normalizePublicCard(card, new Date(), scan.lane === "REALTIME");
+        if (!recoveryCatchUp && listings.length >= maxCandidates) continue;
+        const listing = normalizePublicCard(card, new Date(), true);
         if (!listing) {
           parserDegraded = true;
           continue;
@@ -115,9 +127,30 @@ export class AutoRiaPublicCollector implements SourceCollector {
         for (const listing of candidates) listing.hotCandidateAt = hotCandidateAt;
         await scan.onHotCandidates(candidates);
       }
-      return { kind: "ok", empty: parsed.cards.length === 0 };
+      return { kind: "ok", empty: parsed.cards.length === 0,
+        ids: parsed.cards.map(card => String(card.id)),
+        complete: parsed.malformedCount === 0 && parsed.cards.every(card => classifiedIds.has(String(card.id))) };
     };
 
+    if (scan.lane === "BACKFILL" && state.coverageRecoveryPending) {
+      let blockedResult: CollectorResult | undefined;
+      const urls = [...new Set([buildAutoRiaPublicSearchUrl(context), ...savedAutoRiaSearchUrls()])];
+      recoveryResult = await collectPublicRecovery({
+        urls, cursor: state.autoRiaPublicRecoveryCursor,
+        anchors: state.coverageAnchorExternalIds ?? new Set(),
+        maxRequests: Math.min(3, Math.max(1, scan.maxPages)),
+        canContinue: () => !scanDeadlineReached(scan) && listings.length < maxCandidates,
+        ingest: async url => {
+          const outcome = await ingestSearchPage(url);
+          if (outcome.kind === "blocked") {
+            blockedResult = outcome.result;
+            return { ids: [], complete: false, blocked: true };
+          }
+          return outcome;
+        },
+      });
+      if (blockedResult) return blockedResult;
+    } else {
     for (let page = 0; page < maxPages; page += 1) {
       if (scanDeadlineReached(scan)) {
         semanticWarnings.push("AUTO.RIA public scan deadline reached");
@@ -128,7 +161,7 @@ export class AutoRiaPublicCollector implements SourceCollector {
       if (outcome.empty || listings.length >= maxCandidates) break;
     }
     const savedUrls = savedAutoRiaSearchUrls();
-    if (savedUrls.length > 0) {
+    if (savedUrls.length > 0 && !scanDeadlineReached(scan) && listings.length < maxCandidates) {
       // The first saved URL is the protection sentinel: fetched alone so a
       // blocked origin stops the scan exactly like the sequential scan did.
       // The rest run concurrently (no shared coordinator on this source),
@@ -146,17 +179,32 @@ export class AutoRiaPublicCollector implements SourceCollector {
         semanticWarnings.push("AUTO.RIA public scan deadline reached");
       }
     }
+    }
     return {
       listings,
       scannedExternalIds: [...classifiedIds],
       observedCount: observedIds.size,
       requestCount,
       pageCount,
+      coverageGap,
       limited: true,
       limitedReason: PUBLIC_LIMITATION,
       semanticWarnings,
       parserHealth: parserDegraded ? "DEGRADED" : "HEALTHY",
       parserHealthDetails: { strategy: "PUBLIC_HTTP", exactPublicationTimestamp: false, continuityVerified: false },
+      ...(recoveryResult ? {
+        autoRiaPublicRecoveryCursor: recoveryResult.cursor,
+        recoveryProgressPage: (state.recoveryProgressPage ?? 1) + recoveryResult.progressed,
+        recoveryNoProgressReason: recoveryResult.noProgressReason,
+        coverageUnresolvedReason: recoveryResult.reason
+          ?? ((state.recoveryConsecutiveNoProgress ?? 0) >= 2 && recoveryResult.noProgressReason === "PUBLIC_OVERLAP_MOVED"
+            ? "UNSTABLE_PAGINATION" as const : undefined),
+        coverageAttemptGeneration: "auto-ria-public-catchup-v1",
+        coverageMetrics: { kind: "auto-ria-public-catchup", feedCount: recoveryResult.cursor.feeds.length,
+          completedFeeds: recoveryResult.cursor.feeds.filter(feed => feed.done).length,
+          maxDepth: Math.max(...recoveryResult.cursor.feeds.map(feed => feed.nextPage)),
+          continuityVerified: false, progress: recoveryResult.progressed },
+      } : {}),
     };
   }
 }

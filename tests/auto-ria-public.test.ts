@@ -184,4 +184,35 @@ describe("AUTO.RIA public search", () => {
     expect(request).toHaveBeenCalledTimes(2);
     expect(request.mock.calls.map((call) => String(call[0]))).not.toContain("https://saved.test/ok");
   });
+
+  it("processes a shifted ad from an overlap re-read even over the pass budget", async () => {
+    // Offset shift: record A was deleted upstream, page 0 now holds [B, X, C]
+    // where C is new. B is known from the previous pass; X fills the
+    // single-slot pass budget. C must still reach processing (no VERIFIED
+    // claim is made here — that stays with the window-level proof paths).
+    env.AUTO_RIA_SAVED_SEARCH_URLS = "";
+    const card = (id: number) => '"advertisementCard":' + JSON.stringify({ data: {
+      id, type: "Auto", link: `/auto_test_${id}.html`, title: { content: `Car ${id} 2010` },
+    } });
+    const request = vi.spyOn(sourceHttpClient, "text").mockImplementation(async () => ({
+      requestId: "test", status: 200, classification: "SUCCESS", contentType: "text/html",
+      body: [222, 333, 444].map(card).join("\n"),
+    }));
+    const mainUrl = buildAutoRiaPublicSearchUrl(context);
+    const state = {
+      id: "test", fingerprint: "test", knownExternalIds: new Set(["222"]),
+      coverageRecoveryPending: true,
+      coverageAnchorExternalIds: new Set<string>(),
+      autoRiaPublicRecoveryCursor: { version: 1, feedIndex: 0,
+        feeds: [{ url: mainUrl, nextPage: 1, overlapIds: ["222"], done: false }] },
+    };
+    const collector = new AutoRiaPublicCollector();
+    const result = await collector.collect(context, state, {
+      lane: "BACKFILL", maxPages: 3, maxCandidates: 1, deadlineAt: new Date(Date.now() + 20_000),
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result.listings.map((listing) => listing.externalId).sort()).toEqual(["333", "444"]);
+    expect(result.autoRiaPublicRecoveryCursor?.feeds[0]?.nextPage).toBe(1);
+    expect(result.coverageUnresolvedReason).toBeUndefined();
+  });
 });
