@@ -36,7 +36,9 @@ export async function queueTelegramFirstSignals(listingIds: readonly string[], b
   const work = await prisma.$transaction(async tx => {
     // Do not hold listing row locks: acceptance updates receipts then listing projections.
     // A separate admission lock avoids reversing that lock order during a concurrent retry.
-    for (const id of ids) await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('telegram-first-signal'), hashtext(${id}))`;
+    // $executeRaw, not $queryRaw: pg_advisory_xact_lock returns void and Prisma
+    // cannot deserialize void columns (fails in production, mocks hide it).
+    for (const id of ids) await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('telegram-first-signal'), hashtext(${id}))`;
     const listings = await tx.listing.findMany({ where: { id: { in: ids }, notificationMode: "LIVE", status: { notIn: ["IGNORED", "DUPLICATE"] } } });
     const byId = new Map(listings.map(row => [row.id, row]));
     const ordered = [...new Set(listingIds)].map(id => byId.get(id)).filter((row): row is NonNullable<typeof row> => !!row);

@@ -4,13 +4,15 @@ const state = vi.hoisted(() => ({
   listings: [] as Array<Record<string, unknown>>,
   receipts: [] as Array<Record<string, unknown>>,
   bundles: [] as Array<Record<string, unknown>>,
+  locks: [] as Array<unknown>,
   enqueue: vi.fn(),
 }));
 vi.mock("../apps/worker/src/env.js", () => ({ env: { TELEGRAM_CHAT_ID: "owner", TELEGRAM_FLASH_BUNDLE_MAX_ITEMS: 20 } }));
 vi.mock("../apps/worker/src/lib/queues.js", () => ({ enqueue: state.enqueue }));
 vi.mock("../packages/db/src/index.js", () => {
   const tx = {
-    $queryRaw: vi.fn(async () => []),
+    $queryRaw: vi.fn(async () => { throw new Error("unexpected $queryRaw (void selects must use $executeRaw)"); }),
+    $executeRaw: vi.fn(async (query: unknown) => { state.locks.push(query); return 1; }),
     listing: { findMany: vi.fn(async () => state.listings) },
     telegramNotification: {
       createMany: vi.fn(async ({ data }: { data: Array<Record<string, unknown>> }) => {
@@ -45,7 +47,7 @@ function listings(count: number): TelegramListingSnapshot[] {
 }
 
 describe("durable first signals for every recipient", () => {
-  beforeEach(() => { state.listings = []; state.receipts = []; state.bundles = []; state.enqueue.mockReset().mockResolvedValue(undefined); });
+  beforeEach(() => { state.listings = []; state.receipts = []; state.bundles = []; state.locks = []; state.enqueue.mockReset().mockResolvedValue(undefined); });
 
   it.each([1, 2, 20, 21, 100])("covers all %i listings for both recipients before queue handoff", async count => {
     const rows = listings(count);
@@ -58,6 +60,12 @@ describe("durable first signals for every recipient", () => {
       expect(new Set(ids).size).toBe(count);
     }
     expect(state.enqueue).toHaveBeenCalledTimes(Math.ceil(count / 20) * 2);
+  });
+
+  it("takes advisory locks with executeRaw (queryRaw cannot deserialize void)", async () => {
+    state.listings = listings(2) as unknown as typeof state.listings;
+    await queueTelegramFirstSignals(["listing-0", "listing-1"], "batch");
+    expect(state.locks).toHaveLength(2);
   });
 
   it("keeps every recipient durable when one queue handoff fails, and retries without duplicate bundles", async () => {
