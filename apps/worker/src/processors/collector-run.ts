@@ -462,7 +462,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
         runId: run.id,
         scannedExternalIds: result.scannedExternalIds,
         coverageStateUpdate: result.coverageStateUpdate,
-        outageSchedule: scheduledOutageEvidence(job),
+        outageSchedule: scheduledOutageEvidence(job, startedAt),
       });
       if (stateUpdate.recoveryWindowId) {
         coverageMetrics.push({
@@ -726,7 +726,7 @@ export async function processCollectorRun(job: CollectorRunJob): Promise<void> {
   }
 }
 
-function scheduledOutageEvidence(job: CollectorRunJob) {
+function scheduledOutageEvidence(job: CollectorRunJob, startedAt: Date) {
   if (
     job.source !== "OLX"
     || job.lane !== "REALTIME"
@@ -740,6 +740,7 @@ function scheduledOutageEvidence(job: CollectorRunJob) {
   return {
     mode: job.cadenceMode,
     nextExpectedRunAt,
+    startedAt,
     jitterSeconds: Math.max(0, job.cadenceJitterSeconds ?? 0),
     schedulerToleranceSeconds: env.OLX_SCHEDULER_TOLERANCE_SECONDS,
   };

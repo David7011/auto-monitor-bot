@@ -206,6 +206,21 @@ describe("source search plan", () => {
     expect(contextForCoverageRecovery(context, state, "BACKFILL").publishedAfter).toEqual(outageCutoff);
   });
 
+  it.each([11, 20, 30])("does not open recovery for an on-time scan taking %i seconds", (durationSeconds) => {
+    const boundary = new Date("2026-10-13T05:00:30.000Z");
+    const expected = new Date("2026-10-13T05:00:49.509Z");
+    const startedAt = new Date("2026-10-13T05:00:49.529Z");
+    const plan = planCoverageRecovery({
+      source: "OLX", lane: "REALTIME",
+      now: new Date(startedAt.getTime() + durationSeconds * 1_000),
+      lastSuccessfulScanAt: boundary, currentPending: false,
+      coverageGap: false, knownIdsReset: false,
+      outageSchedule: { mode: "LIVE", nextExpectedRunAt: expected, startedAt, jitterSeconds: 4, schedulerToleranceSeconds: 5 },
+      lookbackHours: 24, safetyOverlapSeconds: 300,
+    });
+    expect(plan).toMatchObject({ outageDetected: false, requested: false, reason: null });
+  });
+
   it("opens an offline window from the persisted pre-shutdown boundary with a safety overlap", () => {
     const boundary = new Date("2026-09-01T01:00:00.000Z");
     const plan = planCoverageRecovery({
@@ -216,7 +231,7 @@ describe("source search plan", () => {
       currentPending: false,
       coverageGap: false,
       knownIdsReset: false,
-      outageSchedule: outageScheduleAfter(boundary, 120, 20),
+      outageSchedule: outageScheduleAfter(boundary, 120, 20, new Date("2026-09-01T10:00:00.000Z")),
       lookbackHours: 24,
       safetyOverlapSeconds: 300,
     });
@@ -228,6 +243,32 @@ describe("source search plan", () => {
       persistedBoundaryAt: boundary,
       requiredCutoffAt: new Date("2026-09-01T00:55:00.000Z"),
     });
+  });
+
+  it("preserves a pending window during an on-time slow realtime scan", () => {
+    const boundary = new Date("2026-09-01T09:59:30.000Z");
+    const startedAt = new Date("2026-09-01T09:59:50.000Z");
+    const cutoff = new Date("2026-09-01T08:00:00.000Z");
+    const plan = planCoverageRecovery({
+      source: "OLX", lane: "REALTIME", now: new Date("2026-09-01T10:00:20.000Z"),
+      lastSuccessfulScanAt: boundary, currentPending: true, currentCutoffAt: cutoff,
+      coverageGap: false, knownIdsReset: false,
+      outageSchedule: outageScheduleAfter(boundary, 20, 4, startedAt),
+      lookbackHours: 24, safetyOverlapSeconds: 300,
+    });
+    expect(plan).toMatchObject({ outageDetected: false, requested: true, reason: null, requiredCutoffAt: cutoff });
+  });
+
+  it("detects a late start even when collection finishes in one second", () => {
+    const boundary = new Date("2026-09-01T09:59:00.000Z");
+    const startedAt = new Date("2026-09-01T10:00:00.000Z");
+    expect(planCoverageRecovery({
+      source: "OLX", lane: "REALTIME", now: new Date(startedAt.getTime() + 1_000),
+      lastSuccessfulScanAt: boundary, currentPending: false, coverageGap: false, knownIdsReset: false,
+      outageSchedule: outageScheduleAfter(boundary, 20, 4, startedAt),
+      lookbackHours: 24, safetyOverlapSeconds: 300,
+    })).toMatchObject({ outageDetected: true, requested: true, reason: "OFFLINE_WINDOW",
+      requiredCutoffAt: new Date("2026-09-01T09:54:00.000Z") });
   });
 
   it.each([
@@ -245,7 +286,7 @@ describe("source search plan", () => {
       currentPending: false,
       coverageGap: false,
       knownIdsReset: false,
-      outageSchedule: outageScheduleAfter(boundary, 120, 20),
+      outageSchedule: outageScheduleAfter(boundary, 120, 20, now),
       lookbackHours: 24,
       safetyOverlapSeconds: 300,
     });
@@ -275,7 +316,7 @@ describe("source search plan", () => {
       currentPending: false,
       coverageGap: false,
       knownIdsReset: false,
-      outageSchedule: outageScheduleAfter(new Date("2026-08-29T10:00:00.000Z"), 120, 20),
+      outageSchedule: outageScheduleAfter(new Date("2026-08-29T10:00:00.000Z"), 120, 20, now),
       lookbackHours: 24,
       safetyOverlapSeconds: 300,
     });
@@ -345,9 +386,10 @@ describe("source search plan", () => {
   });
 });
 
-function outageScheduleAfter(boundary: Date, intervalSeconds: number, jitterSeconds: number) {
+function outageScheduleAfter(boundary: Date, intervalSeconds: number, jitterSeconds: number, startedAt: Date) {
   return {
     mode: "STANDARD" as const,
+    startedAt,
     nextExpectedRunAt: new Date(boundary.getTime() + intervalSeconds * 1_000),
     jitterSeconds,
     schedulerToleranceSeconds: 5,

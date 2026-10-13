@@ -14,11 +14,11 @@ function decision(input: {
   return detectOlxScheduledOutage({
     source: "OLX",
     lane: "REALTIME",
-    now: new Date(lastSuccess.getTime() + input.actualAfterSeconds * 1_000),
     lastSuccessfulScanAt: lastSuccess,
     schedule: {
       mode: input.mode,
       nextExpectedRunAt: new Date(lastSuccess.getTime() + input.expectedAfterSeconds * 1_000),
+      startedAt: new Date(lastSuccess.getTime() + input.actualAfterSeconds * 1_000),
       jitterSeconds: input.jitterSeconds,
       schedulerToleranceSeconds: input.toleranceSeconds ?? 5,
     },
@@ -58,7 +58,19 @@ describe("OLX deadline-relative outage detection", () => {
 
   it("does not invent an outage without valid persisted scheduling evidence", () => {
     expect(detectOlxScheduledOutage({
-      source: "OLX", lane: "REALTIME", now: new Date(lastSuccess.getTime() + 86_400_000), lastSuccessfulScanAt: lastSuccess,
+      source: "OLX", lane: "REALTIME", lastSuccessfulScanAt: lastSuccess,
     })).toEqual({ outageDetected: false, deadlineAt: null, reason: "no scheduler deadline evidence is available" });
+  });
+
+  it("does not substitute completion time for missing or invalid start evidence", () => {
+    for (const startedAt of [undefined, new Date(Number.NaN)]) {
+      expect(detectOlxScheduledOutage({
+        source: "OLX", lane: "REALTIME", lastSuccessfulScanAt: lastSuccess,
+        schedule: {
+          mode: "LIVE", nextExpectedRunAt: new Date(lastSuccess.getTime() + 20_000),
+          startedAt: startedAt as Date, jitterSeconds: 4, schedulerToleranceSeconds: 5,
+        },
+      })).toMatchObject({ outageDetected: false, deadlineAt: null });
+    }
   });
 });

@@ -3,6 +3,8 @@ import type { EffectiveCadenceMode, ListingDiscoveryLane } from "@amb/shared";
 export type OlxOutageSchedule = {
   mode: EffectiveCadenceMode;
   nextExpectedRunAt: Date;
+  /** Actual collector run start, captured before collection, never completion time. */
+  startedAt: Date;
   jitterSeconds: number;
   schedulerToleranceSeconds: number;
 };
@@ -21,7 +23,6 @@ export type OlxOutageDecision = {
 export function detectOlxScheduledOutage(input: {
   source: string;
   lane: ListingDiscoveryLane;
-  now: Date;
   lastSuccessfulScanAt?: Date;
   schedule?: OlxOutageSchedule;
 }): OlxOutageDecision {
@@ -34,6 +35,9 @@ export function detectOlxScheduledOutage(input: {
   if (!input.schedule || !Number.isFinite(input.schedule.nextExpectedRunAt.getTime())) {
     return noOutage("no scheduler deadline evidence is available");
   }
+  if (!input.schedule.startedAt || !Number.isFinite(input.schedule.startedAt.getTime())) {
+    return noOutage("no valid collector start evidence is available");
+  }
   if (input.schedule.nextExpectedRunAt <= input.lastSuccessfulScanAt) {
     return noOutage("scheduler deadline does not follow the durable success boundary");
   }
@@ -44,9 +48,9 @@ export function detectOlxScheduledOutage(input: {
   ) * 1_000;
   const deadlineAt = new Date(input.schedule.nextExpectedRunAt.getTime() + graceMs);
   return {
-    outageDetected: input.now > deadlineAt,
+    outageDetected: input.schedule.startedAt > deadlineAt,
     deadlineAt,
-    reason: input.now > deadlineAt
+    reason: input.schedule.startedAt > deadlineAt
       ? `${input.schedule.mode} expected run missed beyond jitter and scheduler tolerance`
       : `${input.schedule.mode} run remains within its scheduler deadline`,
   };

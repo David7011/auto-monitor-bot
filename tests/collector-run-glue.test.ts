@@ -244,6 +244,24 @@ describe("collector.run glue preflight invariants", () => {
     mocks.realtimeHotHandoffEnabled.mockReturnValue(false);
   });
 
+  it("passes the actual run start to outage detection after a slow successful scan", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-10-13T05:00:49.529Z");
+    vi.setSystemTime(startedAt);
+    try {
+      mocks.getCollector.mockReturnValueOnce({ collect: vi.fn().mockImplementation(async () => {
+        vi.setSystemTime(new Date(startedAt.getTime() + 30_000));
+        return { listings: [listing], requestCount: 1, pageCount: 1 };
+      }) });
+      await processCollectorRun({ source: "OLX", lane: "REALTIME", trigger: "SCHEDULED",
+        expectedRunAt: "2026-10-13T05:00:49.509Z", cadenceMode: "LIVE", cadenceJitterSeconds: 4 });
+      expect(mocks.markSourceSearchSuccess).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.anything(),
+        expect.objectContaining({ outageSchedule: expect.objectContaining({ startedAt }) }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a missing collector and stops before planning or locking", async () => {
     mocks.getCollector.mockReturnValueOnce(undefined);
 

@@ -54,7 +54,6 @@ export function planCoverageRecovery(options: {
   const outageDetected = detectOlxScheduledOutage({
     source: options.source,
     lane: options.lane,
-    now: options.now,
     lastSuccessfulScanAt: options.lastSuccessfulScanAt,
     schedule: options.outageSchedule,
   }).outageDetected;
